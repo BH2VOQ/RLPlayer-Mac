@@ -550,8 +550,22 @@ static void RLPPostPlaybackAction(NSString *path, NSString * _Nullable body) {
                               [path hasPrefix:@"/api/lib/play"] ||
                               [path hasPrefix:@"/api/skip"];
     const uint64_t epoch = RLPBeginPlaybackActionInternal(isPlayOrSkip);
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] postJSON:path body:body ?: @"" completion:^(NSDictionary * _Nullable json) {
         if (epoch != RLPPlaybackActionEpoch()) return;
+        const BOOL ok = [json isKindOfClass:[NSDictionary class]] &&
+                        ![json[@"ok"] isEqual:@NO] &&
+                        (!json[@"ok"] || [json[@"ok"] boolValue]);
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            const NSInteger st = ([json isKindOfClass:[NSDictionary class]] &&
+                                  [json[@"status"] respondsToSelector:@selector(integerValue)])
+                               ? [json[@"status"] integerValue] : (json ? 400 : 500);
+            NSString *code = ([json isKindOfClass:[NSDictionary class]] &&
+                              [json[@"code"] isKindOfClass:[NSString class]])
+                           ? (NSString *)json[@"code"] : (json ? @"playback_failed" : @"empty_response");
+            RLPDiagEvent(@"error", @"api_fail", nil, path, st, durMs, code);
+        }
         if (isPlayOrSkip) {
             RLPHandlePlaybackActionResponse(json, @"播放失败");
         }
@@ -601,11 +615,14 @@ void RLPPlayAlbum(NSString *albumKey, NSInteger startIndex) {
 void RLPEnqueuePath(NSString *path) {
     if (!path.length) return;
     NSString *body = [NSString stringWithFormat:@"file=%@", RLPEnc(path)];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] postJSON:@"/api/add" body:body completion:^(NSDictionary * _Nullable json) {
         if (json && [json[@"ok"] boolValue]) {
             RLPToast(RLPTr(@"已加入队列"));
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", nil, @"/api/add", json ? 400 : 500, durMs, @"enqueue_failed");
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入队列失败");
             RLPToast(err);
         }
@@ -636,11 +653,14 @@ void RLPEnqueuePathCue(NSString *path, double cs, double ce) {
     if (!path.length) return;
     NSMutableString *body = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(path)];
     RLPAppendCueQuery(body, cs, ce);
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] postJSON:@"/api/add" body:body completion:^(NSDictionary * _Nullable json) {
         if (json && [json[@"ok"] boolValue]) {
             RLPToast(RLPTr(@"已加入队列"));
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", nil, @"/api/add", json ? 400 : 500, durMs, @"enqueue_failed");
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"加入队列失败");
             RLPToast(err);
         }
@@ -648,6 +668,7 @@ void RLPEnqueuePathCue(NSString *path, double cs, double ce) {
 }
 
 static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), void (^ _Nullable then)(void)) {
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] getJSON:@"/api/playmode" completion:^(NSDictionary * _Nullable modeJson) {
         if (shouldContinue && !shouldContinue()) return;
         const BOOL getOk = [modeJson isKindOfClass:[NSDictionary class]] &&
@@ -655,6 +676,8 @@ static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), v
                            [modeJson[@"ok"] boolValue] &&
                            [modeJson[@"mode"] respondsToSelector:@selector(integerValue)];
         if (!getOk) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", nil, @"/api/playmode", modeJson ? 400 : 500, durMs, @"playmode_read_failed");
             NSString *rawErr = ([modeJson isKindOfClass:[NSDictionary class]] &&
                                 [modeJson[@"error"] isKindOfClass:[NSString class]])
                              ? (NSString *)modeJson[@"error"] : nil;
@@ -664,6 +687,7 @@ static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), v
         }
         const NSInteger mode = [modeJson[@"mode"] integerValue];
         if (mode == 2) {
+            const NSTimeInterval t1 = [NSProcessInfo processInfo].systemUptime;
             [[RLPCoreClient shared] postJSON:@"/api/playmode?mode=1" body:nil
                                   completion:^(NSDictionary * _Nullable postJson) {
                 if (shouldContinue && !shouldContinue()) return;
@@ -671,6 +695,8 @@ static void RLPEnsureSequentialModeIf(BOOL (^ _Nullable shouldContinue)(void), v
                                     [postJson[@"ok"] respondsToSelector:@selector(boolValue)] &&
                                     [postJson[@"ok"] boolValue];
                 if (!postOk) {
+                    const double durMs2 = ([NSProcessInfo processInfo].systemUptime - t1) * 1000.0;
+                    RLPDiagEvent(@"error", @"api_fail", nil, @"/api/playmode", postJson ? 400 : 500, durMs2, @"playmode_set_failed");
                     NSString *rawErr = ([postJson isKindOfClass:[NSDictionary class]] &&
                                         [postJson[@"error"] isKindOfClass:[NSString class]])
                                      ? (NSString *)postJson[@"error"] : nil;
@@ -691,10 +717,13 @@ static void RLPSetQueueAndPlay(NSArray<NSString *> *clean, NSInteger i, uint64_t
     if (epoch != RLPPlaybackActionEpoch()) return;
     NSString *body = [NSString stringWithFormat:@"files=%@",
                       RLPEnc([clean componentsJoinedByString:@"\n"])];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] postJSON:@"/api/queue/set" body:body
                           completion:^(NSDictionary * _Nullable j) {
         if (epoch != RLPPlaybackActionEpoch()) return;
         if (!j || [j[@"ok"] boolValue] == NO) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", nil, @"/api/queue/set", j ? 400 : 500, durMs, @"queue_set_failed");
             NSString *err = [j[@"error"] isKindOfClass:[NSString class]] ? j[@"error"] : RLPTr(@"建立队列失败");
             RLPToast(err);
             return;
@@ -950,4 +979,215 @@ BOOL RLPTextFieldIsEditing(NSTextField * _Nullable tf) {
     if (!tf || !tf.window) return NO;
     NSText *fe = tf.currentEditor;
     return (fe != nil && tf.window.firstResponder == fe);
+}
+
+#pragma mark - 原生诊断遥测（/api/ui/events）
+
+static NSString *RLPSanitizeTelemetryToken(NSString * _Nullable raw, BOOL allowColon) {
+    if (![raw isKindOfClass:[NSString class]] || !raw.length) return @"";
+    NSString *trimmed = [raw stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!trimmed.length || trimmed.length > 64) return @"";
+    NSString *lower = trimmed.lowercaseString;
+    for (NSString *bad in @[ @"/users/", @"/volumes/", @"/tmp/", @"/var/", @"/private/",
+                             @"file:", @"http:", @"https:", @"bearer", @"token",
+                             @"password", @"passwd", @"secret", @"apikey", @"sk-", @"tvly-",
+                             @"key=", @"?", @"\\", @"/", @"~", @"@", @"=" ]) {
+        if ([lower rangeOfString:bad].location != NSNotFound) return @"";
+    }
+    NSMutableString *out = [NSMutableString stringWithCapacity:trimmed.length];
+    for (NSUInteger i = 0; i < trimmed.length; ++i) {
+        const unichar c = [trimmed characterAtIndex:i];
+        const BOOL ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+                        (allowColon && c == ':');
+        if (!ok) return @"";
+        [out appendFormat:@"%C", c];
+    }
+    return out;
+}
+
+static NSString *RLPSanitizeTelemetryPath(NSString * _Nullable raw) {
+    if (![raw isKindOfClass:[NSString class]] || !raw.length) return @"";
+    NSString *s = [raw stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!s.length) return @"";
+    if ([s hasPrefix:@"http://"] || [s hasPrefix:@"https://"]) {
+        NSURL *u = [NSURL URLWithString:s];
+        s = u.path ?: @"";
+    }
+    NSRange q = [s rangeOfString:@"?"];
+    if (q.location != NSNotFound) s = [s substringToIndex:q.location];
+    NSRange frag = [s rangeOfString:@"#"];
+    if (frag.location != NSNotFound) s = [s substringToIndex:frag.location];
+    if (![s hasPrefix:@"/api/"] && ![s isEqualToString:@"/api"]) return @"";
+    if ([s rangeOfString:@".."].location != NSNotFound) return @"";
+    NSMutableString *out = [NSMutableString stringWithCapacity:MIN(s.length, (NSUInteger)128)];
+    for (NSUInteger i = 0; i < s.length && out.length < 128; ++i) {
+        const unichar c = [s characterAtIndex:i];
+        const BOOL ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '/' || c == '_' || c == '-' || c == '.';
+        if (!ok) return @"";
+        [out appendFormat:@"%C", c];
+    }
+    return out;
+}
+
+typedef struct {
+    dispatch_queue_t queue;
+    NSMutableArray<NSDictionary *> *pending;
+    NSMutableDictionary<NSString *, NSNumber *> *lastEventAt;
+    NSMutableArray<NSNumber *> *recentTimes;
+    BOOL flushScheduled;
+    BOOL inFlight;
+    uint64_t inFlightToken;
+} RLPDiagTelemetryState;
+
+static RLPDiagTelemetryState *RLPDiagState(void) {
+    static RLPDiagTelemetryState s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s.queue = dispatch_queue_create("rlplayer.native.diagtelemetry", DISPATCH_QUEUE_SERIAL);
+        s.pending = [NSMutableArray array];
+        s.lastEventAt = [NSMutableDictionary dictionary];
+        s.recentTimes = [NSMutableArray array];
+        s.flushScheduled = NO;
+        s.inFlight = NO;
+        s.inFlightToken = 0;
+    });
+    return &s;
+}
+
+static void RLPDiagFlushLocked(RLPDiagTelemetryState *st);
+
+static void RLPDiagScheduleFlushLocked(RLPDiagTelemetryState *st, BOOL immediate) {
+    if (st->inFlight || st->pending.count == 0) return;
+    if (immediate) {
+        RLPDiagFlushLocked(st);
+        return;
+    }
+    if (st->flushScheduled) return;
+    st->flushScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_MSEC)),
+                   st->queue, ^{
+        st->flushScheduled = NO;
+        RLPDiagFlushLocked(st);
+    });
+}
+
+static void RLPDiagFlushLocked(RLPDiagTelemetryState *st) {
+    if (st->inFlight || st->pending.count == 0) return;
+    const NSUInteger take = MIN((NSUInteger)16, st->pending.count);
+    NSArray<NSDictionary *> *batch = [st->pending subarrayWithRange:NSMakeRange(0, take)];
+    [st->pending removeObjectsInRange:NSMakeRange(0, take)];
+    NSDictionary *payload = @{ @"events": batch };
+    if (![NSJSONSerialization isValidJSONObject:payload]) {
+        if (st->pending.count > 0) RLPDiagScheduleFlushLocked(st, NO);
+        return;
+    }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    NSString *body = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    if (!body.length) {
+        if (st->pending.count > 0) RLPDiagScheduleFlushLocked(st, NO);
+        return;
+    }
+    st->inFlight = YES;
+    const uint64_t tok = ++st->inFlightToken;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                   st->queue, ^{
+        if (st->inFlight && st->inFlightToken == tok) {
+            st->inFlight = NO;
+            if (st->pending.count > 0) RLPDiagScheduleFlushLocked(st, NO);
+        }
+    });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (![RLPCoreClient shared].started) {
+            dispatch_async(st->queue, ^{
+                if (st->inFlightToken == tok) {
+                    st->inFlight = NO;
+                    [st->pending removeAllObjects];
+                }
+            });
+            return;
+        }
+        [[RLPCoreClient shared] postJSON:@"/api/ui/events" body:body completion:^(NSDictionary * _Nullable json) {
+            (void)json;
+            dispatch_async(st->queue, ^{
+                if (st->inFlightToken != tok) return;
+                st->inFlight = NO;
+                if (st->pending.count > 0) RLPDiagScheduleFlushLocked(st, NO);
+            });
+        }];
+    });
+}
+
+void RLPDiagEvent(NSString * _Nullable kind,
+                  NSString * _Nullable name,
+                  NSString * _Nullable route,
+                  NSString * _Nullable path,
+                  NSInteger status,
+                  double dur,
+                  NSString * _Nullable code) {
+    NSString *evt = @"action";
+    if ([kind isEqualToString:@"nav"] || [kind isEqualToString:@"api"] ||
+        [kind isEqualToString:@"error"] || [kind isEqualToString:@"action"]) {
+        evt = kind;
+    }
+    NSString *safeName = RLPSanitizeTelemetryToken(name, NO);
+    if (!safeName.length) return;
+    NSString *safeRoute = RLPSanitizeTelemetryToken(route, YES);
+    NSString *safePath = RLPSanitizeTelemetryPath(path);
+    if ([safePath isEqualToString:@"/api/ui/events"]) return;
+    NSString *safeCode = RLPSanitizeTelemetryToken(code, NO);
+    const NSInteger safeStatus = (status > 0 && status < 1000) ? status : 0;
+
+    NSMutableDictionary *ev = [NSMutableDictionary dictionaryWithCapacity:7];
+    ev[@"evt"] = evt;
+    ev[@"name"] = safeName;
+    if (safeRoute.length) ev[@"route"] = safeRoute;
+    if (safePath.length) ev[@"path"] = safePath;
+    if (safeStatus > 0 || ([evt isEqualToString:@"error"] && safePath.length)) {
+        ev[@"status"] = @(safeStatus);
+    }
+    if (isfinite(dur) && dur >= 0.0) {
+        ev[@"dur"] = @((long long)llround(dur));
+    }
+    if (safeCode.length) ev[@"code"] = safeCode;
+
+    NSString *sig = [NSString stringWithFormat:@"%@|%@|%@|%@|%ld|%@",
+                     evt, safeName, safeRoute, safePath, (long)safeStatus, safeCode];
+    const BOOL isNoisyKind = [evt isEqualToString:@"api"] || [evt isEqualToString:@"error"];
+    const BOOL immediate = [safeName isEqualToString:@"diag_export"] ||
+                           [safeName isEqualToString:@"diag_json"] ||
+                           [safeName isEqualToString:@"diag_summary"] ||
+                           [safeName isEqualToString:@"fb_send"];
+    RLPDiagTelemetryState *st = RLPDiagState();
+    dispatch_async(st->queue, ^{
+        const NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+        const NSTimeInterval cooldown = isNoisyKind ? 5.0 : 0.05;
+        NSNumber *prev = st->lastEventAt[sig];
+        if (prev && (now - prev.doubleValue) < cooldown) return;
+        while (st->recentTimes.count > 0 && (now - st->recentTimes.firstObject.doubleValue) > 2.0) {
+            [st->recentTimes removeObjectAtIndex:0];
+        }
+        if (st->recentTimes.count >= 24) return;
+        if (st->lastEventAt.count > 128) [st->lastEventAt removeAllObjects];
+        st->lastEventAt[sig] = @(now);
+        [st->recentTimes addObject:@(now)];
+        if (st->pending.count >= 64) [st->pending removeObjectAtIndex:0];
+        [st->pending addObject:ev];
+        RLPDiagScheduleFlushLocked(st, immediate);
+    });
+}
+
+void RLPDiagTelemetryResetForAudit(void) {
+    RLPDiagTelemetryState *st = RLPDiagState();
+    dispatch_sync(st->queue, ^{
+        [st->pending removeAllObjects];
+        [st->lastEventAt removeAllObjects];
+        [st->recentTimes removeAllObjects];
+        st->flushScheduled = NO;
+        st->inFlight = NO;
+        ++st->inFlightToken;
+    });
 }

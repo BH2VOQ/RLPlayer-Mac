@@ -22,6 +22,70 @@ static NSString *const kABSlotsKey = @"RLPWorkbenchABSlots";
 static NSString *const kMonMasterKey = @"RLPWorkbenchMonitorEnabled";
 static const NSInteger kABSlotCount = 4;
 
+static NSString *RLPWorkbenchStatusPath(NSDictionary * _Nullable st) {
+    if (![st isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *key in @[@"current", @"currentPath", @"path", @"file"]) {
+        id v = st[key];
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
+            return (NSString *)v;
+        }
+    }
+    return @"";
+}
+
+static NSString *RLPWorkbenchStatusString(NSDictionary * _Nullable st, NSArray<NSString *> *keys) {
+    if (![st isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in keys) {
+        id v = st[k];
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
+            return (NSString *)v;
+        }
+    }
+    return @"";
+}
+
+@interface RLPWorkbenchCoverImageView : RLPCoverImageView
+@property (nonatomic, assign) BOOL showsPlaceholder;
+@end
+
+@implementation RLPWorkbenchCoverImageView
+- (NSSize)intrinsicContentSize { return NSZeroSize; }
+- (BOOL)wantsUpdateLayer { return NO; }
+- (void)setShowsPlaceholder:(BOOL)showsPlaceholder {
+    if (_showsPlaceholder == showsPlaceholder) return;
+    _showsPlaceholder = showsPlaceholder;
+    self.needsDisplay = YES;
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    if (self.showsPlaceholder) return;
+    [super drawRect:dirtyRect];
+}
+@end
+
+static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
+    id v = [settings isKindOfClass:[NSDictionary class]] ? settings[@"autoanl"] : nil;
+    if ([v isKindOfClass:[NSString class]]) {
+        NSString *sv = [(NSString *)v lowercaseString];
+        return ([sv isEqualToString:@"1"] || [sv isEqualToString:@"true"]);
+    }
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v boolValue];
+    return NO;
+}
+
+static NSString *RLPWorkbenchBiText(NSString *zh, NSString *en) {
+    NSString *tr = RLPTr(zh);
+    if (![tr isEqualToString:zh]) return tr;
+    return [[RLPLanguage() lowercaseString] hasPrefix:@"en"] ? en : zh;
+}
+
+static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
+    if (!pop) return;
+    if ([pop.cell isKindOfClass:[NSPopUpButtonCell class]]) {
+        ((NSPopUpButtonCell *)pop.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+    }
+    [pop setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+}
+
 @interface RLPWorkbenchViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSStackView *stack;
@@ -30,9 +94,26 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, strong) NSTextField *headerTitle;
 @property (nonatomic, strong) NSTextField *headerSubtitle;
 @property (nonatomic, strong) NSTextField *statusMessage;
-@property (nonatomic, strong) NSImageView *trackCover;
+@property (nonatomic, strong) RLPWorkbenchCoverImageView *trackCover;
+@property (nonatomic, strong) NSImageView *trackCoverPlaceholder;
+@property (nonatomic, strong) NSImage *trackCoverPlaceholderImage;
+@property (nonatomic, strong) NSLayoutConstraint *trackCoverWidthConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *trackCoverHeightConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *trackPlaceholderWidthConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *trackPlaceholderHeightConstraint;
+@property (nonatomic, copy, nullable) NSString *trackCoverKey;
+@property (nonatomic, assign) NSUInteger trackCoverSeq;
+@property (nonatomic, assign) BOOL trackCoverInFlight;
 @property (nonatomic, strong) NSTextField *trackTitle;
 @property (nonatomic, strong) NSTextField *trackSub;
+@property (nonatomic, strong) NSTextField *heroSpecLabel;
+@property (nonatomic, strong) NSButton *trackPlayBtn;
+@property (nonatomic, strong) NSStackView *topDeviceBar;
+@property (nonatomic, strong) NSTextField *topDeviceLabel;
+@property (nonatomic, strong) NSPopUpButton *topDevicePopup;
+@property (nonatomic, strong) NSButton *topDeviceRefreshBtn;
+@property (nonatomic, strong) NSView *chainCard;
+@property (nonatomic, strong) NSStackView *sigSummaryBox;
 @property (nonatomic, strong) NSTextField *sigSrc;
 @property (nonatomic, strong) NSTextField *sigDsp;
 @property (nonatomic, strong) NSTextField *sigOut;
@@ -81,8 +162,12 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, strong) NSButton *profileApplyButton;
 @property (nonatomic, strong) NSButton *profileDeleteButton;
 
-// 三列机架
+// 响应式机架（宽窗 3 列，中窄 2+1 列，极窄 1 列）
+@property (nonatomic, strong) NSStackView *rackHeaderRow;
 @property (nonatomic, strong) NSStackView *rackStack;
+@property (nonatomic, strong) NSStackView *rackRow1;
+@property (nonatomic, strong) NSStackView *rackRow2;
+@property (nonatomic, assign) NSInteger rackColumns;
 @property (nonatomic, strong) NSView *rackPCM;
 @property (nonatomic, strong) NSView *rackDSD;
 @property (nonatomic, strong) NSView *rackOutput;
@@ -202,6 +287,7 @@ static const NSInteger kABSlotCount = 4;
 @property (nonatomic, assign) NSUInteger filtersSeq;
 @property (nonatomic, assign) NSUInteger ratesSeq;
 @property (nonatomic, assign) NSUInteger devicesSeq;
+@property (nonatomic, assign) NSUInteger deviceWriteSeq;
 @property (nonatomic, assign) NSUInteger profilesSeq;
 @property (nonatomic, assign) NSUInteger signalSeq;
 @property (nonatomic, assign) NSUInteger peqReadSeq;
@@ -220,6 +306,9 @@ static const NSInteger kABSlotCount = 4;
 - (void)reloadStatus;
 - (void)reloadFilters;
 - (void)reloadDevices;
+- (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
+- (void)populateDevicePopups;
+- (void)syncDeviceSelectionOnly;
 - (void)reloadAll;
 - (void)refreshChain;
 - (void)refreshAB;
@@ -307,6 +396,7 @@ static const NSInteger kABSlotCount = 4;
     [self buildTabBar];
     [self buildPanels];
     [self selectStudioTab:@"ab"];
+    [self updateRackOrientation];
 
     self.view.postsFrameChangedNotifications = YES;
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -336,18 +426,61 @@ static const NSInteger kABSlotCount = 4;
     [self updateRackOrientation];
 }
 
+- (CGFloat)responsiveReferenceWidth {
+    const CGFloat viewW = self.view.bounds.size.width;
+    const CGFloat winW = self.view.window ? self.view.window.frame.size.width : 0.0;
+    return MAX(viewW, winW);
+}
+
 - (void)updateRackOrientation {
     const CGFloat w = self.view.bounds.size.width;
-    if (self.rackStack) {
-        const BOOL narrow = (w > 1.0 && w < 900.0);
-        NSUserInterfaceLayoutOrientation want = narrow
-            ? NSUserInterfaceLayoutOrientationVertical
-            : NSUserInterfaceLayoutOrientationHorizontal;
-        if (self.rackStack.orientation != want) {
-            self.rackStack.orientation = want;
-            self.rackStack.distribution = narrow ? NSStackViewDistributionFill : NSStackViewDistributionFillEqually;
-            self.rackStack.alignment = narrow ? NSLayoutAttributeLeading : NSLayoutAttributeTop;
-            for (NSLayoutConstraint *c in self.rackWidthConstraints) c.active = narrow;
+    const CGFloat refW = [self responsiveReferenceWidth];
+    const CGFloat coverSide = (refW >= 1140.0) ? 116.0 : 96.0;
+    const CGFloat phSide = (refW >= 1140.0) ? 40.0 : 34.0;
+    if (self.trackCoverWidthConstraint && self.trackCoverWidthConstraint.constant != coverSide) {
+        self.trackCoverWidthConstraint.constant = coverSide;
+        self.trackCoverHeightConstraint.constant = coverSide;
+    }
+    if (self.trackPlaceholderWidthConstraint && self.trackPlaceholderWidthConstraint.constant != phSide) {
+        self.trackPlaceholderWidthConstraint.constant = phSide;
+        self.trackPlaceholderHeightConstraint.constant = phSide;
+    }
+
+    if (self.rackStack && self.rackRow1 && self.rackRow2 && self.rackPCM && self.rackDSD && self.rackOutput) {
+        NSInteger wantCols = 3;
+        if (w > 1.0 && w < 620.0) wantCols = 1;
+        else if (w > 1.0 && w < 940.0) wantCols = 2;
+        if (wantCols != self.rackColumns) {
+            self.rackColumns = wantCols;
+            for (NSView *col in @[self.rackPCM, self.rackDSD, self.rackOutput]) [col removeFromSuperview];
+            if (wantCols == 1) {
+                self.rackRow1.orientation = NSUserInterfaceLayoutOrientationVertical;
+                self.rackRow1.distribution = NSStackViewDistributionFill;
+                self.rackRow1.alignment = NSLayoutAttributeLeading;
+                [self.rackRow1 addArrangedSubview:self.rackPCM];
+                [self.rackRow1 addArrangedSubview:self.rackDSD];
+                [self.rackRow1 addArrangedSubview:self.rackOutput];
+                self.rackRow2.hidden = YES;
+                for (NSLayoutConstraint *c in self.rackWidthConstraints) c.active = YES;
+            } else if (wantCols == 2) {
+                self.rackRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+                self.rackRow1.distribution = NSStackViewDistributionFillEqually;
+                self.rackRow1.alignment = NSLayoutAttributeTop;
+                [self.rackRow1 addArrangedSubview:self.rackPCM];
+                [self.rackRow1 addArrangedSubview:self.rackDSD];
+                [self.rackRow2 addArrangedSubview:self.rackOutput];
+                self.rackRow2.hidden = NO;
+                for (NSLayoutConstraint *c in self.rackWidthConstraints) c.active = NO;
+            } else {
+                self.rackRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+                self.rackRow1.distribution = NSStackViewDistributionFillEqually;
+                self.rackRow1.alignment = NSLayoutAttributeTop;
+                [self.rackRow1 addArrangedSubview:self.rackPCM];
+                [self.rackRow1 addArrangedSubview:self.rackDSD];
+                [self.rackRow1 addArrangedSubview:self.rackOutput];
+                self.rackRow2.hidden = YES;
+                for (NSLayoutConstraint *c in self.rackWidthConstraints) c.active = NO;
+            }
         }
     }
     if (self.chainRow && self.chainRow2 && self.chainNodeList.count == 7) {
@@ -366,7 +499,7 @@ static const NSInteger kABSlotCount = 4;
         }
     }
     if (self.abRow1 && self.abRow2 && self.abSlotCards.count == 4) {
-        const BOOL compact = (w > 1.0 && w < 760.0);
+        const BOOL compact = (w > 1.0 && w < 860.0);
         if (compact != self.abCompact) {
             self.abCompact = compact;
             for (NSView *c in self.abSlotCards) {
@@ -391,7 +524,7 @@ static const NSInteger kABSlotCount = 4;
     [self updateRackOrientation];
 }
 
-#pragma mark - 顶部：标题 + 曲目 + 三摘要信号链 + 7 节点明细
+#pragma mark - 顶部：标题 + 独立 Hero 卡（大封面/曲目/规格/设备切换）+ 独立信号链卡
 
 - (void)buildHeader {
     RLPTheme *t = [RLPTheme current];
@@ -405,17 +538,26 @@ static const NSInteger kABSlotCount = 4;
     left.orientation = NSUserInterfaceLayoutOrientationVertical;
     left.alignment = NSLayoutAttributeLeading;
     left.spacing = 3;
+    [left setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.headerTitle = RLPLabel(RLPTr(@"数字音乐台"), t.display, t.hero);
     self.headerTitle.tag = 0;
+    self.headerTitle.maximumNumberOfLines = 1;
+    self.headerTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.headerTitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.headerSubtitle = RLPLabel(RLPTr(@"微调每一组声音，随时对比同一片段"), t.body, t.mut);
     self.headerSubtitle.tag = 1;
+    self.headerSubtitle.maximumNumberOfLines = 1;
+    self.headerSubtitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.headerSubtitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [left addArrangedSubview:self.headerTitle];
     [left addArrangedSubview:self.headerSubtitle];
 
     self.statusMessage = RLPLabel(@"", t.small, t.mut);
     self.statusMessage.identifier = @"wb.message";
     self.statusMessage.alignment = NSTextAlignmentRight;
+    self.statusMessage.maximumNumberOfLines = 1;
     self.statusMessage.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.statusMessage setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [row addArrangedSubview:left];
     [row addArrangedSubview:[[NSView alloc] init]];
     [row addArrangedSubview:self.statusMessage];
@@ -432,58 +574,105 @@ static const NSInteger kABSlotCount = 4;
 
 - (void)buildTrackAndSignalHeader {
     RLPTheme *t = [RLPTheme current];
+
+    // 1) 顶部 Hero 卡：96–116pt 大封面 + 右侧（标题/艺术家/规格/详情/播放 + 显眼输出设备切换条）
     NSView *card = [self cardWithIdentifier:@"wb.trackcard"];
+    card.layer.cornerRadius = t.rLg;
     card.layer.backgroundColor = t.card.CGColor;
     card.layer.borderColor = t.hairline.CGColor;
+    [card.heightAnchor constraintGreaterThanOrEqualToConstant:124].active = YES;
 
-    NSStackView *inner = [[NSStackView alloc] init];
-    inner.orientation = NSUserInterfaceLayoutOrientationVertical;
-    inner.alignment = NSLayoutAttributeLeading;
-    inner.spacing = 10;
-    inner.edgeInsets = NSEdgeInsetsMake(14, 16, 14, 16);
-    inner.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:inner];
+    NSStackView *heroRow = [[NSStackView alloc] init];
+    heroRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    heroRow.alignment = NSLayoutAttributeCenterY;
+    heroRow.spacing = 16;
+    heroRow.edgeInsets = NSEdgeInsetsMake(16, 18, 16, 18);
+    heroRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:heroRow];
     [NSLayoutConstraint activateConstraints:@[
-        [inner.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
-        [inner.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
-        [inner.topAnchor constraintEqualToAnchor:card.topAnchor],
-        [inner.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        [heroRow.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [heroRow.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+        [heroRow.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [heroRow.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
     ]];
 
-    // 当前曲目行
+    self.trackCover = [[RLPWorkbenchCoverImageView alloc] initWithFrame:NSZeroRect];
+    self.trackCover.identifier = @"wb.trackcover";
+    self.trackCover.translatesAutoresizingMaskIntoConstraints = NO;
+    self.trackCover.wantsLayer = YES;
+    self.trackCover.layer.cornerRadius = t.rMd;
+    self.trackCover.layer.masksToBounds = YES;
+    self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+    self.trackCover.layer.borderWidth = 1.0;
+    self.trackCover.layer.borderColor = t.line.CGColor;
+    self.trackCoverPlaceholderImage = [NSImage imageWithSystemSymbolName:@"music.note"
+                                                  accessibilityDescription:RLPTr(@"封面")];
+    self.trackCover.imageScaling = NSImageScaleProportionallyDown;
+    self.trackCover.showsPlaceholder = YES;
+    self.trackCover.image = self.trackCoverPlaceholderImage;
+    self.trackCover.contentTintColor = t.mut;
+    [self.trackCover setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.trackCover setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+    [self.trackCover setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.trackCover setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+
+    self.trackCoverPlaceholder = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.trackCoverPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+    self.trackCoverPlaceholder.imageScaling = NSImageScaleProportionallyDown;
+    self.trackCoverPlaceholder.image = self.trackCoverPlaceholderImage;
+    self.trackCoverPlaceholder.contentTintColor = t.mut;
+    [self.trackCover addSubview:self.trackCoverPlaceholder];
+    self.trackCoverWidthConstraint = [self.trackCover.widthAnchor constraintEqualToConstant:96];
+    self.trackCoverHeightConstraint = [self.trackCover.heightAnchor constraintEqualToConstant:96];
+    self.trackPlaceholderWidthConstraint = [self.trackCoverPlaceholder.widthAnchor constraintEqualToConstant:34];
+    self.trackPlaceholderHeightConstraint = [self.trackCoverPlaceholder.heightAnchor constraintEqualToConstant:34];
+    [NSLayoutConstraint activateConstraints:@[
+        self.trackCoverWidthConstraint,
+        self.trackCoverHeightConstraint,
+        [self.trackCoverPlaceholder.centerXAnchor constraintEqualToAnchor:self.trackCover.centerXAnchor],
+        [self.trackCoverPlaceholder.centerYAnchor constraintEqualToAnchor:self.trackCover.centerYAnchor],
+        self.trackPlaceholderWidthConstraint,
+        self.trackPlaceholderHeightConstraint,
+    ]];
+
+    NSStackView *rightCol = [[NSStackView alloc] init];
+    rightCol.orientation = NSUserInterfaceLayoutOrientationVertical;
+    rightCol.alignment = NSLayoutAttributeLeading;
+    rightCol.spacing = 10;
+    [rightCol setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [rightCol setContentHuggingPriority:100 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
     NSStackView *topRow = [[NSStackView alloc] init];
     topRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     topRow.alignment = NSLayoutAttributeCenterY;
     topRow.spacing = 12;
-
-    self.trackCover = [[NSImageView alloc] initWithFrame:NSZeroRect];
-    self.trackCover.wantsLayer = YES;
-    self.trackCover.layer.cornerRadius = t.rSm;
-    self.trackCover.layer.masksToBounds = YES;
-    self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
-    self.trackCover.imageScaling = NSImageScaleProportionallyDown;
-    self.trackCover.image = [NSImage imageWithSystemSymbolName:@"music.note" accessibilityDescription:RLPTr(@"封面")];
-    self.trackCover.contentTintColor = t.mut;
-    [self.trackCover.widthAnchor constraintEqualToConstant:56].active = YES;
-    [self.trackCover.heightAnchor constraintEqualToConstant:56].active = YES;
+    [topRow setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     NSStackView *metaCol = [[NSStackView alloc] init];
     metaCol.orientation = NSUserInterfaceLayoutOrientationVertical;
     metaCol.alignment = NSLayoutAttributeLeading;
     metaCol.spacing = 3;
+    [metaCol setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.trackTitle = RLPLabel(RLPTr(@"还没有在播放的音乐"), t.heading, t.hero);
     self.trackTitle.tag = 0;
     self.trackTitle.maximumNumberOfLines = 1;
     self.trackTitle.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.trackTitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-    self.trackSub = RLPLabel(RLPTr(@"挑一张专辑开始聆听"), t.small, t.mut);
+    self.trackSub = RLPLabel(RLPTr(@"挑一张专辑开始聆听"), t.body, t.mut);
     self.trackSub.tag = 1;
     self.trackSub.maximumNumberOfLines = 1;
     self.trackSub.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.trackSub setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    self.heroSpecLabel = RLPLabel(@"—", t.small, t.text2);
+    self.heroSpecLabel.identifier = @"wb.trackspec";
+    self.heroSpecLabel.tag = 2;
+    self.heroSpecLabel.maximumNumberOfLines = 1;
+    self.heroSpecLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.heroSpecLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [metaCol addArrangedSubview:self.trackTitle];
     [metaCol addArrangedSubview:self.trackSub];
-    [self.headerLabels addObjectsFromArray:@[self.trackTitle, self.trackSub]];
+    [metaCol addArrangedSubview:self.heroSpecLabel];
+    [self.headerLabels addObjectsFromArray:@[self.trackTitle, self.trackSub, self.heroSpecLabel]];
 
     NSButton *playBtn = [NSButton buttonWithTitle:RLPTr(@"播放") target:self action:@selector(onTrackCardPlay:)];
     playBtn.bezelStyle = NSBezelStyleRounded;
@@ -492,34 +681,177 @@ static const NSInteger kABSlotCount = 4;
     playBtn.layer.cornerRadius = t.rSm;
     playBtn.contentTintColor = NSColor.whiteColor;
     playBtn.identifier = @"wb.trackplay";
+    self.trackPlayBtn = playBtn;
     [playBtn.widthAnchor constraintEqualToConstant:76].active = YES;
+    [playBtn setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [playBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     NSButton *detailBtn = [NSButton buttonWithTitle:RLPTr(@"本次播放路径…") target:self action:@selector(showSignalChainDetail:)];
     detailBtn.bezelStyle = NSBezelStyleRounded;
+    detailBtn.font = t.small;
     detailBtn.identifier = @"wb.chaindetail";
+    [detailBtn setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [detailBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    [topRow addArrangedSubview:self.trackCover];
+    NSView *metaSpacer = [[NSView alloc] init];
+    [metaSpacer setContentHuggingPriority:50 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [metaSpacer setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSStackView *actionsRow = [[NSStackView alloc] init];
+    actionsRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    actionsRow.alignment = NSLayoutAttributeCenterY;
+    actionsRow.spacing = 8;
+    [actionsRow setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [actionsRow setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [actionsRow addArrangedSubview:detailBtn];
+    [actionsRow addArrangedSubview:playBtn];
+
     [topRow addArrangedSubview:metaCol];
-    [topRow addArrangedSubview:[[NSView alloc] init]];
-    [topRow addArrangedSubview:detailBtn];
-    [topRow addArrangedSubview:playBtn];
-    [inner addArrangedSubview:topRow];
-    [topRow.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-32].active = YES;
+    [topRow addArrangedSubview:metaSpacer];
+    [topRow addArrangedSubview:actionsRow];
+    [rightCol addArrangedSubview:topRow];
+    [topRow.widthAnchor constraintEqualToAnchor:rightCol.widthAnchor].active = YES;
+
+    // 顶部显眼输出设备切换器留在 Hero 内，与输出规格卡的 devicePopup 共享同一状态
+    NSStackView *devBar = [[NSStackView alloc] init];
+    devBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    devBar.alignment = NSLayoutAttributeCenterY;
+    devBar.spacing = 8;
+    devBar.wantsLayer = YES;
+    devBar.layer.backgroundColor = t.cardAlt.CGColor;
+    devBar.layer.borderWidth = 1;
+    devBar.layer.borderColor = t.hairline.CGColor;
+    devBar.layer.cornerRadius = t.rSm;
+    devBar.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
+    devBar.identifier = @"wb.top.devicebar";
+    [devBar.heightAnchor constraintGreaterThanOrEqualToConstant:38].active = YES;
+    self.topDeviceBar = devBar;
+
+    self.topDeviceLabel = RLPLabel(RLPTr(@"输出设备"), [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.text);
+    self.topDeviceLabel.identifier = @"wb.top.devicelabel";
+    self.topDeviceLabel.tag = 0;
+    [self.topDeviceLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topDeviceLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.headerLabels addObject:self.topDeviceLabel];
+
+    self.topDevicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.topDevicePopup.identifier = @"wb.top.device";
+    self.topDevicePopup.target = self;
+    self.topDevicePopup.action = @selector(onDeviceChanged:);
+    self.topDevicePopup.font = t.small;
+    self.topDevicePopup.toolTip = RLPTr(@"输出设备");
+    RLPWorkbenchMakePopupTruncate(self.topDevicePopup);
+    [self.topDevicePopup setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSLayoutConstraint *topDevMinW = [self.topDevicePopup.widthAnchor constraintGreaterThanOrEqualToConstant:180];
+    topDevMinW.priority = NSLayoutPriorityDefaultHigh;
+    topDevMinW.active = YES;
+    NSLayoutConstraint *topDevMaxW = [self.topDevicePopup.widthAnchor constraintLessThanOrEqualToConstant:480];
+    topDevMaxW.priority = NSLayoutPriorityDefaultHigh;
+    topDevMaxW.active = YES;
+    [self.topDevicePopup.heightAnchor constraintGreaterThanOrEqualToConstant:28].active = YES;
+
+    self.topDeviceRefreshBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新列表"), self, @selector(onRefreshDevicesClicked:));
+    self.topDeviceRefreshBtn.identifier = @"wb.top.device.refresh";
+    self.topDeviceRefreshBtn.keyEquivalent = @"";
+    self.topDeviceRefreshBtn.refusesFirstResponder = YES;
+    self.topDeviceRefreshBtn.contentTintColor = t.text;
+    [self.topDeviceRefreshBtn.widthAnchor constraintEqualToConstant:24].active = YES;
+    [self.topDeviceRefreshBtn.heightAnchor constraintEqualToConstant:24].active = YES;
+    [self.topDeviceRefreshBtn setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topDeviceRefreshBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSView *devSpacer = [[NSView alloc] init];
+    [devSpacer setContentHuggingPriority:50 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [devSpacer setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [devBar addArrangedSubview:self.topDeviceLabel];
+    [devBar addArrangedSubview:self.topDevicePopup];
+    [devBar addArrangedSubview:self.topDeviceRefreshBtn];
+    [devBar addArrangedSubview:devSpacer];
+    [rightCol addArrangedSubview:devBar];
+    [devBar.widthAnchor constraintEqualToAnchor:rightCol.widthAnchor].active = YES;
+    [self populateDevicePopups];
+
+    [heroRow addArrangedSubview:self.trackCover];
+    [heroRow addArrangedSubview:rightCol];
+    [self addFullWidth:card toStack:self.stack height:0];
+
+    __weak __typeof__(self) weakDevSelf = self;
     [self.langUpdaters addObject:^{
+        __typeof__(self) s = weakDevSelf;
+        if (!s) return;
         playBtn.title = RLPTr(@"播放");
         detailBtn.title = RLPTr(@"本次播放路径…");
+        s.topDeviceLabel.stringValue = RLPTr(@"输出设备");
+        s.topDevicePopup.toolTip = RLPTr(@"输出设备");
+        s.topDeviceRefreshBtn.toolTip = RLPTr(@"刷新列表");
     }];
+
+    // 2) 独立信号链卡：标题 + 位准状态 + 三摘要（源/处理/输出）+ 7 节点交互链
+    NSView *chainCard = [self cardWithIdentifier:@"wb.chaincard"];
+    chainCard.layer.backgroundColor = t.bg2.CGColor;
+    chainCard.layer.borderColor = t.line.CGColor;
+    self.chainCard = chainCard;
+
+    NSStackView *inner = [[NSStackView alloc] init];
+    inner.orientation = NSUserInterfaceLayoutOrientationVertical;
+    inner.alignment = NSLayoutAttributeLeading;
+    inner.spacing = 10;
+    inner.detachesHiddenViews = YES;
+    inner.edgeInsets = NSEdgeInsetsMake(12, 16, 12, 16);
+    inner.translatesAutoresizingMaskIntoConstraints = NO;
+    [chainCard addSubview:inner];
+    [NSLayoutConstraint activateConstraints:@[
+        [inner.leadingAnchor constraintEqualToAnchor:chainCard.leadingAnchor],
+        [inner.trailingAnchor constraintEqualToAnchor:chainCard.trailingAnchor],
+        [inner.topAnchor constraintEqualToAnchor:chainCard.topAnchor],
+        [inner.bottomAnchor constraintEqualToAnchor:chainCard.bottomAnchor],
+    ]];
+
+    NSStackView *chainHead = [[NSStackView alloc] init];
+    chainHead.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    chainHead.alignment = NSLayoutAttributeCenterY;
+    chainHead.spacing = 8;
+    NSTextField *chainTitle = [self sectionTitle:RLPWorkbenchBiText(@"信号链", @"Signal Chain")];
+    chainTitle.tag = 0;
+    chainTitle.maximumNumberOfLines = 1;
+    chainTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [chainTitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSTextField *chainHint = RLPLabel(RLPWorkbenchBiText(@"点击节点可微调当前路径", @"Click any node to adjust"), t.caption, t.mut);
+    chainHint.tag = 1;
+    chainHint.maximumNumberOfLines = 1;
+    chainHint.lineBreakMode = NSLineBreakByTruncatingTail;
+    [chainHint setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.headerLabels addObjectsFromArray:@[chainTitle, chainHint]];
+    [chainHead addArrangedSubview:chainTitle];
+    [chainHead addArrangedSubview:[[NSView alloc] init]];
+    [chainHead addArrangedSubview:chainHint];
+    [inner addArrangedSubview:chainHead];
+    [chainHead.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-32].active = YES;
+    [self.langUpdaters addObject:^{
+        chainTitle.stringValue = RLPWorkbenchBiText(@"信号链", @"Signal Chain");
+        chainHint.stringValue = RLPWorkbenchBiText(@"点击节点可微调当前路径", @"Click any node to adjust");
+    }];
+
+    self.bpLine = RLPLabel(@"", t.small, t.mut);
+    self.bpLine.maximumNumberOfLines = 2;
+    self.bpLine.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.bpLine setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [inner addArrangedSubview:self.bpLine];
+    [self.bpLine.widthAnchor constraintLessThanOrEqualToAnchor:inner.widthAnchor constant:-32].active = YES;
 
     // 三摘要信号节点（源文件 / 声音处理 / 设备输出）
     NSStackView *sig = [[NSStackView alloc] init];
     sig.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     sig.distribution = NSStackViewDistributionFillEqually;
-    sig.spacing = 8;
+    sig.spacing = 10;
     sig.wantsLayer = YES;
+    sig.layer.backgroundColor = t.card.CGColor;
     sig.layer.borderWidth = 1;
     sig.layer.borderColor = t.hairline.CGColor;
     sig.layer.cornerRadius = t.rSm;
     sig.edgeInsets = NSEdgeInsetsMake(8, 12, 8, 12);
+    self.sigSummaryBox = sig;
     NSArray<NSString *> *caps = @[@"源文件", @"声音处理", @"设备输出"];
     NSMutableArray<NSTextField *> *vals = [NSMutableArray array];
     for (NSString *cap in caps) {
@@ -528,8 +860,11 @@ static const NSInteger kABSlotCount = 4;
         col.orientation = NSUserInterfaceLayoutOrientationVertical;
         col.alignment = NSLayoutAttributeLeading;
         col.spacing = 2;
+        [col setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSTextField *lab = RLPLabel(RLPTr(rawCap), t.caption, t.mut);
         lab.tag = 1;
+        lab.lineBreakMode = NSLineBreakByTruncatingTail;
+        [lab setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self.langUpdaters addObject:^{ lab.stringValue = RLPTr(rawCap); }];
         NSTextField *val = RLPLabel(@"—", t.body, t.text);
         val.tag = 0;
@@ -549,12 +884,6 @@ static const NSInteger kABSlotCount = 4;
     [sig.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-32].active = YES;
 
     // 7 节点交互信号链（宽窗 7 列等分，窄窗 4+3 响应式两行，不溢出）
-    self.bpLine = RLPLabel(@"", t.small, t.mut);
-    self.bpLine.maximumNumberOfLines = 2;
-    self.bpLine.lineBreakMode = NSLineBreakByWordWrapping;
-    [self.bpLine setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [inner addArrangedSubview:self.bpLine];
-
     self.chainContainer = [[NSStackView alloc] init];
     self.chainContainer.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.chainContainer.alignment = NSLayoutAttributeLeading;
@@ -586,6 +915,7 @@ static const NSInteger kABSlotCount = 4;
         NSString *key = n[0];
         NSString *rawTitle = n[1];
         NSView *node = [self cardWithIdentifier:[NSString stringWithFormat:@"wb.node.%@", key]];
+        node.layer.backgroundColor = t.card.CGColor;
         [node setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSTextField *title = RLPLabel(RLPTr(rawTitle), t.caption, t.mut);
         [self.langUpdaters addObject:^{ title.stringValue = RLPTr(rawTitle); }];
@@ -606,8 +936,9 @@ static const NSInteger kABSlotCount = 4;
         hit.translatesAutoresizingMaskIntoConstraints = NO;
         for (NSView *v in @[title, val, why, hit]) [node addSubview:v];
         [NSLayoutConstraint activateConstraints:@[
-            [node.heightAnchor constraintEqualToConstant:62],
+            [node.heightAnchor constraintEqualToConstant:60],
             [title.leadingAnchor constraintEqualToAnchor:node.leadingAnchor constant:8],
+            [title.trailingAnchor constraintLessThanOrEqualToAnchor:node.trailingAnchor constant:-6],
             [title.topAnchor constraintEqualToAnchor:node.topAnchor constant:6],
             [val.leadingAnchor constraintEqualToAnchor:node.leadingAnchor constant:8],
             [val.trailingAnchor constraintEqualToAnchor:node.trailingAnchor constant:-6],
@@ -643,9 +974,12 @@ static const NSInteger kABSlotCount = 4;
     self.pipelineStageLine.identifier = @"wb.pipelinestage";
     self.pipelineStageLine.maximumNumberOfLines = 2;
     self.pipelineStageLine.lineBreakMode = NSLineBreakByWordWrapping;
+    self.pipelineStageLine.hidden = YES;
+    [self.pipelineStageLine setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [inner addArrangedSubview:self.pipelineStageLine];
+    [self.pipelineStageLine.widthAnchor constraintLessThanOrEqualToAnchor:inner.widthAnchor constant:-32].active = YES;
 
-    [self addFullWidth:card toStack:self.stack height:0];
+    [self addFullWidth:chainCard toStack:self.stack height:0];
 }
 
 - (void)onTrackCardPlay:(id)sender {
@@ -653,10 +987,138 @@ static const NSInteger kABSlotCount = 4;
     RLPPostJSON(@"/api/pause?on=0", nil);
 }
 
+- (nullable NSImage *)validTrackCoverImageFromData:(nullable NSData *)data {
+    if (![data isKindOfClass:[NSData class]] || data.length == 0) return nil;
+    NSImage *img = [[NSImage alloc] initWithData:data];
+    if (!img || img.representations.count == 0) return nil;
+    const NSSize sz = img.size;
+    if (!(sz.width > 0.0 && sz.height > 0.0)) return nil;
+    return img;
+}
+
+- (void)showTrackCoverPlaceholder {
+    if (!self.trackCover) return;
+    RLPTheme *t = [RLPTheme current];
+    if (!self.trackCoverPlaceholderImage) {
+        self.trackCoverPlaceholderImage = [NSImage imageWithSystemSymbolName:@"music.note"
+                                                      accessibilityDescription:RLPTr(@"封面")];
+    }
+    self.trackCover.showsPlaceholder = YES;
+    self.trackCover.imageScaling = NSImageScaleProportionallyDown;
+    self.trackCover.image = self.trackCoverPlaceholderImage;
+    self.trackCover.contentTintColor = t.mut;
+    self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+    self.trackCover.layer.borderColor = t.line.CGColor;
+    if (self.trackCoverPlaceholder) {
+        self.trackCoverPlaceholder.image = self.trackCoverPlaceholderImage;
+        self.trackCoverPlaceholder.contentTintColor = t.mut;
+        self.trackCoverPlaceholder.hidden = NO;
+    }
+}
+
+- (void)applyTrackCoverImage:(NSImage *)img {
+    if (!self.trackCover || !img) {
+        [self showTrackCoverPlaceholder];
+        return;
+    }
+    self.trackCover.showsPlaceholder = NO;
+    self.trackCover.imageScaling = NSImageScaleProportionallyUpOrDown;
+    if (self.trackCoverPlaceholder) self.trackCoverPlaceholder.hidden = YES;
+    self.trackCover.image = img;
+}
+
+- (void)loadTrackCoverFallbackWithAlbumKey:(NSString *)albumKey
+                                   coverId:(NSString *)coverId
+                                  coverKey:(NSString *)coverKey
+                                       seq:(NSUInteger)seq {
+    __weak __typeof__(self) weakSelf = self;
+    if (coverId.length) {
+        [[RLPCoverLoader shared] coverForSourceId:coverId completion:^(NSImage * _Nullable srcImg) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || self_.viewDisappeared || seq != self_.trackCoverSeq ||
+                ![coverKey isEqualToString:(self_.trackCoverKey ?: @"")]) return;
+            self_.trackCoverInFlight = NO;
+            if (srcImg && srcImg.size.width > 0.0 && srcImg.size.height > 0.0) {
+                [self_ applyTrackCoverImage:srcImg];
+            } else {
+                [self_ showTrackCoverPlaceholder];
+            }
+        }];
+        return;
+    }
+    if (albumKey.length) {
+        [[RLPCoverLoader shared] coverForAlbumKey:albumKey completion:^(NSImage * _Nullable albImg) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || self_.viewDisappeared || seq != self_.trackCoverSeq ||
+                ![coverKey isEqualToString:(self_.trackCoverKey ?: @"")]) return;
+            self_.trackCoverInFlight = NO;
+            if (albImg && albImg.size.width > 0.0 && albImg.size.height > 0.0) {
+                [self_ applyTrackCoverImage:albImg];
+            } else {
+                [self_ showTrackCoverPlaceholder];
+            }
+        }];
+        return;
+    }
+    self.trackCoverInFlight = NO;
+    [self showTrackCoverPlaceholder];
+}
+
+- (void)updateTrackCoverFromStatus:(NSDictionary *)st {
+    if (!self.trackCover) return;
+    NSString *path = RLPWorkbenchStatusPath(st);
+    NSString *albumKey = RLPWorkbenchStatusString(st, @[@"albumKey", @"album_key", @"albumK"]);
+    NSString *coverId = RLPWorkbenchStatusString(st, @[@"coverId", @"cover_id"]);
+    NSString *coverKey = (path.length || albumKey.length || coverId.length)
+        ? [NSString stringWithFormat:@"%@\n%@\n%@", path, albumKey, coverId]
+        : @"";
+    if (!coverKey.length || ![RLPCoreClient shared].started) {
+        ++self.trackCoverSeq;
+        self.trackCoverInFlight = NO;
+        self.trackCoverKey = @"";
+        [self showTrackCoverPlaceholder];
+        return;
+    }
+    if ([coverKey isEqualToString:(self.trackCoverKey ?: @"")]) return;
+
+    self.trackCoverKey = coverKey;
+    const NSUInteger seq = ++self.trackCoverSeq;
+    self.trackCoverInFlight = YES;
+    [self showTrackCoverPlaceholder]; // 切歌/换曲先清旧图，避免短暂或失败时残留上一首封面
+
+    if (path.length) {
+        NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
+        __weak __typeof__(self) weakSelf = self;
+        [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || self_.viewDisappeared || seq != self_.trackCoverSeq ||
+                ![coverKey isEqualToString:(self_.trackCoverKey ?: @"")]) return;
+            NSImage *img = [self_ validTrackCoverImageFromData:data];
+            if (img) {
+                self_.trackCoverInFlight = NO;
+                [self_ applyTrackCoverImage:img];
+                return;
+            }
+            [self_ loadTrackCoverFallbackWithAlbumKey:albumKey
+                                              coverId:coverId
+                                             coverKey:coverKey
+                                                  seq:seq];
+        }];
+        return;
+    }
+
+    [self loadTrackCoverFallbackWithAlbumKey:albumKey
+                                      coverId:coverId
+                                     coverKey:coverKey
+                                          seq:seq];
+}
+
 - (void)refreshTrackCard {
     NSDictionary *st = self.status ?: @{};
-    NSString *path = [st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : ([st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"] : nil);
-    NSString *title = [st[@"title"] isKindOfClass:[NSString class]] ? st[@"title"] : nil;
+    NSString *path = RLPWorkbenchStatusPath(st);
+    NSString *title = ([st[@"title"] isKindOfClass:[NSString class]] && ((NSString *)st[@"title"]).length)
+        ? st[@"title"]
+        : ([st[@"trackTitle"] isKindOfClass:[NSString class]] ? st[@"trackTitle"] : nil);
     NSString *artist = [st[@"artist"] isKindOfClass:[NSString class]] ? st[@"artist"] : nil;
     NSString *album = [st[@"album"] isKindOfClass:[NSString class]] ? st[@"album"] : nil;
     if (title.length) self.trackTitle.stringValue = title;
@@ -679,9 +1141,18 @@ static const NSInteger kABSlotCount = 4;
     self.sigDsp.stringValue = bp.length
         ? [NSString stringWithFormat:@"%@ · bit-perfect: %@", activeF, bp]
         : activeF;
-    NSString *dev = self.devicePopup.titleOfSelectedItem;
+    NSString *dev = self.topDevicePopup.titleOfSelectedItem.length
+        ? self.topDevicePopup.titleOfSelectedItem
+        : self.devicePopup.titleOfSelectedItem;
     NSString *backend = [self str:@"backend" def:@"coreaudio"];
     self.sigOut.stringValue = [NSString stringWithFormat:@"%@ · %@", dev.length ? dev : RLPTr(@"默认设备"), backend];
+    if (self.heroSpecLabel) {
+        NSString *specSrc = (fs > 0) ? self.sigSrc.stringValue : RLPTr(@"等待播放");
+        self.heroSpecLabel.stringValue = [NSString stringWithFormat:@"%@ · %@", specSrc, self.sigDsp.stringValue];
+        self.heroSpecLabel.toolTip = self.heroSpecLabel.stringValue;
+    }
+    [self updateTrackCoverFromStatus:st];
+    self.sigOut.toolTip = self.sigOut.stringValue;
 }
 
 #pragma mark - 三页签导航
@@ -702,6 +1173,8 @@ static const NSInteger kABSlotCount = 4;
         b.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
         b.wantsLayer = YES;
         b.layer.cornerRadius = t.rSm;
+        b.keyEquivalent = @"";
+        b.refusesFirstResponder = YES;
         return b;
     };
     self.tabBtnAB = MakeTab(RLPTr(@"播放台"), @"wb.tab.ab", @selector(onTabClicked:));
@@ -812,9 +1285,13 @@ static const NSInteger kABSlotCount = 4;
     head.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     head.alignment = NSLayoutAttributeCenterY;
     NSTextField *ti = [self sectionTitle:RLPTr(@"A/B 对比 · 四组独立调音")];
+    ti.lineBreakMode = NSLineBreakByTruncatingTail;
+    [ti setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.abToggle = [NSButton buttonWithTitle:RLPTr(@"A⇄B 来回") target:self action:@selector(onABToggle:)];
     self.abToggle.bezelStyle = NSBezelStyleRounded;
     self.abToggle.identifier = @"wb.ab.toggle";
+    [self.abToggle setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.abToggle setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [head addArrangedSubview:ti];
     [head addArrangedSubview:[[NSView alloc] init]];
     [head addArrangedSubview:self.abToggle];
@@ -826,6 +1303,7 @@ static const NSInteger kABSlotCount = 4;
     note.lineBreakMode = NSLineBreakByWordWrapping;
     [note setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [inner addArrangedSubview:note];
+    [note.widthAnchor constraintLessThanOrEqualToAnchor:inner.widthAnchor constant:-28].active = YES;
     __weak __typeof__(self) weakSelf = self;
     [self.langUpdaters addObject:^{
         __typeof__(self) s = weakSelf;
@@ -840,6 +1318,7 @@ static const NSInteger kABSlotCount = 4;
     self.abGridStack.alignment = NSLayoutAttributeLeading;
     self.abGridStack.spacing = 8;
     self.abGridStack.detachesHiddenViews = YES;
+    [self.abGridStack setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.abRow1 = [[NSStackView alloc] init];
     self.abRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -862,44 +1341,56 @@ static const NSInteger kABSlotCount = 4;
         slot.layer.borderWidth = 1;
         slot.layer.borderColor = t.hairline.CGColor;
         slot.identifier = [NSString stringWithFormat:@"wb.abslot.%ld", (long)i];
+        [slot setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
         NSTextField *big = RLPLabel(names[i], t.heading, t.hero);
         big.translatesAutoresizingMaskIntoConstraints = NO;
         big.tag = 0;
         NSButton *pick = [NSButton buttonWithTitle:RLPTr(@"切换") target:self action:@selector(onABPick:)];
         pick.bezelStyle = NSBezelStyleRounded;
+        pick.controlSize = NSControlSizeSmall;
         pick.identifier = [NSString stringWithFormat:@"wb.ab.%ld", (long)i];
         pick.tag = i;
         pick.font = t.small;
         pick.translatesAutoresizingMaskIntoConstraints = NO;
+        [pick setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSButton *save = [NSButton buttonWithTitle:RLPTr(@"存为") target:self action:@selector(onABSave:)];
         save.bezelStyle = NSBezelStyleRounded;
+        save.controlSize = NSControlSizeSmall;
         save.tag = i;
         save.font = t.small;
         save.translatesAutoresizingMaskIntoConstraints = NO;
+        [save setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self.langUpdaters addObject:^{
             pick.title = RLPTr(@"切换");
             save.title = RLPTr(@"存为");
         }];
+        NSStackView *btnRow = [[NSStackView alloc] init];
+        btnRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        btnRow.alignment = NSLayoutAttributeCenterY;
+        btnRow.spacing = 6;
+        btnRow.translatesAutoresizingMaskIntoConstraints = NO;
+        [btnRow setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [btnRow addArrangedSubview:pick];
+        [btnRow addArrangedSubview:save];
+
         NSTextField *sum = RLPLabel(RLPTr(@"未保存"), t.caption, t.mut);
         sum.translatesAutoresizingMaskIntoConstraints = NO;
         sum.lineBreakMode = NSLineBreakByTruncatingTail;
         sum.identifier = [NSString stringWithFormat:@"wb.absum.%ld", (long)i];
         [sum setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self.headerLabels addObject:big];
-        for (NSView *v in @[big, pick, save, sum]) [slot addSubview:v];
+        for (NSView *v in @[big, btnRow, sum]) [slot addSubview:v];
         [NSLayoutConstraint activateConstraints:@[
             [slot.heightAnchor constraintEqualToConstant:94],
             [big.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor constant:10],
             [big.topAnchor constraintEqualToAnchor:slot.topAnchor constant:8],
-            [pick.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor constant:10],
-            [pick.topAnchor constraintEqualToAnchor:big.bottomAnchor constant:4],
-            [save.leadingAnchor constraintEqualToAnchor:pick.trailingAnchor constant:4],
-            [save.centerYAnchor constraintEqualToAnchor:pick.centerYAnchor],
-            [save.trailingAnchor constraintLessThanOrEqualToAnchor:slot.trailingAnchor constant:-8],
+            [btnRow.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor constant:10],
+            [btnRow.trailingAnchor constraintLessThanOrEqualToAnchor:slot.trailingAnchor constant:-8],
+            [btnRow.topAnchor constraintEqualToAnchor:big.bottomAnchor constant:6],
             [sum.leadingAnchor constraintEqualToAnchor:slot.leadingAnchor constant:10],
             [sum.trailingAnchor constraintEqualToAnchor:slot.trailingAnchor constant:-8],
-            [sum.topAnchor constraintEqualToAnchor:pick.bottomAnchor constant:6],
+            [sum.topAnchor constraintEqualToAnchor:btnRow.bottomAnchor constant:6],
         ]];
         [self.abButtons addObject:pick];
         [self.abSummaries addObject:sum];
@@ -965,8 +1456,9 @@ static const NSInteger kABSlotCount = 4;
         self.abSummaries[i].stringValue = RLPABSlotSummary(s);
         self.abSummaries[i].toolTip = RLPABSlotSummary(s);
         self.abSummaries[i].textColor = on ? t.accentText : t.mut;
-        NSView *slot = b.superview;
+        NSView *slot = (i < (NSInteger)self.abSlotCards.count) ? self.abSlotCards[(NSUInteger)i] : b.superview;
         if (slot) {
+            slot.layer.backgroundColor = t.card.CGColor;
             slot.layer.borderColor = (on ? t.accent : t.hairline).CGColor;
         }
     }
@@ -1277,31 +1769,78 @@ static const NSInteger kABSlotCount = 4;
     return label;
 }
 
-#pragma mark - 播放台：PCM / DSD / 输出 三列机架
+#pragma mark - 播放台：PCM / DSD / 输出 响应式机架
 
 - (void)buildStudioRack {
+    RLPTheme *t = [RLPTheme current];
+    self.rackHeaderRow = [[NSStackView alloc] init];
+    self.rackHeaderRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.rackHeaderRow.alignment = NSLayoutAttributeCenterY;
+    self.rackHeaderRow.spacing = 8;
+    self.rackHeaderRow.identifier = @"wb.rack.header";
+    NSTextField *rackTitle = [self sectionTitle:RLPWorkbenchBiText(@"处理与输出机架", @"Processing & Output Rack")];
+    rackTitle.tag = 0;
+    rackTitle.maximumNumberOfLines = 1;
+    rackTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [rackTitle setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSTextField *rackSub = RLPLabel(RLPWorkbenchBiText(@"PCM 滤波 · DSD 调制 · 输出规格", @"PCM Filters · DSD Modulator · Output"), t.caption, t.mut);
+    rackSub.tag = 1;
+    rackSub.maximumNumberOfLines = 1;
+    rackSub.lineBreakMode = NSLineBreakByTruncatingTail;
+    [rackSub setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.headerLabels addObjectsFromArray:@[rackTitle, rackSub]];
+    [self.rackHeaderRow addArrangedSubview:rackTitle];
+    [self.rackHeaderRow addArrangedSubview:[[NSView alloc] init]];
+    [self.rackHeaderRow addArrangedSubview:rackSub];
+    [self addFullWidth:self.rackHeaderRow toStack:self.panelAB height:0];
+    [self.langUpdaters addObject:^{
+        rackTitle.stringValue = RLPWorkbenchBiText(@"处理与输出机架", @"Processing & Output Rack");
+        rackSub.stringValue = RLPWorkbenchBiText(@"PCM 滤波 · DSD 调制 · 输出规格", @"PCM Filters · DSD Modulator · Output");
+    }];
+
     self.rackStack = [[NSStackView alloc] init];
-    self.rackStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    self.rackStack.alignment = NSLayoutAttributeTop;
-    self.rackStack.distribution = NSStackViewDistributionFillEqually;
+    self.rackStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.rackStack.alignment = NSLayoutAttributeLeading;
     self.rackStack.spacing = 12;
+    self.rackStack.detachesHiddenViews = YES;
     self.rackStack.identifier = @"wb.rack";
     self.rackStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.rackStack setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.rackRow1 = [[NSStackView alloc] init];
+    self.rackRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.rackRow1.alignment = NSLayoutAttributeTop;
+    self.rackRow1.distribution = NSStackViewDistributionFillEqually;
+    self.rackRow1.spacing = 12;
+    [self.rackRow1 setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.rackRow2 = [[NSStackView alloc] init];
+    self.rackRow2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    self.rackRow2.alignment = NSLayoutAttributeTop;
+    self.rackRow2.distribution = NSStackViewDistributionFillEqually;
+    self.rackRow2.spacing = 12;
+    self.rackRow2.hidden = YES;
+    [self.rackRow2 setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.rackPCM = [self buildRackPCMColumn];
     self.rackDSD = [self buildRackDSDColumn];
     self.rackOutput = [self buildRackOutputColumn];
+    self.rackColumns = 3;
     [self.rackWidthConstraints removeAllObjects];
+    // 行先接入 rackStack，再激活列宽约束；否则 col 与 rackStack 尚无共同祖先。
+    [self.rackStack addArrangedSubview:self.rackRow1];
+    [self.rackStack addArrangedSubview:self.rackRow2];
     for (NSView *col in @[self.rackPCM, self.rackDSD, self.rackOutput]) {
         [col setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [self.rackStack addArrangedSubview:col];
+        [self.rackRow1 addArrangedSubview:col];
         [col.widthAnchor constraintLessThanOrEqualToAnchor:self.rackStack.widthAnchor].active = YES;
         NSLayoutConstraint *eqW = [col.widthAnchor constraintEqualToAnchor:self.rackStack.widthAnchor];
         eqW.priority = NSLayoutPriorityDefaultHigh;
         eqW.active = NO;
         [self.rackWidthConstraints addObject:eqW];
     }
-    [self.rackStack setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.rackRow1.widthAnchor constraintEqualToAnchor:self.rackStack.widthAnchor].active = YES;
+    [self.rackRow2.widthAnchor constraintEqualToAnchor:self.rackStack.widthAnchor].active = YES;
 
     [self addFullWidth:self.rackStack toStack:self.panelAB height:0];
 }
@@ -1374,7 +1913,7 @@ static const NSInteger kABSlotCount = 4;
     self.filterAll.target = self;
     self.filterAll.action = @selector(onFilterAllChanged:);
     self.filterAll.font = t.small;
-    [self.filterAll setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.filterAll);
     [col addArrangedSubview:self.filterAll];
     [self.filterAll.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
 
@@ -1391,27 +1930,31 @@ static const NSInteger kABSlotCount = 4;
     self.phaseSeg = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"线性"), RLPTr(@"最小"), RLPTr(@"混合")]
         trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onPhaseChanged:)];
     self.phaseSeg.identifier = @"wb.phase";
+    self.phaseSeg.controlSize = NSControlSizeSmall;
+    self.phaseSeg.font = t.small;
     [self.phaseSeg setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [searchPhase addArrangedSubview:self.filterSearch];
     [searchPhase addArrangedSubview:self.phaseSeg];
     [col addArrangedSubview:searchPhase];
     [searchPhase.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
 
-    NSStackView *shaperRow = [[NSStackView alloc] init];
-    shaperRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    shaperRow.spacing = 6;
     self.twoStageCheck = [NSButton checkboxWithTitle:RLPTr(@"两段式升频") target:self action:@selector(onTwoStageChanged:)];
     self.twoStageCheck.identifier = @"wb.twostage";
     self.twoStageCheck.font = t.small;
     [self.twoStageCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [col addArrangedSubview:self.twoStageCheck];
+    [self.twoStageCheck.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
+
+    NSStackView *shaperRow = [[NSStackView alloc] init];
+    shaperRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    shaperRow.spacing = 6;
     self.shaperPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.shaperPopup.target = self;
     self.shaperPopup.action = @selector(onShaperChanged:);
     self.shaperPopup.font = t.small;
-    [self.shaperPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.shaperPopup);
     [self.shaperPopup addItemsWithTitles:@[@"auto", @"none", @"NS1", @"NS4", @"NS5", @"NS9", @"LNS15", @"TPDF"]];
     NSTextField *shaperLab = [self inlineLabel:RLPTr(@"抖动")];
-    [shaperRow addArrangedSubview:self.twoStageCheck];
     [shaperRow addArrangedSubview:shaperLab];
     [shaperRow addArrangedSubview:self.shaperPopup];
     [col addArrangedSubview:shaperRow];
@@ -1427,6 +1970,7 @@ static const NSInteger kABSlotCount = 4;
     [self.filterOverrideLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.filterResetButton = [NSButton buttonWithTitle:RLPTr(@"恢复预设值") target:self action:@selector(onFilterResetOverride:)];
     self.filterResetButton.bezelStyle = NSBezelStyleRounded;
+    self.filterResetButton.controlSize = NSControlSizeSmall;
     self.filterResetButton.identifier = @"wb.filter.reset";
     self.filterResetButton.font = t.small;
     self.filterResetButton.enabled = NO;
@@ -1478,6 +2022,7 @@ static const NSInteger kABSlotCount = 4;
     self.ispCheck = [NSButton checkboxWithTitle:RLPTr(@"ISP 峰值预衰减") target:self action:@selector(onIspChanged:)];
     self.ispCheck.identifier = @"wb.isp";
     self.ispCheck.font = t.small;
+    [self.ispCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     for (NSArray *pair in @[@[@"相位覆盖", self.phaseOverridePopup],
                             @[@"抽头预算", self.tapsPopup],
@@ -1485,7 +2030,7 @@ static const NSInteger kABSlotCount = 4;
                             @[@"过渡带", self.transitionPopup]]) {
         NSString *rawKey = pair[0];
         NSPopUpButton *pop = pair[1];
-        [pop setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        RLPWorkbenchMakePopupTruncate(pop);
         NSStackView *r = [[NSStackView alloc] init];
         r.orientation = NSUserInterfaceLayoutOrientationHorizontal;
         r.spacing = 6;
@@ -1493,6 +2038,7 @@ static const NSInteger kABSlotCount = 4;
         [r addArrangedSubview:lab];
         [r addArrangedSubview:pop];
         [self.pcmAdvBox addArrangedSubview:r];
+        [r.widthAnchor constraintLessThanOrEqualToAnchor:self.pcmAdvBox.widthAnchor].active = YES;
         [self.langUpdaters addObject:^{ lab.stringValue = RLPTr(rawKey); }];
     }
     [self.pcmAdvBox addArrangedSubview:self.ispCheck];
@@ -1557,14 +2103,14 @@ static const NSInteger kABSlotCount = 4;
     self.sdmFilt1Popup.font = t.small;
     self.sdmFilt1Popup.target = self;
     self.sdmFilt1Popup.action = @selector(onSdmFilt1Changed:);
-    [self.sdmFilt1Popup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.sdmFilt1Popup);
 
     self.sdmFiltNxPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.sdmFiltNxPopup.identifier = @"wb.sdmfiltnx";
     self.sdmFiltNxPopup.font = t.small;
     self.sdmFiltNxPopup.target = self;
     self.sdmFiltNxPopup.action = @selector(onSdmFiltNxChanged:);
-    [self.sdmFiltNxPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.sdmFiltNxPopup);
 
     NSTextField *sdm1xLab = [self inlineLabel:RLPTr(@"SDM 1x 滤波")];
     [col addArrangedSubview:sdm1xLab];
@@ -1579,7 +2125,7 @@ static const NSInteger kABSlotCount = 4;
     self.modFamilyPopup.target = self;
     self.modFamilyPopup.action = @selector(onModFamilyChanged:);
     self.modFamilyPopup.font = t.small;
-    [self.modFamilyPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.modFamilyPopup);
     [self.modFamilyPopup addItemsWithTitles:@[@"dsd", @"chebyshev", @"ec", @"ahm"]];
 
     self.modOrderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -1587,7 +2133,7 @@ static const NSInteger kABSlotCount = 4;
     self.modOrderPopup.action = @selector(onModOrderChanged:);
     self.modOrderPopup.identifier = @"wb.modorder";
     self.modOrderPopup.font = t.small;
-    [self.modOrderPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.modOrderPopup);
     [self.modOrderPopup addItemsWithTitles:@[@"5", @"6", @"7", @"8", @"9"]];
     self.modOrderPopup.enabled = NO;
     self.modFamilyPopup.enabled = NO;
@@ -1614,6 +2160,7 @@ static const NSInteger kABSlotCount = 4;
     self.directSdmCheck = [NSButton checkboxWithTitle:RLPTr(@"DSD 直通（DirectSDM）") target:self action:@selector(onDirectSdmChanged:)];
     self.directSdmCheck.identifier = @"wb.directsdm";
     self.directSdmCheck.font = t.small;
+    [self.directSdmCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.modCutPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.modCutPopup.font = t.small;
@@ -1641,6 +2188,7 @@ static const NSInteger kABSlotCount = 4;
 
     self.dsd2StageCheck = [NSButton checkboxWithTitle:RLPTr(@"DSD 两段抽取") target:self action:@selector(onDsd2StageChanged:)];
     self.dsd2StageCheck.font = t.small;
+    [self.dsd2StageCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     [self.dsdAdvBox addArrangedSubview:self.directSdmCheck];
     for (NSArray *pair in @[@[@"整形拐点 kHz", self.modCutPopup],
@@ -1648,13 +2196,16 @@ static const NSInteger kABSlotCount = 4;
                             @[@"DSD 抽取器", self.dsdKindPopup],
                             @[@"DSD 通带", self.dsdConvPopup]]) {
         NSString *rawKey = pair[0];
+        NSPopUpButton *pop = pair[1];
+        RLPWorkbenchMakePopupTruncate(pop);
         NSStackView *r = [[NSStackView alloc] init];
         r.orientation = NSUserInterfaceLayoutOrientationHorizontal;
         r.spacing = 6;
         NSTextField *lab = [self inlineLabel:RLPTr(rawKey)];
         [r addArrangedSubview:lab];
-        [r addArrangedSubview:pair[1]];
+        [r addArrangedSubview:pop];
         [self.dsdAdvBox addArrangedSubview:r];
+        [r.widthAnchor constraintLessThanOrEqualToAnchor:self.dsdAdvBox.widthAnchor].active = YES;
         [self.langUpdaters addObject:^{ lab.stringValue = RLPTr(rawKey); }];
     }
     [self.dsdAdvBox addArrangedSubview:self.dsd2StageCheck];
@@ -1716,6 +2267,8 @@ static const NSInteger kABSlotCount = 4;
     self.dsdSeg = [NSSegmentedControl segmentedControlWithLabels:@[@"PCM", @"DSD64", @"128", @"256", @"512"]
         trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onDsdChanged:)];
     self.dsdSeg.identifier = @"wb.dsd";
+    self.dsdSeg.controlSize = NSControlSizeSmall;
+    self.dsdSeg.font = t.small;
     [self.dsdSeg setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [col addArrangedSubview:self.dsdSeg];
     [self.dsdSeg.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
@@ -1724,14 +2277,14 @@ static const NSInteger kABSlotCount = 4;
     self.ratePopup.target = self;
     self.ratePopup.action = @selector(onRateChanged:);
     self.ratePopup.font = t.small;
-    [self.ratePopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.ratePopup);
 
     self.rateFamilyPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.rateFamilyPopup.identifier = @"wb.ratefamily";
     self.rateFamilyPopup.target = self;
     self.rateFamilyPopup.action = @selector(onRateFamilyChanged:);
     self.rateFamilyPopup.font = t.small;
-    [self.rateFamilyPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.rateFamilyPopup);
     NSArray *rfTitles = @[RLPTr(@"优先同族 (prefer)"), RLPTr(@"严格同族 (strict)"), RLPTr(@"兼容回退 (compatible)")];
     NSArray *rfVals = @[@"prefer", @"strict", @"compatible"];
     for (NSUInteger i = 0; i < rfTitles.count; ++i) {
@@ -1758,12 +2311,14 @@ static const NSInteger kABSlotCount = 4;
     [rfRow.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
 
     self.devicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.devicePopup.identifier = @"wb.device";
     self.devicePopup.target = self;
     self.devicePopup.action = @selector(onDeviceChanged:);
     self.devicePopup.font = t.small;
-    [self.devicePopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.devicePopup);
     [col addArrangedSubview:self.devicePopup];
     [self.devicePopup.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
+    [self populateDevicePopups];
 
     NSStackView *beRow = [[NSStackView alloc] init];
     beRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -1772,7 +2327,7 @@ static const NSInteger kABSlotCount = 4;
     self.backendPopup.target = self;
     self.backendPopup.action = @selector(onBackendChanged:);
     self.backendPopup.font = t.small;
-    [self.backendPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.backendPopup);
     [self.backendPopup addItemsWithTitles:@[RLPTr(@"硬件直通（独占）"), RLPTr(@"系统混音（共享）"), RLPTr(@"UPnP 投放")]];
     self.hogCheck = [NSButton checkboxWithTitle:RLPTr(@"独占 Hog") target:self action:@selector(onHogChanged:)];
     self.hogCheck.font = t.small;
@@ -1794,8 +2349,12 @@ static const NSInteger kABSlotCount = 4;
     for (NSArray *p in presets) {
         NSButton *b = [NSButton buttonWithTitle:p[1] target:self action:@selector(onPresetApply:)];
         b.bezelStyle = NSBezelStyleRounded;
+        b.controlSize = NSControlSizeSmall;
         b.identifier = p[0];
         b.font = [NSFont systemFontOfSize:10];
+        if ([b.cell isKindOfClass:[NSButtonCell class]]) {
+            ((NSButtonCell *)b.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+        }
         [b setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [preRow addArrangedSubview:b];
         if ([p[0] isEqualToString:@"bitperfect"]) bpBtn = b;
@@ -1838,8 +2397,10 @@ static const NSInteger kABSlotCount = 4;
 
     self.loudnessCheck = [NSButton checkboxWithTitle:RLPTr(@"响度补偿") target:self action:@selector(onLoudnessChanged:)];
     self.loudnessCheck.font = t.small;
+    [self.loudnessCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.irGpuCheck = [NSButton checkboxWithTitle:RLPTr(@"GPU 卷积") target:self action:@selector(onIrGpuChanged:)];
     self.irGpuCheck.font = t.small;
+    [self.irGpuCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     for (NSArray *pair in @[@[@"输出位深", self.bitsPopup],
                             @[@"缓冲 ms", self.bufferPopup],
@@ -1847,7 +2408,7 @@ static const NSInteger kABSlotCount = 4;
                             @[@"ReplayGain", self.rgModePopup]]) {
         NSString *rawKey = pair[0];
         NSPopUpButton *pop = pair[1];
-        [pop setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        RLPWorkbenchMakePopupTruncate(pop);
         NSStackView *r = [[NSStackView alloc] init];
         r.orientation = NSUserInterfaceLayoutOrientationHorizontal;
         r.spacing = 6;
@@ -1855,6 +2416,7 @@ static const NSInteger kABSlotCount = 4;
         [r addArrangedSubview:lab];
         [r addArrangedSubview:pop];
         [self.outputAdvBox addArrangedSubview:r];
+        [r.widthAnchor constraintLessThanOrEqualToAnchor:self.outputAdvBox.widthAnchor].active = YES;
         if (![rawKey isEqualToString:@"ReplayGain"]) {
             [self.langUpdaters addObject:^{ lab.stringValue = RLPTr(rawKey); }];
         }
@@ -1865,6 +2427,7 @@ static const NSInteger kABSlotCount = 4;
     [chkRow addArrangedSubview:self.loudnessCheck];
     [chkRow addArrangedSubview:self.irGpuCheck];
     [self.outputAdvBox addArrangedSubview:chkRow];
+    [chkRow.widthAnchor constraintLessThanOrEqualToAnchor:self.outputAdvBox.widthAnchor].active = YES;
     [col addArrangedSubview:self.outputAdvBox];
     [self.outputAdvBox.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
     __weak __typeof__(self) weakSelf = self;
@@ -1914,17 +2477,20 @@ static const NSInteger kABSlotCount = 4;
     ]];
 
     NSTextField *ti = [self sectionTitle:RLPTr(@"快捷 EQ")];
+    ti.lineBreakMode = NSLineBreakByTruncatingTail;
+    [ti setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.quickEqBypassCheck = [NSButton checkboxWithTitle:RLPTr(@"20 段 PEQ") target:self action:@selector(onEqBypass:)];
     self.quickEqBypassCheck.identifier = @"wb.quickeq.bypass";
     self.quickEqBypassCheck.font = t.small;
     self.quickEqBypassCheck.state = NSControlStateValueOn;
+    [self.quickEqBypassCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     self.quickEqPresetPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.quickEqPresetPopup.identifier = @"wb.quickeq.preset";
     self.quickEqPresetPopup.target = self;
     self.quickEqPresetPopup.action = @selector(onEqPresetLoad:);
     self.quickEqPresetPopup.font = t.small;
-    [self.quickEqPresetPopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    RLPWorkbenchMakePopupTruncate(self.quickEqPresetPopup);
     [self.quickEqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
 
     self.quickEqStatusLabel = RLPLabel(RLPTr(@"PEQ 开"), t.caption, t.mut);
@@ -2013,6 +2579,7 @@ static const NSInteger kABSlotCount = 4;
     self.eqPresetPopup.action = @selector(onEqPresetLoad:);
     self.eqPresetPopup.identifier = @"wb.eqpreset";
     self.eqPresetPopup.font = t.small;
+    RLPWorkbenchMakePopupTruncate(self.eqPresetPopup);
     [self.eqPresetPopup addItemWithTitle:RLPTr(@"加载预设…")];
 
     [head addArrangedSubview:ti];
@@ -2086,16 +2653,22 @@ static const NSInteger kABSlotCount = 4;
     self.monMasterCheck.identifier = @"wb.mon.master";
     self.monMasterCheck.font = t.small;
     self.monMasterCheck.state = self.monMasterEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.monMasterCheck.keyEquivalent = @"";
+    self.monMasterCheck.refusesFirstResponder = YES;
 
     self.monAutoCheck = [NSButton checkboxWithTitle:RLPTr(@"播放时自动分析") target:self action:@selector(onMonAutoChanged:)];
     self.monAutoCheck.identifier = @"wb.mon.auto";
     self.monAutoCheck.font = t.small;
+    self.monAutoCheck.keyEquivalent = @"";
+    self.monAutoCheck.refusesFirstResponder = YES;
 
     self.monRetryBtn = [NSButton buttonWithTitle:RLPTr(@"重试") target:self action:@selector(onMonRetry:)];
     self.monRetryBtn.bezelStyle = NSBezelStyleRounded;
     self.monRetryBtn.identifier = @"wb.mon.retry";
     self.monRetryBtn.font = t.small;
     self.monRetryBtn.hidden = YES;
+    self.monRetryBtn.keyEquivalent = @"";
+    self.monRetryBtn.refusesFirstResponder = YES;
 
     NSStackView *ctlRow = [[NSStackView alloc] init];
     ctlRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -2218,8 +2791,9 @@ static const NSInteger kABSlotCount = 4;
 - (void)onMonRetry:(id)sender {
     (void)sender;
     if (!self.monMasterEnabled) return;
-    NSString *path = self.anlPath ?: @"";
+    NSString *path = self.anlPath.length ? self.anlPath : RLPWorkbenchStatusPath(self.status);
     if (!RLPWorkbenchIsLocalAudioPath(path)) return;
+    self.anlPath = path;
     [self fetchMonitorHealthForPath:path force:YES];
 }
 
@@ -2256,10 +2830,9 @@ static const NSInteger kABSlotCount = 4;
 - (void)maybeAutoAnalyzeFromStatus {
     if (self.viewDisappeared) return;
     NSDictionary *st = self.status ?: @{};
-    NSString *path = [st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"]
-                   : ([st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : @"");
+    NSString *path = RLPWorkbenchStatusPath(st);
     const BOOL playing = [st[@"playing"] boolValue] && ![st[@"paused"] boolValue];
-    const BOOL autoOn = [[self str:@"autoanl" def:@"0"] isEqualToString:@"1"];
+    const BOOL autoOn = RLPWorkbenchAutoAnlEnabled(self.settings);
     if (RLPWorkbenchShouldAutoAnalyze(path, playing, self.monMasterEnabled, autoOn,
                                       self.anlAutoDonePath, self.anlBusy, self.anlHealth != nil)) {
         self.anlAutoDonePath = path;
@@ -2273,10 +2846,9 @@ static const NSInteger kABSlotCount = 4;
 
     // 1) 分析总开关 / 自动分析 / 重试 / 三摘要
     NSDictionary *st = self.status ?: @{};
-    NSString *path = [st[@"current"] isKindOfClass:[NSString class]] ? st[@"current"]
-                   : ([st[@"file"] isKindOfClass:[NSString class]] ? st[@"file"] : @"");
+    NSString *path = RLPWorkbenchStatusPath(st);
     const BOOL isCue = [st[@"cueStart"] respondsToSelector:@selector(doubleValue)] && [st[@"cueStart"] doubleValue] >= 0.0;
-    const BOOL autoOn = [[self str:@"autoanl" def:@"0"] isEqualToString:@"1"];
+    const BOOL autoOn = RLPWorkbenchAutoAnlEnabled(self.settings);
     const BOOL isLocal = RLPWorkbenchIsLocalAudioPath(path);
 
     if (self.monCueNote) self.monCueNote.hidden = !isCue;
@@ -2632,11 +3204,62 @@ static const NSInteger kABSlotCount = 4;
     const NSInteger i = sender.selectedSegment;
     if (i >= 0 && i < (NSInteger)vals.count) [self postSettings:@{@"dsd": vals[i], @"dsdnative": @"0"}];
 }
+- (void)onRefreshDevicesClicked:(id)sender {
+    (void)sender;
+    [self reloadDevices];
+}
+
 - (void)onDeviceChanged:(NSPopUpButton *)sender {
+    if (!sender || sender.indexOfSelectedItem < 0) return;
     NSDictionary *d = sender.selectedItem.representedObject;
-    NSString *devId = [d isKindOfClass:[NSDictionary class]] ? (d[@"id"] ?: @"") : @"";
-    [self postSettings:@{@"device": devId}];
-    [self reloadRates];
+    NSString *devId = ([d isKindOfClass:[NSDictionary class]] && [d[@"id"] isKindOfClass:[NSString class]])
+        ? d[@"id"] : @"";
+    // 在途期间先保持顶部与输出规格卡两处下拉选择一致；真实 settings 与顶部设备摘要仅在 POST 成功后更新
+    const NSInteger idx = sender.indexOfSelectedItem;
+    for (NSPopUpButton *pop in [self devicePopups]) {
+        if (pop != sender && idx >= 0 && idx < (NSInteger)pop.numberOfItems) {
+            [pop selectItemAtIndex:idx];
+        }
+        pop.toolTip = pop.titleOfSelectedItem.length ? pop.titleOfSelectedItem : RLPTr(@"输出设备");
+    }
+
+    const NSUInteger writeSeq = ++self.deviceWriteSeq;
+    ++self.settingsSeq; // 使更早发出的 GET /api/settings 失效
+    self.statusMessage.stringValue = RLPTr(@"应用中…");
+    NSString *body = [NSString stringWithFormat:@"device=%@", RLPEnc(devId)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/settings" body:body
+        completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || writeSeq != self_.deviceWriteSeq) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSMutableDictionary *nextSettings = self_.settings ? [self_.settings mutableCopy] : [NSMutableDictionary dictionary];
+            nextSettings[@"device"] = devId;
+            self_.settings = nextSettings;
+            self_.statusMessage.stringValue = RLPTr(@"已生效");
+            NSString *transport = ([d isKindOfClass:[NSDictionary class]] && [d[@"transport"] isKindOfClass:[NSString class]])
+                ? d[@"transport"] : @"";
+            if ([transport isEqualToString:@"airplay"]) {
+                RLPToast(RLPTr(@"AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证"));
+            } else {
+                RLPToast(RLPTr(@"输出设备已选择，下次播放生效"));
+            }
+            [self_ syncOutputControls];
+            [self_ refreshTrackCard];
+            [self_ refreshChain];
+            [self_ reloadRates];
+            [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+        } else {
+            NSString *err = ([json isKindOfClass:[NSDictionary class]] &&
+                             [json[@"error"] isKindOfClass:[NSString class]] &&
+                             ((NSString *)json[@"error"]).length)
+                ? json[@"error"] : RLPTr(@"保存失败，已保留原值");
+            self_.statusMessage.stringValue = RLPTr(@"保存失败，已保留原值");
+            RLPToast(err);
+            [self_ syncAllControlsFromSettings];
+        }
+    }];
 }
 - (void)onBackendChanged:(NSPopUpButton *)sender {
     NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
@@ -3035,16 +3658,18 @@ static const NSInteger kABSlotCount = 4;
 - (void)applySettingsPayload:(NSDictionary *)kv forSeq:(NSUInteger)seq {
     if (seq > 0 && seq < self.settingsSeq) return; // 丢弃乱序到达的旧回包
     if (seq > self.settingsSeq) self.settingsSeq = seq;
+    NSString *oldDev = [self str:@"device" def:@""];
     self.settings = [kv isKindOfClass:[NSDictionary class]] ? kv : @{};
+    NSString *newDev = [self str:@"device" def:@""];
     [self syncAllControlsFromSettings];
+    if (![newDev isEqualToString:oldDev]) [self reloadRates];
 }
 
 - (void)applyStatusPayload:(NSDictionary *)st forSeq:(NSUInteger)seq {
     if (seq > 0 && seq < self.statusSeq) return; // 丢弃乱序到达的旧回包
     if (seq > self.statusSeq) self.statusSeq = seq;
     self.status = [st isKindOfClass:[NSDictionary class]] ? st : @{};
-    NSString *path = [self.status[@"current"] isKindOfClass:[NSString class]] ? self.status[@"current"]
-                   : ([self.status[@"file"] isKindOfClass:[NSString class]] ? self.status[@"file"] : @"");
+    NSString *path = RLPWorkbenchStatusPath(self.status);
     if (![path isEqualToString:self.anlPath ?: @""]) {
         if (self.anlBusy && [RLPCoreClient shared].started) {
             [[RLPCoreClient shared] postJSON:@"/api/anl/cancel" body:@"" completion:nil];
@@ -3092,8 +3717,9 @@ static const NSInteger kABSlotCount = 4;
     [self refreshChain];
     [self refreshAB];
     [self syncQuickEqControls];
+    [self refreshTrackCard];
     if (self.monAutoCheck) {
-        self.monAutoCheck.state = [[self str:@"autoanl" def:@"0"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+        self.monAutoCheck.state = RLPWorkbenchAutoAnlEnabled(self.settings) ? NSControlStateValueOn : NSControlStateValueOff;
     }
     [self maybeAutoAnalyzeFromStatus];
     if ([self.activeTab isEqualToString:@"monitor"]) [self refreshMonitor];
@@ -3175,6 +3801,7 @@ static const NSInteger kABSlotCount = 4;
 - (void)viewWillAppear {
     [super viewWillAppear];
     self.viewDisappeared = NO;
+    [self updateRackOrientation];
 }
 
 - (void)activate {
@@ -3194,6 +3821,11 @@ static const NSInteger kABSlotCount = 4;
     self.statusInFlight = NO;
     ++self.statusSeq;
     ++self.anlSeq;
+    ++self.trackCoverSeq;
+    if (self.trackCoverInFlight) {
+        self.trackCoverInFlight = NO;
+        self.trackCoverKey = nil;
+    }
     self.anlBusy = NO;
     [super viewDidDisappear];
 }
@@ -3226,23 +3858,108 @@ static const NSInteger kABSlotCount = 4;
     }];
 }
 
+- (NSArray<NSPopUpButton *> *)devicePopups {
+    NSMutableArray<NSPopUpButton *> *list = [NSMutableArray arrayWithCapacity:2];
+    if (self.topDevicePopup) [list addObject:self.topDevicePopup];
+    if (self.devicePopup) [list addObject:self.devicePopup];
+    return list;
+}
+
+- (NSString *)emptyDeviceDisplayTitle {
+    return [NSString stringWithFormat:@"%@ / %@", RLPTr(@"（尚未发现设备）"), RLPTr(@"系统默认")];
+}
+
+- (void)populateDevicePopups {
+    NSArray<NSPopUpButton *> *popups = [self devicePopups];
+    if (!popups.count) return;
+    NSArray<NSDictionary *> *devs = [self.devices isKindOfClass:[NSArray class]] ? self.devices : @[];
+    for (NSPopUpButton *pop in popups) {
+        [pop removeAllItems];
+        pop.enabled = YES;
+        if (devs.count == 0) {
+            NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:[self emptyDeviceDisplayTitle] action:nil keyEquivalent:@""];
+            it.representedObject = @{@"id": @""};
+            [pop.menu addItem:it];
+        } else {
+            NSMenuItem *defIt = [[NSMenuItem alloc] initWithTitle:RLPTr(@"系统默认") action:nil keyEquivalent:@""];
+            defIt.representedObject = @{@"id": @""};
+            [pop.menu addItem:defIt];
+            for (NSDictionary *d in devs) {
+                if (![d isKindOfClass:[NSDictionary class]]) continue;
+                NSString *rawName = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @"";
+                NSString *name = rawName.length ? rawName : RLPTr(@"未知设备");
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:name action:nil keyEquivalent:@""];
+                it.representedObject = d;
+                [pop.menu addItem:it];
+            }
+        }
+    }
+    [self syncDeviceSelectionOnly];
+}
+
+- (void)syncDeviceSelectionOnly {
+    NSArray<NSPopUpButton *> *popups = [self devicePopups];
+    if (!popups.count) return;
+    NSArray<NSDictionary *> *devs = [self.devices isKindOfClass:[NSArray class]] ? self.devices : @[];
+    NSString *cur = [self str:@"device" def:@""];
+    for (NSPopUpButton *pop in popups) {
+        pop.enabled = YES;
+        for (NSInteger i = (NSInteger)pop.numberOfItems - 1; i >= 0; --i) {
+            if ([pop itemAtIndex:i].tag == 998) [pop removeItemAtIndex:i];
+        }
+        if (pop.numberOfItems == 0) continue;
+        NSInteger sel = 0;
+        if (devs.count > 0 && cur.length > 0) {
+            BOOL found = NO;
+            for (NSInteger i = 0; i < (NSInteger)pop.numberOfItems; ++i) {
+                id ro = [pop itemAtIndex:i].representedObject;
+                NSString *rid = ([ro isKindOfClass:[NSDictionary class]] && [ro[@"id"] isKindOfClass:[NSString class]])
+                    ? ro[@"id"] : @"";
+                if ([rid isEqualToString:cur]) {
+                    sel = i;
+                    found = YES;
+                    break;
+                }
+            }
+            if (!found) {
+                NSString *unavail = [NSString stringWithFormat:@"%@ · %@", cur, RLPTr(@"（不可用）")];
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:unavail action:nil keyEquivalent:@""];
+                it.representedObject = @{@"id": cur, @"unavailable": @YES};
+                it.tag = 998;
+                [pop.menu addItem:it];
+                sel = (NSInteger)pop.numberOfItems - 1;
+            }
+        }
+        if (sel >= 0 && sel < (NSInteger)pop.numberOfItems) [pop selectItemAtIndex:sel];
+        pop.toolTip = pop.titleOfSelectedItem.length ? pop.titleOfSelectedItem : RLPTr(@"输出设备");
+    }
+}
+
 - (void)reloadDevices {
     const NSUInteger seq = ++self.devicesSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/devices" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.devicesSeq) return;
-        self_.devices = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
-        [self_.devicePopup removeAllItems];
-        [self_.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
-        [[self_.devicePopup lastItem] setRepresentedObject:@{}];
-        for (NSDictionary *d in self_.devices) {
-            [self_.devicePopup addItemWithTitle:[d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备")];
-            [[self_.devicePopup lastItem] setRepresentedObject:d];
-        }
-        [self_ syncOutputControls];
-        [self_ reloadRates];
+        if (!self_) return;
+        [self_ applyDevicesPayload:json forSeq:seq];
     }];
+}
+
+- (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq {
+    if (seq > 0 && seq < self.devicesSeq) return;
+    if (seq > self.devicesSeq) self.devicesSeq = seq;
+    const BOOL okFlag = [json isKindOfClass:[NSDictionary class]] &&
+        (json[@"ok"] == nil || [json[@"ok"] boolValue]);
+    if (okFlag && [json[@"devices"] isKindOfClass:[NSArray class]]) {
+        self.devices = json[@"devices"];
+    } else if (!self.devices) {
+        self.devices = @[];
+    }
+    [self populateDevicePopups];
+    [self syncOutputControls];
+    [self refreshTrackCard];
+    [self refreshChain];
+    [self reloadRates];
 }
 
 - (void)reloadRates {
@@ -3293,13 +4010,7 @@ static const NSInteger kABSlotCount = 4;
 }
 
 - (void)syncOutputControls {
-    NSString *cur = [self str:@"device" def:@""];
-    NSInteger sel = 0;
-    if (cur.length) {
-        for (NSInteger i = 0; i < (NSInteger)self.devices.count; ++i)
-            if ([self.devices[i][@"id"] isEqualToString:cur]) { sel = i + 1; break; }
-    }
-    if (sel < (NSInteger)self.devicePopup.numberOfItems) [self.devicePopup selectItemAtIndex:sel];
+    [self syncDeviceSelectionOnly];
     NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
     NSInteger bi = [vals indexOfObject:[self str:@"backend" def:@"coreaudio"]];
     [self.backendPopup selectItemAtIndex:(bi == NSNotFound ? 0 : bi)];
@@ -3371,8 +4082,10 @@ static const NSInteger kABSlotCount = 4;
     if (dsd && stage.length) {
         self.pipelineStageLine.stringValue = [NSString stringWithFormat:@"%@%@ · %@%@",
             RLPTr(@"管线阶段："), stage, RLPTr(@"你选的滤波："), activeFilter];
+        self.pipelineStageLine.hidden = NO;
     } else {
         self.pipelineStageLine.stringValue = @"";
+        self.pipelineStageLine.hidden = YES;
     }
 
     NSString *bp = [st[@"bitPerfect"] isKindOfClass:[NSString class]] ? st[@"bitPerfect"] : nil;
@@ -3433,17 +4146,15 @@ static const NSInteger kABSlotCount = 4;
             [self.ratePopup itemAtIndex:0].title = RLPTr(@"跟随源");
         }
     }
-    if (self.devicePopup.numberOfItems > 0) {
-        id ro = [self.devicePopup itemAtIndex:0].representedObject;
-        if (!ro || ([ro isKindOfClass:[NSString class]] && [(NSString *)ro length] == 0)) {
-            [self.devicePopup itemAtIndex:0].title = RLPTr(@"系统默认");
-        }
-    }
+    [self populateDevicePopups];
     if (self.eqExtLabel) {
         NSString *extEq = [self str:@"eq" def:@""];
         self.eqExtLabel.stringValue = (extEq.length && ![extEq isEqualToString:@"0"])
             ? [NSString stringWithFormat:@"%@%@", RLPTr(@"外部 EQ："), extEq.lastPathComponent]
             : RLPTr(@"外部 EQ：未加载");
+    }
+    if (self.trackCoverPlaceholderImage) {
+        self.trackCoverPlaceholderImage.accessibilityDescription = RLPTr(@"封面");
     }
     [self refreshTrackCard];
     [self refreshChain];
@@ -3477,17 +4188,48 @@ static const NSInteger kABSlotCount = 4;
     }
     for (NSView *v in self.stack.arrangedSubviews) {
         if (v.wantsLayer && v.layer.cornerRadius > 0) {
-            v.layer.backgroundColor = ([v.identifier isEqualToString:@"wb.trackcard"] ? t.card : t.bg2).CGColor;
-            v.layer.borderColor = ([v.identifier isEqualToString:@"wb.trackcard"] ? t.hairline : t.line).CGColor;
+            const BOOL isHero = [v.identifier isEqualToString:@"wb.trackcard"];
+            v.layer.cornerRadius = isHero ? t.rLg : t.rMd;
+            v.layer.backgroundColor = (isHero ? t.card : t.bg2).CGColor;
+            v.layer.borderColor = (isHero ? t.hairline : t.line).CGColor;
         }
     }
-    for (NSString *k in self.chainNodes) self.chainNodes[k].layer.backgroundColor = t.bg2.CGColor;
-    for (NSTextField *l in self.headerLabels) l.textColor = (l.tag == 1) ? t.mut : t.text;
+    if (self.trackPlayBtn) {
+        self.trackPlayBtn.layer.backgroundColor = t.accent.CGColor;
+        self.trackPlayBtn.layer.cornerRadius = t.rSm;
+    }
+    for (NSStackView *panel in @[self.panelAB ?: [NSStackView new], self.panelEQ ?: [NSStackView new], self.panelMonitor ?: [NSStackView new]]) {
+        for (NSView *v in panel.arrangedSubviews) {
+            if (v.wantsLayer && v.layer.cornerRadius > 0) {
+                v.layer.backgroundColor = t.bg2.CGColor;
+                v.layer.borderColor = t.line.CGColor;
+            }
+        }
+    }
+    if (self.sigSummaryBox) {
+        self.sigSummaryBox.layer.backgroundColor = t.card.CGColor;
+        self.sigSummaryBox.layer.borderColor = t.hairline.CGColor;
+    }
+    for (NSString *k in self.chainNodes) self.chainNodes[k].layer.backgroundColor = t.card.CGColor;
+    for (NSTextField *l in self.headerLabels) {
+        l.textColor = (l.tag == 1) ? t.mut : ((l.tag == 2) ? t.text2 : t.text);
+    }
     self.headerTitle.textColor = t.hero;
     self.trackTitle.textColor = t.hero;
+    if (self.topDeviceBar) {
+        self.topDeviceBar.layer.backgroundColor = t.cardAlt.CGColor;
+        self.topDeviceBar.layer.borderColor = t.hairline.CGColor;
+    }
+    if (self.topDeviceRefreshBtn) {
+        self.topDeviceRefreshBtn.contentTintColor = t.text;
+    }
     if (self.trackCover) {
         self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+        self.trackCover.layer.borderColor = t.line.CGColor;
         self.trackCover.contentTintColor = t.mut;
+    }
+    if (self.trackCoverPlaceholder) {
+        self.trackCoverPlaceholder.contentTintColor = t.mut;
     }
     [self selectStudioTab:self.activeTab ?: @"ab"];
     [self.eqView applyTheme];

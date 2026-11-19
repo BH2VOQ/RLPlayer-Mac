@@ -12,8 +12,11 @@
 //
 // 纪律：隔离 state/library；backend=null、volume=-120；不启动真实 app 服务、不碰 8899、不模拟键鼠。
 #import <AppKit/AppKit.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 #import "RLPCoreClient.h"
 #import "RLPListeningRoom.h"
+#import "RLPModels.h"
 #import "RLPQuickStartViewController.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
@@ -58,6 +61,23 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong, nullable) NSPopover *popover;
 @property (nonatomic, assign) BOOL playing;
 @property (nonatomic, assign) BOOL pausedNow;
+@property (nonatomic, strong) NSView *cardsContainer;
+@property (nonatomic, strong) NSStackView *albumRow;
+@property (nonatomic, strong) RLPCoverImageView *npCover;
+@property (nonatomic, strong) NSTextField *npTitle;
+@property (nonatomic, strong) NSTextField *npSub;
+@property (nonatomic, strong) NSButton *npOpenButton;
+@property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, copy, nullable) NSDictionary *lastMetaDict;
+@property (nonatomic, copy) NSArray<RLPAlbum *> *albumsData;
+@property (nonatomic, assign) NSInteger currentCardColumns;
+@property (nonatomic, assign) NSInteger currentAlbumColumns;
+@property (nonatomic, strong) NSStackView *queueList;
+@property (nonatomic, strong) NSMutableArray<NSView *> *queueRowSurfaces;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *queueRowCurrentFlags;
+@property (nonatomic, weak, nullable) NSTextField *queueEmptyLabel;
+@property (nonatomic, copy) NSArray<NSString *> *queuePaths;
+@property (nonatomic, assign) NSInteger queueCurrentIndex;
 + (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
                                                   playbackActive:(BOOL)active;
 - (void)syncPlayAndStyleCards;
@@ -68,6 +88,15 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)onApplyUpnpOutput:(id)sender;
 - (void)applyCastDevicesPayload:(NSDictionary * _Nullable)json;
 - (void)reloadSettings;
+- (void)reloadQueue;
+- (void)applyStatusJSON:(NSDictionary *)json;
+- (void)activate;
+- (void)viewDidDisappear;
+- (void)rebuildAlbumGrid;
+- (void)renderQueueFromJSON:(NSDictionary * _Nullable)json;
+- (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth;
+- (void)applyLanguage;
+- (void)onOpenCurrentAlbum:(id)sender;
 @end
 
 // Keep output selection tests offline: discovery is explicitly stubbed.
@@ -126,11 +155,946 @@ static void TestMountedRoomGeometry() {
     }
 }
 
+static void CollectByIdPrefix(NSView *root, NSString *prefix, NSMutableArray<NSView *> *out) {
+    if (!root) return;
+    if ([root.identifier hasPrefix:prefix]) [out addObject:root];
+    for (NSView *s in root.subviews) CollectByIdPrefix(s, prefix, out);
+}
+
+static NSScrollView *FindRoomScrollView(NSView *root) {
+    NSMutableArray<NSView *> *views = [NSMutableArray array];
+    CollectViews(root, views);
+    for (NSView *v in views) {
+        if ([v isKindOfClass:[NSScrollView class]]) return (NSScrollView *)v;
+    }
+    return nil;
+}
+
+static NSString *DescribeCGColor(CGColorRef cg) {
+    if (!cg) return @"nil";
+    NSColor *c = [[NSColor colorWithCGColor:cg] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!c) return @"non-srgb";
+    return [NSString stringWithFormat:@"rgba(%d,%d,%d,%.2f)",
+            (int)std::lround(c.redComponent * 255.0),
+            (int)std::lround(c.greenComponent * 255.0),
+            (int)std::lround(c.blueComponent * 255.0),
+            c.alphaComponent];
+}
+
+static BOOL CGColorsRoughlyEqual(CGColorRef a, CGColorRef b) {
+    if (!a && !b) return YES;
+    if (!a || !b) return NO;
+    NSColor *ca = [[NSColor colorWithCGColor:a] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    NSColor *cb = [[NSColor colorWithCGColor:b] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!ca || !cb) return CGColorEqualToColor(a, b);
+    return std::fabs(ca.redComponent - cb.redComponent) < 0.01 &&
+           std::fabs(ca.greenComponent - cb.greenComponent) < 0.01 &&
+           std::fabs(ca.blueComponent - cb.blueComponent) < 0.01 &&
+           std::fabs(ca.alphaComponent - cb.alphaComponent) < 0.01;
+}
+
+typedef void (*RLPAddCursorRectImp)(id, SEL, NSRect, NSCursor *);
+static RLPAddCursorRectImp gOrigAddCursorRect = NULL;
+static BOOL gCapturedHandCursor = NO;
+static NSView *gCursorTargetView = nil;
+
+static void RLPTestAddCursorRect(id self, SEL _cmd, NSRect rect, NSCursor *cursor) {
+    if (self == gCursorTargetView && cursor == [NSCursor pointingHandCursor] &&
+        rect.size.width > 0.0 && rect.size.height > 0.0) {
+        gCapturedHandCursor = YES;
+    }
+    if (gOrigAddCursorRect) gOrigAddCursorRect(self, _cmd, rect, cursor);
+}
+
+static BOOL CheckViewHasHandCursor(NSView *view) {
+    Method m = class_getInstanceMethod([NSView class], @selector(addCursorRect:cursor:));
+    gOrigAddCursorRect = (RLPAddCursorRectImp)method_getImplementation(m);
+    gCapturedHandCursor = NO;
+    gCursorTargetView = view;
+    method_setImplementation(m, (IMP)RLPTestAddCursorRect);
+    @try {
+        [view resetCursorRects];
+    } @finally {
+        method_setImplementation(m, (IMP)gOrigAddCursorRect);
+        gOrigAddCursorRect = NULL;
+        gCursorTargetView = nil;
+    }
+    return gCapturedHandCursor;
+}
+
+@interface RLPCardClickSpy : NSObject
+@property (nonatomic, assign) NSInteger hits;
+- (void)onCardAction:(id)sender;
+@end
+
+@implementation RLPCardClickSpy
+- (void)onCardAction:(id)sender {
+    (void)sender;
+    ++self.hits;
+}
+@end
+
+static void TestListeningRoomButtonAffordance() {
+    std::printf("=== TestListeningRoomButtonAffordance（按钮感/hover/光标/chevron/≥28pt/可点卡区分）===\n");
+    NSString *origTheme = [RLPTheme themeName];
+
+    for (NSString *theme in @[@"dark", @"light"]) {
+        [RLPTheme setThemeName:theme];
+        RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+        (void)vc.view;
+        [vc rebuildAlbumGrid]; // 空态卡片与空态按钮一并检查
+
+        NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                   styleMask:NSWindowStyleMaskBorderless
+                                                     backing:NSBackingStoreBuffered defer:NO];
+        NSView *host = win.contentView;
+        [host addSubview:vc.view];
+        vc.view.translatesAutoresizingMaskIntoConstraints = NO;
+        [NSLayoutConstraint activateConstraints:@[
+            [vc.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+            [vc.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+            [vc.view.topAnchor constraintEqualToAnchor:host.topAnchor],
+            [vc.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+        ]];
+
+        for (NSNumber *wn in @[@1180, @900]) {
+            const CGFloat w = wn.doubleValue;
+            [win setContentSize:NSMakeSize(w, w > 1000 ? 760.0 : 600.0)];
+            [host layoutSubtreeIfNeeded];
+            [host layoutSubtreeIfNeeded];
+
+            NSArray<NSArray *> *specs = @[
+                @[@"room.folders",        @"room.folders.chevron",        @YES, @"音乐文件夹"],
+                @[@"room.deviceRefresh",  @"",                            @NO,  @"设备刷新"],
+                @[@"room.devicePopup",    @"room.devicePopup.chevron",    @YES, @"设备下拉"],
+                @[@"room.output.button",  @"room.output.chevron",         @YES, @"输出入口"],
+                @[@"room.play.button",    @"room.play.chevron",           @YES, @"播放入口"],
+                @[@"room.style.button",   @"room.style.chevron",          @YES, @"听音风格入口"],
+                @[@"room.playToggle",     @"",                            @NO,  @"继续播放"],
+                @[@"room.openAlbum",      @"room.openAlbum.chevron",      @YES, @"打开专辑页"],
+                @[@"room.queueAll",       @"room.queueAll.chevron",       @YES, @"查看全部"],
+                @[@"room.openAlbums",     @"room.openAlbums.chevron",     @YES, @"打开音乐库"],
+                @[@"room.libraryAction",  @"room.libraryAction.chevron",  @YES, @"添加音乐目录"],
+                @[@"room.more",           @"room.more.chevron",           @YES, @"更多"],
+                @[@"room.albumEmptyAction", @"room.albumEmptyAction.chevron", @YES, @"空态添加目录"],
+            ];
+
+            for (NSArray *sp in specs) {
+                NSString *bid = sp[0];
+                NSString *cid = sp[1];
+                const BOOL needChev = [sp[2] boolValue];
+                NSString *label = sp[3];
+                NSView *ctrl = FindById(vc.view, bid);
+                CK(ctrl != nil && !ctrl.hidden,
+                   [[NSString stringWithFormat:@"BTN[%@:%d] %@ (%@) 存在且可见", theme, (int)w, label, bid] UTF8String],
+                   @"nil or hidden");
+                if (!ctrl) continue;
+
+                const NSRect fr = ctrl.frame;
+                const BOOL sizeOk = (NSHeight(fr) >= 28.0 && NSWidth(fr) >= 28.0);
+                CGColorRef bg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+                CGColorRef bd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+                const CGFloat bw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+                const CGFloat cr = ctrl.layer ? ctrl.layer.cornerRadius : 0.0;
+                const BOOL bgOk = (ctrl.wantsLayer && bg != NULL && CGColorGetAlpha(bg) > 0.01);
+                const BOOL bdOk = (ctrl.wantsLayer && bw >= 1.0 && bd != NULL && CGColorGetAlpha(bd) > 0.01 && cr >= 4.0);
+                const BOOL trackOk = (ctrl.trackingAreas.count >= 1);
+                const BOOL handOk = CheckViewHasHandCursor(ctrl);
+
+                // 验证真实 hover 状态切换：mouseEntered 变色，mouseExited 恢复
+                NSColor *restBg = bg ? [NSColor colorWithCGColor:bg] : nil;
+                NSColor *restBd = bd ? [NSColor colorWithCGColor:bd] : nil;
+                NSEvent *enterEv = [NSEvent enterExitEventWithType:NSEventTypeMouseEntered
+                                                          location:NSZeroPoint
+                                                     modifierFlags:0
+                                                         timestamp:0
+                                                      windowNumber:win.windowNumber
+                                                           context:nil
+                                                       eventNumber:0
+                                                    trackingNumber:0
+                                                          userData:NULL];
+                NSEvent *exitEv = [NSEvent enterExitEventWithType:NSEventTypeMouseExited
+                                                         location:NSZeroPoint
+                                                    modifierFlags:0
+                                                        timestamp:0
+                                                     windowNumber:win.windowNumber
+                                                          context:nil
+                                                      eventNumber:0
+                                                   trackingNumber:0
+                                                         userData:NULL];
+                [ctrl mouseEntered:enterEv];
+                CGColorRef hovBg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+                CGColorRef hovBd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+                const CGFloat hovBw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+                const BOOL hoverChanged = (!CGColorsRoughlyEqual(restBg.CGColor, hovBg) ||
+                                           !CGColorsRoughlyEqual(restBd.CGColor, hovBd) ||
+                                           std::fabs(hovBw - bw) >= 0.2);
+                [ctrl mouseExited:exitEv];
+                CGColorRef afterBg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+                CGColorRef afterBd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+                const CGFloat afterBw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+                const BOOL hoverRestored = CGColorsRoughlyEqual(restBg.CGColor, afterBg) &&
+                                           CGColorsRoughlyEqual(restBd.CGColor, afterBd) &&
+                                           std::fabs(afterBw - bw) < 0.05;
+
+                BOOL chevOk = YES;
+                NSString *chevInfo = @"n/a";
+                if (needChev) {
+                    NSView *chev = FindById(ctrl, cid);
+                    if (!chev || chev.hidden || chev.alphaValue <= 0.5 ||
+                        NSWidth(chev.frame) <= 0.0 || NSHeight(chev.frame) <= 0.0) {
+                        chevOk = NO;
+                        chevInfo = chev ? [NSString stringWithFormat:@"hidden=%d frame=%@", chev.hidden, NSStringFromRect(chev.frame)] : @"missing";
+                    } else {
+                        NSRect cf = [chev convertRect:chev.bounds toView:ctrl];
+                        const BOOL inside = NSContainsRect(NSInsetRect(ctrl.bounds, -1.0, -1.0), cf);
+                        const BOOL onRight = NSMidX(cf) > NSMidX(ctrl.bounds);
+                        chevOk = inside && onRight;
+                        chevInfo = NSStringFromRect(cf);
+                    }
+                }
+
+                std::printf("  [BTN %-5s w=%4d %-22s] frame=%s h=%.1f bg=%s border=%s(w=%.1f,r=%.1f) track=%lu hand=%d hov=%d/%d chev=%s\n",
+                            theme.UTF8String, (int)w, bid.UTF8String,
+                            NSStringFromRect(fr).UTF8String, NSHeight(fr),
+                            DescribeCGColor(bg).UTF8String, DescribeCGColor(bd).UTF8String, bw, cr,
+                            (unsigned long)ctrl.trackingAreas.count, handOk, hoverChanged, hoverRestored,
+                            chevInfo.UTF8String);
+
+                CK(sizeOk && bgOk && bdOk && trackOk && handOk && hoverChanged && hoverRestored && chevOk,
+                   [[NSString stringWithFormat:@"BTN[%@:%d] %@ 满足按钮感/≥28pt/描边/hover/手型/chevron", theme, (int)w, bid] UTF8String],
+                   [NSString stringWithFormat:@"h=%.1f bgOk=%d bdOk=%d track=%lu hand=%d hov=%d/%d chevOk=%d(%@)",
+                    NSHeight(fr), bgOk, bdOk, (unsigned long)ctrl.trackingAreas.count, handOk,
+                    hoverChanged, hoverRestored, chevOk, chevInfo]);
+            }
+
+            // 整卡可点 vs 纯展示 / 混合下拉卡片区分
+            NSView *capsCard = FindById(vc.view, @"room.caps");
+            NSView *devCard  = FindById(vc.view, @"room.device");
+            NSView *outCard  = FindById(vc.view, @"room.output");
+            NSView *playCard = FindById(vc.view, @"room.play");
+            NSView *styCard  = FindById(vc.view, @"room.style");
+            CK(capsCard && devCard && outCard && playCard && styCard,
+               [[NSString stringWithFormat:@"CARD[%@:%d] 四张控制卡与能力展示卡存在", theme, (int)w] UTF8String], @"");
+            if (capsCard && devCard && outCard && playCard && styCard) {
+                const BOOL capsPassive = (capsCard.trackingAreas.count == 0) && !CheckViewHasHandCursor(capsCard);
+                const BOOL devPassiveShell = (devCard.trackingAreas.count == 0) && !CheckViewHasHandCursor(devCard);
+                CK(capsPassive && devPassiveShell,
+                   [[NSString stringWithFormat:@"CARD[%@:%d] 纯展示卡(room.caps)与含下拉容器卡(room.device)外壳无整卡手型误触", theme, (int)w] UTF8String],
+                   [NSString stringWithFormat:@"capsTrack=%lu devTrack=%lu",
+                    (unsigned long)capsCard.trackingAreas.count, (unsigned long)devCard.trackingAreas.count]);
+
+                for (NSView *ic in @[outCard, playCard, styCard]) {
+                    CGColorRef restBorder = ic.layer.borderColor;
+                    CGColorRef capsBorder = capsCard.layer.borderColor;
+                    const BOOL distinctRest = !CGColorsRoughlyEqual(restBorder, capsBorder);
+                    const BOOL icTrack = ic.trackingAreas.count >= 1;
+                    const BOOL icHand = CheckViewHasHandCursor(ic);
+                    [ic mouseEntered:[NSEvent enterExitEventWithType:NSEventTypeMouseEntered
+                                                            location:NSZeroPoint
+                                                       modifierFlags:0
+                                                           timestamp:0
+                                                        windowNumber:win.windowNumber
+                                                             context:nil
+                                                         eventNumber:0
+                                                      trackingNumber:0
+                                                            userData:NULL]];
+                    const BOOL icHover = (ic.layer.borderWidth >= 1.4) && !CGColorsRoughlyEqual(restBorder, ic.layer.borderColor);
+                    [ic mouseExited:[NSEvent enterExitEventWithType:NSEventTypeMouseExited
+                                                           location:NSZeroPoint
+                                                      modifierFlags:0
+                                                          timestamp:0
+                                                       windowNumber:win.windowNumber
+                                                            context:nil
+                                                        eventNumber:0
+                                                     trackingNumber:0
+                                                           userData:NULL]];
+                    const BOOL icRestore = (ic.layer.borderWidth <= 1.1) && CGColorsRoughlyEqual(restBorder, ic.layer.borderColor);
+                    std::printf("  [CARD %-5s w=%4d %-14s] restBorder=%s(w=%.1f) capsBorder=%s(w=%.1f) track=%lu hand=%d hov=%d/%d\n",
+                                theme.UTF8String, (int)w, ic.identifier.UTF8String,
+                                DescribeCGColor(restBorder).UTF8String, ic.layer.borderWidth,
+                                DescribeCGColor(capsBorder).UTF8String, capsCard.layer.borderWidth,
+                                (unsigned long)ic.trackingAreas.count, icHand, icHover, icRestore);
+                    CK(distinctRest && icTrack && icHand && icHover && icRestore,
+                       [[NSString stringWithFormat:@"CARD[%@:%d] 可点卡片 %@ 与纯展示有边框区分且支持整卡 hover 反馈", theme, (int)w, ic.identifier] UTF8String],
+                       [NSString stringWithFormat:@"distinct=%d track=%lu hand=%d hov=%d/%d border=%@ vs caps=%@",
+                        distinctRest, (unsigned long)ic.trackingAreas.count, icHand, icHover, icRestore,
+                        DescribeCGColor(restBorder), DescribeCGColor(capsBorder)]);
+                }
+
+                // 验证整卡点击语义（点击卡片上的 NSTextField 标签可打开弹层，不吞点击；内嵌 NSPopUpButton 不误触整卡）
+                if ([theme isEqualToString:@"dark"] && (int)w == 1180) {
+                    RLPQuickStartViewController *ovc = [[RLPOfflineOutputController alloc] init];
+                    (void)ovc.view;
+                    NSWindow *cwin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                                 styleMask:NSWindowStyleMaskBorderless
+                                                                   backing:NSBackingStoreBuffered defer:NO];
+                    [cwin.contentView addSubview:ovc.view];
+                    ovc.view.translatesAutoresizingMaskIntoConstraints = NO;
+                    [NSLayoutConstraint activateConstraints:@[
+                        [ovc.view.leadingAnchor constraintEqualToAnchor:cwin.contentView.leadingAnchor],
+                        [ovc.view.trailingAnchor constraintEqualToAnchor:cwin.contentView.trailingAnchor],
+                        [ovc.view.topAnchor constraintEqualToAnchor:cwin.contentView.topAnchor],
+                        [ovc.view.bottomAnchor constraintEqualToAnchor:cwin.contentView.bottomAnchor],
+                    ]];
+                    [cwin.contentView layoutSubtreeIfNeeded];
+
+                    NSView *clickOutCard = FindById(ovc.view, @"room.output");
+                    NSTextField *captionField = nil;
+                    for (NSView *sv in clickOutCard.subviews) {
+                        if ([sv isKindOfClass:[NSTextField class]]) { captionField = (NSTextField *)sv; break; }
+                    }
+                    if (clickOutCard && captionField) {
+                        NSPoint pInCard = NSMakePoint(NSMidX(captionField.frame), NSMidY(captionField.frame));
+                        NSPoint pInWin = [clickOutCard convertPoint:pInCard toView:nil];
+                        NSEvent *downEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                                             location:pInWin modifierFlags:0 timestamp:0
+                                                         windowNumber:cwin.windowNumber context:nil
+                                                          eventNumber:1 clickCount:1 pressure:1.0];
+                        NSEvent *upEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                                           location:pInWin modifierFlags:0 timestamp:0
+                                                       windowNumber:cwin.windowNumber context:nil
+                                                        eventNumber:2 clickCount:1 pressure:0.0];
+                        [cwin postEvent:upEv atStart:YES];
+                        [clickOutCard mouseDown:downEv];
+                        CK(ovc.popover != nil,
+                           "CARD_CLICK 点击可点卡静态标签（NSTextField）触发整卡弹层而非被 NSControl 吞掉",
+                           @"popover is nil");
+                        [ovc.popover close];
+                        ovc.popover = nil;
+                    }
+
+                    // 用同一 interactive card 类验证：内嵌 NSPopUpButton 时点击下拉不误触整卡 action，点空白触发
+                    Class cardCls = clickOutCard.class;
+                    NSView *guardCard = cardCls ? [[cardCls alloc] initWithFrame:NSMakeRect(0, 0, 220, 110)] : nil;
+                    if (guardCard) {
+                        RLPCardClickSpy *spy = [[RLPCardClickSpy alloc] init];
+                        [guardCard setValue:spy forKey:@"target"];
+                        SEL actSel = @selector(onCardAction:);
+                        ((void (*)(id, SEL, SEL))objc_msgSend)(guardCard, @selector(setAction:), actSel);
+                        NSPopUpButton *innerPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(12, 40, 196, 30) pullsDown:NO];
+                        [guardCard addSubview:innerPop];
+                        NSWindow *gwin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 260, 140)
+                                                                     styleMask:NSWindowStyleMaskBorderless
+                                                                       backing:NSBackingStoreBuffered defer:NO];
+                        guardCard.translatesAutoresizingMaskIntoConstraints = YES;
+                        guardCard.frame = NSMakeRect(10, 10, 220, 110);
+                        [gwin.contentView addSubview:guardCard];
+                        [gwin.contentView layoutSubtreeIfNeeded];
+
+                        NSPoint popPt = [guardCard convertPoint:NSMakePoint(NSMidX(innerPop.frame), NSMidY(innerPop.frame)) toView:nil];
+                        NSEvent *popDown = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                                              location:popPt modifierFlags:0 timestamp:0
+                                                          windowNumber:gwin.windowNumber context:nil
+                                                           eventNumber:3 clickCount:1 pressure:1.0];
+                        [guardCard mouseDown:popDown];
+                        const NSInteger hitsAfterPop = spy.hits;
+
+                        NSPoint bgPt = [guardCard convertPoint:NSMakePoint(20, 12) toView:nil];
+                        NSEvent *bgDown = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                                             location:bgPt modifierFlags:0 timestamp:0
+                                                         windowNumber:gwin.windowNumber context:nil
+                                                          eventNumber:4 clickCount:1 pressure:1.0];
+                        NSEvent *bgUp = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                                           location:bgPt modifierFlags:0 timestamp:0
+                                                       windowNumber:gwin.windowNumber context:nil
+                                                        eventNumber:5 clickCount:1 pressure:0.0];
+                        [gwin postEvent:bgUp atStart:YES];
+                        [guardCard mouseDown:bgDown];
+                        CK(hitsAfterPop == 0 && spy.hits == 1,
+                           "CARD_CLICK_GUARD 点击内部 NSPopUpButton 不误触整卡 action，点击卡片空白正常触发",
+                           [NSString stringWithFormat:@"afterPop=%ld afterBg=%ld", (long)hitsAfterPop, (long)spy.hits]);
+                    }
+                }
+            }
+
+            // 按钮不得过大挤压/重叠：检查卡内关键控件无重叠、无越界
+            NSView *devRefresh = FindById(vc.view, @"room.deviceRefresh");
+            NSView *devPopup = FindById(vc.view, @"room.devicePopup");
+            NSView *npCard = FindById(vc.view, @"room.nowplaying");
+            NSView *npTog = FindById(vc.view, @"room.playToggle");
+            NSView *npOpn = FindById(vc.view, @"room.openAlbum");
+            if (devCard && devRefresh && devPopup && npCard && npTog && npOpn) {
+                NSRect rRef = [devRefresh convertRect:devRefresh.bounds toView:devCard];
+                NSRect rPop = [devPopup convertRect:devPopup.bounds toView:devCard];
+                NSRect rTog = [npTog convertRect:npTog.bounds toView:npCard];
+                NSRect rOpn = [npOpn convertRect:npOpn.bounds toView:npCard];
+                const BOOL noOverlap = NSIsEmptyRect(NSIntersectionRect(rRef, rPop)) &&
+                                       NSIsEmptyRect(NSIntersectionRect(rTog, rOpn));
+                const BOOL insideCard = NSMaxX(rRef) <= NSWidth(devCard.bounds) + 1.0 &&
+                                        NSMaxX(rPop) <= NSWidth(devCard.bounds) + 1.0 &&
+                                        NSMaxX(rOpn) <= NSWidth(npCard.bounds) + 1.0;
+                CK(noOverlap && insideCard,
+                   [[NSString stringWithFormat:@"CARD[%@:%d] 强化按钮后不重叠、不挤压溢出父卡", theme, (int)w] UTF8String],
+                   [NSString stringWithFormat:@"ref=%@ pop=%@ tog=%@ opn=%@",
+                    NSStringFromRect(rRef), NSStringFromRect(rPop), NSStringFromRect(rTog), NSStringFromRect(rOpn)]);
+            }
+        }
+    }
+
+    if (origTheme.length) [RLPTheme setThemeName:origTheme];
+}
+
+static NSImage *MakeTestCover512() {
+    NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(512, 512)];
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL
+                      pixelsWide:512
+                      pixelsHigh:512
+                   bitsPerSample:8
+                 samplesPerPixel:4
+                        hasAlpha:YES
+                        isPlanar:NO
+                  colorSpaceName:NSCalibratedRGBColorSpace
+                     bytesPerRow:0
+                    bitsPerPixel:0];
+    if (rep) {
+        [img addRepresentation:rep];
+    } else {
+        [img lockFocus];
+        [[NSColor systemBlueColor] setFill];
+        NSRectFill(NSMakeRect(0, 0, 512, 512));
+        [img unlockFocus];
+    }
+    return img;
+}
+
+static NSArray<RLPAlbum *> *MakeTestAlbums(NSInteger count) {
+    NSMutableArray<NSDictionary *> *raw = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (NSInteger i = 0; i < count; ++i) {
+        [raw addObject:@{
+            @"key": [NSString stringWithFormat:@"alb-%ld", (long)i],
+            @"name": [NSString stringWithFormat:@"Very Long Classical Symphony Album Title Number %ld With Extra Words For Tail Truncation", (long)i],
+            @"album": [NSString stringWithFormat:@"Very Long Classical Symphony Album Title Number %ld With Extra Words For Tail Truncation", (long)i],
+            @"artist": @"Very Long Philharmonic Orchestra & Conductor Name That Should Not Overflow",
+            @"year": @(2000 + (i % 24)),
+            @"sampleRate": @192000,
+            @"bits": @24,
+        }];
+    }
+    NSArray<RLPAlbum *> *parsed = [RLPAlbum albumsFromJSON:@{@"ok": @YES, @"albums": raw, @"items": raw}];
+    if (parsed.count >= (NSUInteger)count) return parsed;
+    NSMutableArray<RLPAlbum *> *out = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (NSInteger i = 0; i < count; ++i) {
+        RLPAlbum *a = [[RLPAlbum alloc] init];
+        @try {
+            [a setValue:raw[(NSUInteger)i][@"key"] forKey:@"key"];
+            [a setValue:raw[(NSUInteger)i][@"name"] forKey:@"name"];
+            [a setValue:raw[(NSUInteger)i][@"artist"] forKey:@"artist"];
+            [a setValue:raw[(NSUInteger)i][@"year"] forKey:@"year"];
+            [a setValue:raw[(NSUInteger)i][@"sampleRate"] forKey:@"sampleRate"];
+            [a setValue:raw[(NSUInteger)i][@"bits"] forKey:@"bits"];
+        } @catch (NSException *ex) {
+            (void)ex;
+        }
+        [out addObject:a];
+    }
+    return out;
+}
+
+static NSDictionary *SampleLongQueueJSON() {
+    return @{
+        @"items": @[@"/tmp/track1.flac", @"/tmp/track2.flac", @"/tmp/track3.flac", @"/tmp/track4.flac"],
+        @"metas": @[
+            @{@"t": @"Symphony No. 9 in D Minor Op. 125 Movement IV Presto Allegro Assai Very Long Title",
+              @"a": @"Berliner Philharmoniker & Long Conductor Name", @"d": @1452.0},
+            @{@"t": @"Goldberg Variations BWV 988 Aria da Capo Very Long Title For Narrow Queue Preview",
+              @"a": @"Glenn Gould", @"d": @312.0},
+            @{@"t": @"Kind of Blue So What Remastered Ultra High Definition Long Title",
+              @"a": @"Miles Davis Quintet", @"d": @562.0},
+            @{@"t": @"The Well-Tempered Clavier Book I Prelude and Fugue No. 1 in C Major",
+              @"a": @"Sviatoslav Richter", @"d": @285.0},
+        ],
+        @"index": @0,
+    };
+}
+
+static NSUInteger ApplyCoversToRoom(RLPQuickStartViewController *vc, NSImage * _Nullable cover) {
+    vc.npCover.image = cover;
+    NSMutableArray<NSView *> *covers = [NSMutableArray array];
+    CollectByIdPrefix(vc.view, @"room.albumcover.", covers);
+    for (NSView *v in covers) {
+        if ([v isKindOfClass:[NSImageView class]]) {
+            ((NSImageView *)v).image = cover;
+        }
+    }
+    return covers.count;
+}
+
+static void MountVCInWindow(RLPQuickStartViewController *vc, NSWindow *win) {
+    NSView *host = win.contentView;
+    [host addSubview:vc.view];
+    vc.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [vc.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+        [vc.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+        [vc.view.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [vc.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+    ]];
+}
+
+static void VerifyRoomFit(RLPQuickStartViewController *vc, NSWindow *win, CGFloat expectedW,
+                          NSString *tag, BOOL expectCover) {
+    NSScrollView *scroll = FindRoomScrollView(vc.view);
+    NSView *cDev = FindById(vc.view, @"room.device");
+    NSView *cOut = FindById(vc.view, @"room.output");
+    NSView *cPlay = FindById(vc.view, @"room.play");
+    NSView *cStyle = FindById(vc.view, @"room.style");
+    NSView *cardsContainer = vc.cardsContainer ?: cDev.superview;
+    NSView *albumRowView = FindById(vc.view, @"room.albums") ?: vc.albumRow;
+    NSView *npCard = FindById(vc.view, @"room.nowplaying");
+    NSView *qCard = FindById(vc.view, @"room.queue");
+
+    const CGFloat docW = scroll ? NSWidth(scroll.documentView.frame) : -1.0;
+    const CGFloat clipW = scroll ? NSWidth(scroll.contentView.bounds) : -1.0;
+    const CGFloat hostW = NSWidth(win.contentView.bounds);
+    const CGFloat pageW = NSWidth(vc.view.bounds);
+
+    CK(scroll && docW <= clipW + 1.0 && hostW <= expectedW + 1.0 && pageW <= expectedW + 1.0,
+       [[NSString stringWithFormat:@"%@ scroll doc<=clip and host/page<=expected", tag] UTF8String],
+       [NSString stringWithFormat:@"expected=%.1f host=%.1f page=%.1f clip=%.1f doc=%.1f",
+        expectedW, hostW, pageW, clipW, docW]);
+
+    BOOL fourCardsOk = (cardsContainer != nil && cDev && cOut && cPlay && cStyle);
+    NSString *cardsDetail = @"";
+    if (fourCardsOk) {
+        const CGFloat ccW = NSWidth(cardsContainer.bounds);
+        for (NSView *card in @[cDev, cOut, cPlay, cStyle]) {
+            NSRect cr = [card convertRect:card.bounds toView:cardsContainer];
+            NSRect pr = [card convertRect:card.bounds toView:vc.view];
+            if (NSWidth(cr) <= 0 || NSMaxX(cr) > ccW + 1.0 || NSMaxX(pr) > pageW + 1.0) {
+                fourCardsOk = NO;
+                cardsDetail = [NSString stringWithFormat:@"id=%@ cr=%@ ccW=%.1f pr=%@ pageW=%.1f",
+                               card.identifier, NSStringFromRect(cr), ccW, NSStringFromRect(pr), pageW];
+                break;
+            }
+        }
+    }
+    CK(fourCardsOk, [[NSString stringWithFormat:@"%@ four cards maxX <= cardsContainer/page", tag] UTF8String], cardsDetail);
+
+    BOOL albumsOk = ([albumRowView isKindOfClass:[NSStackView class]]);
+    NSString *albumsDetail = @"";
+    NSUInteger foundAlbumCards = 0;
+    if (albumsOk) {
+        NSStackView *ar = (NSStackView *)albumRowView;
+        const CGFloat arW = NSWidth(ar.bounds);
+        for (NSView *rowView in ar.arrangedSubviews) {
+            if (![rowView isKindOfClass:[NSStackView class]]) continue;
+            NSStackView *rs = (NSStackView *)rowView;
+            NSRect rr = [rs convertRect:rs.bounds toView:ar];
+            if (NSMaxX(rr) > arW + 1.0) {
+                albumsOk = NO;
+                albumsDetail = [NSString stringWithFormat:@"rowStack=%@ arW=%.1f", NSStringFromRect(rr), arW];
+                break;
+            }
+            for (NSView *item in rs.arrangedSubviews) {
+                NSRect ir = [item convertRect:item.bounds toView:ar];
+                if (NSWidth(ir) <= 0 || NSMaxX(ir) > arW + 1.0) {
+                    albumsOk = NO;
+                    albumsDetail = [NSString stringWithFormat:@"item=%@ ir=%@ arW=%.1f", item.identifier ?: @"", NSStringFromRect(ir), arW];
+                    break;
+                }
+                if ([item.identifier hasPrefix:@"room.albumcard."]) {
+                    ++foundAlbumCards;
+                    NSMutableArray<NSView *> *ivs = [NSMutableArray array];
+                    CollectByIdPrefix(item, @"room.albumcover.", ivs);
+                    for (NSView *v in ivs) {
+                        if (![v isKindOfClass:[NSImageView class]]) continue;
+                        NSImageView *iv = (NSImageView *)v;
+                        NSRect ivr = [iv convertRect:iv.bounds toView:ar];
+                        if (NSMaxX(ivr) > arW + 1.0) {
+                            albumsOk = NO;
+                            albumsDetail = [NSString stringWithFormat:@"cover=%@ ivr=%@ arW=%.1f", iv.identifier, NSStringFromRect(ivr), arW];
+                            break;
+                        }
+                        if (expectCover && (!iv.image || iv.image.size.width < 512.0)) {
+                            albumsOk = NO;
+                            albumsDetail = [NSString stringWithFormat:@"cover=%@ missing 512 image", iv.identifier];
+                            break;
+                        }
+                    }
+                    if (!albumsOk) break;
+                }
+            }
+            if (!albumsOk) break;
+        }
+    }
+    CK(albumsOk && foundAlbumCards > 0,
+       [[NSString stringWithFormat:@"%@ album cards maxX <= albumRow", tag] UTF8String],
+       [NSString stringWithFormat:@"cards=%lu %@", (unsigned long)foundAlbumCards, albumsDetail]);
+
+    BOOL npqOk = (npCard != nil && qCard != nil);
+    NSString *npqDetail = @"";
+    if (npqOk) {
+        NSRect npr = [npCard convertRect:npCard.bounds toView:vc.view];
+        NSRect qr = [qCard convertRect:qCard.bounds toView:vc.view];
+        if (NSWidth(npr) <= 0 || NSMaxX(npr) > pageW + 1.0 ||
+            NSWidth(qr) <= 0 || NSMaxX(qr) > pageW + 1.0) {
+            npqOk = NO;
+            npqDetail = [NSString stringWithFormat:@"np=%@ q=%@ pageW=%.1f",
+                         NSStringFromRect(npr), NSStringFromRect(qr), pageW];
+        }
+    }
+    CK(npqOk, [[NSString stringWithFormat:@"%@ nowplaying/queue maxX <= pageW", tag] UTF8String], npqDetail);
+}
+
+static void TestRoomCoverAndCacheFitB1B2B3() {
+    // ---------- B1 & B3: 四档窗宽 × 封面未加载/512x512 加载后 ----------
+    RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+    (void)vc.view;
+    vc.albumsData = MakeTestAlbums(10);
+    vc.npTitle.stringValue = @"Very Long Track Title In Listening Room That Must Truncate Cleanly Without Expanding Window Width";
+    vc.npSub.stringValue = @"Very Long Orchestra & Soloist · Very Long Classical Album Title · 2024";
+    [vc renderQueueFromJSON:SampleLongQueueJSON()];
+    [vc rebuildAlbumGrid];
+
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1394, 880)
+                                               styleMask:NSWindowStyleMaskBorderless
+                                                 backing:NSBackingStoreBuffered defer:NO];
+    MountVCInWindow(vc, win);
+
+    NSArray<NSArray<NSNumber *> *> *sizes = @[
+        @[@1394, @880],
+        @[@1180, @760],
+        @[@900, @600],
+        @[@800, @600],
+    ];
+    NSImage *cover512 = MakeTestCover512();
+
+    // B3a: 封面未加载状态
+    for (NSArray<NSNumber *> *sz in sizes) {
+        const CGFloat w = sz[0].doubleValue, h = sz[1].doubleValue;
+        [win setContentSize:NSMakeSize(w, h)];
+        [win.contentView layoutSubtreeIfNeeded];
+        ApplyCoversToRoom(vc, nil);
+        [win.contentView layoutSubtreeIfNeeded];
+        VerifyRoomFit(vc, win, w, [NSString stringWithFormat:@"B3_nocover_%dx%d", (int)w, (int)h], NO);
+    }
+
+    // B1 & B3b: 加载 512x512 NSImage 封面后（先设 512x512 封面，再按四档检测）
+    for (NSArray<NSNumber *> *sz in sizes) {
+        const CGFloat w = sz[0].doubleValue, h = sz[1].doubleValue;
+        [win setContentSize:NSMakeSize(w, h)];
+        [win.contentView layoutSubtreeIfNeeded];
+        const NSUInteger covCount = ApplyCoversToRoom(vc, cover512);
+        [win.contentView layoutSubtreeIfNeeded];
+        CK(covCount >= 8, [[NSString stringWithFormat:@"B1_%dx%d album covers populated", (int)w, (int)h] UTF8String],
+           [NSString stringWithFormat:@"count=%lu", (unsigned long)covCount]);
+        VerifyRoomFit(vc, win, w, [NSString stringWithFormat:@"B1_cover512_%dx%d", (int)w, (int)h], YES);
+    }
+
+    // ---------- B2: 同一缓存 VC 1180 挂载 -> 改宿主 900 -> remove/add 到新宿主 ----------
+    RLPQuickStartViewController *cachedVC = [[RLPQuickStartViewController alloc] init];
+    (void)cachedVC.view;
+    cachedVC.albumsData = MakeTestAlbums(10);
+    cachedVC.npTitle.stringValue = @"Very Long Cached Listening Room Title That Must Reflow On Host Reentry";
+    cachedVC.npSub.stringValue = @"Long Artist · Long Album";
+    [cachedVC renderQueueFromJSON:SampleLongQueueJSON()];
+    [cachedVC rebuildAlbumGrid];
+
+    NSWindow *w1180 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                 styleMask:NSWindowStyleMaskBorderless
+                                                   backing:NSBackingStoreBuffered defer:NO];
+    MountVCInWindow(cachedVC, w1180);
+    [w1180.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w1180.contentView layoutSubtreeIfNeeded];
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 5,
+       "B2a cached VC at 1180 adopts 4 card cols / 5 album cols",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    VerifyRoomFit(cachedVC, w1180, 1180.0, @"B2a_1180", YES);
+
+    // 改宿主 900
+    [w1180 setContentSize:NSMakeSize(900, 600)];
+    [w1180.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w1180.contentView layoutSubtreeIfNeeded];
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 4,
+       "B2b host resized to 900 adopts 4 card cols / 4 album cols",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    VerifyRoomFit(cachedVC, w1180, 900.0, @"B2b_resize_900", YES);
+
+    // 复位到 1180 后 remove/add 到新宿主 900（先触发 viewWillMoveToSuperview:/viewDidMoveToWindow）
+    [w1180 setContentSize:NSMakeSize(1180, 760)];
+    [w1180.contentView layoutSubtreeIfNeeded];
+    [cachedVC.view removeFromSuperview];
+
+    NSWindow *w900 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 600)
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered defer:NO];
+    cachedVC.view.frame = w900.contentView.bounds;
+    MountVCInWindow(cachedVC, w900);
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 4,
+       "B2c remove/add to 900 host updates responsive layout immediately on mount",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    [w900.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w900.contentView layoutSubtreeIfNeeded];
+    VerifyRoomFit(cachedVC, w900, 900.0, @"B2c_reenter_900", YES);
+
+    // 再验证 remove/add 到 2x2（720）与 1 列（380）新宿主，确保四卡 2x2/1 列与专辑列数对应且 doc<=clip
+    [cachedVC.view removeFromSuperview];
+    NSWindow *w720 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 720, 600)
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered defer:NO];
+    cachedVC.view.frame = w720.contentView.bounds;
+    MountVCInWindow(cachedVC, w720);
+    CK(cachedVC.currentCardColumns == 2 && cachedVC.currentAlbumColumns == 3,
+       "B2d remove/add to 720 host adopts 2x2 cards / 3 album cols immediately",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    [w720.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w720.contentView layoutSubtreeIfNeeded];
+    VerifyRoomFit(cachedVC, w720, 720.0, @"B2d_reenter_720", YES);
+
+    [cachedVC.view removeFromSuperview];
+    NSWindow *w380 = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 380, 600)
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered defer:NO];
+    cachedVC.view.frame = w380.contentView.bounds;
+    MountVCInWindow(cachedVC, w380);
+    CK(cachedVC.currentCardColumns == 1 && cachedVC.currentAlbumColumns == 2,
+       "B2e remove/add to 380 host adopts 1x4 cards / 2 album cols immediately",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    [w380.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w380.contentView layoutSubtreeIfNeeded];
+    VerifyRoomFit(cachedVC, w380, 380.0, @"B2e_reenter_380", YES);
+
+    // 额外验证：保持旧 1180 frame 直接 remove/add 到 900 新宿主（不预设 frame），单次 layoutSubtreeIfNeeded 必须完成收敛
+    [cachedVC.view removeFromSuperview];
+    cachedVC.view.frame = NSMakeRect(0, 0, 1180, 760);
+    NSWindow *w900b = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 900, 600)
+                                                 styleMask:NSWindowStyleMaskBorderless
+                                                   backing:NSBackingStoreBuffered defer:NO];
+    MountVCInWindow(cachedVC, w900b);
+    [w900b.contentView layoutSubtreeIfNeeded];
+    ApplyCoversToRoom(cachedVC, cover512);
+    [w900b.contentView layoutSubtreeIfNeeded];
+    CK(cachedVC.currentCardColumns == 4 && cachedVC.currentAlbumColumns == 4,
+       "B2f stale 1180 frame remove/add to 900 host converges on layout",
+       [NSString stringWithFormat:@"cards=%ld albums=%ld", (long)cachedVC.currentCardColumns, (long)cachedVC.currentAlbumColumns]);
+    VerifyRoomFit(cachedVC, w900b, 900.0, @"B2f_stale_reenter_900", YES);
+}
+
+typedef void (*RLPContractGetJSONImp)(id, SEL, NSString *, RLPJSONCompletion);
+static RLPContractGetJSONImp gContractOrigGetJSONImp = NULL;
+static NSDictionary *gContractQueueMock = nil;
+static NSDictionary *gContractStatusMock = nil;
+
+static void RLPContractMockGetJSON(id self, SEL _cmd, NSString *path, RLPJSONCompletion done) {
+    if ([path hasPrefix:@"/api/queue?meta=1"] && gContractQueueMock) {
+        if (done) done(gContractQueueMock);
+        return;
+    }
+    if ([path hasPrefix:@"/api/status"] && gContractStatusMock) {
+        if (done) done(gContractStatusMock);
+        return;
+    }
+    if (gContractOrigGetJSONImp) {
+        gContractOrigGetJSONImp(self, _cmd, path, done);
+    } else if (done) {
+        done(@{@"ok": @NO});
+    }
+}
+
+static void PumpContract(double seconds) {
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    while ([until timeIntervalSinceNow] > 0) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+}
+
+static NSDictionary *MakeContractQueueJSON(NSArray<NSString *> *paths, NSString *curKey, id curVal) {
+    NSMutableArray *metas = [NSMutableArray arrayWithCapacity:paths.count];
+    NSMutableArray *cues = [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSUInteger i = 0; i < paths.count; ++i) {
+        [metas addObject:@{
+            @"t": [NSString stringWithFormat:@"Song %c", (char)('A' + i)],
+            @"a": @"Contract Artist",
+            @"d": @(180.0 + i * 15.0),
+        }];
+        [cues addObject:@[@(-1), @(-1)]];
+    }
+    NSMutableDictionary *d = [@{
+        @"ok": @YES,
+        @"items": paths,
+        @"metas": metas,
+        @"cues": cues,
+    } mutableCopy];
+    if (curKey.length && curVal) d[curKey] = curVal;
+    return d;
+}
+
+static void InspectQueueListState(RLPQuickStartViewController *vc,
+                                  NSInteger *outRowCount,
+                                  NSInteger *outHighlightedCount,
+                                  NSInteger *outHighlightedIdx,
+                                  NSString **outHighlightedPath) {
+    NSArray<NSView *> *rows = vc.queueList.arrangedSubviews;
+    *outRowCount = (NSInteger)rows.count;
+    *outHighlightedCount = 0;
+    *outHighlightedIdx = -1;
+    *outHighlightedPath = nil;
+    if (vc.queueEmptyLabel != nil) return;
+
+    RLPTheme *t = [RLPTheme current];
+    NSColor *accWeakSRGB = [t.accentWeak colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    for (NSUInteger k = 0; k < rows.count; ++k) {
+        NSView *row = rows[k];
+        NSButton *hit = nil;
+        for (NSView *sub in row.subviews) {
+            if ([sub isKindOfClass:[NSButton class]]) { hit = (NSButton *)sub; break; }
+        }
+        const BOOL flag = (k < vc.queueRowCurrentFlags.count) && vc.queueRowCurrentFlags[k].boolValue;
+        BOOL bgMatches = NO;
+        if (row.layer && row.layer.backgroundColor && accWeakSRGB) {
+            NSColor *bg = [[NSColor colorWithCGColor:row.layer.backgroundColor] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+            if (bg) {
+                bgMatches = fabs(bg.redComponent - accWeakSRGB.redComponent) < 0.02 &&
+                            fabs(bg.greenComponent - accWeakSRGB.greenComponent) < 0.02 &&
+                            fabs(bg.blueComponent - accWeakSRGB.blueComponent) < 0.02;
+            }
+        }
+        if (flag && bgMatches && hit) {
+            ++(*outHighlightedCount);
+            *outHighlightedIdx = hit.tag;
+            *outHighlightedPath = hit.toolTip;
+        }
+    }
+}
+
+static void TestListeningQueueFollow() {
+    Method m = class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:));
+    gContractOrigGetJSONImp = (RLPContractGetJSONImp)method_getImplementation(m);
+    method_setImplementation(m, (IMP)RLPContractMockGetJSON);
+
+    NSArray<NSString *> *tracks5 = @[
+        @"/tmp/rlp_q_A.flac",
+        @"/tmp/rlp_q_B.flac",
+        @"/tmp/rlp_q_C.flac",
+        @"/tmp/rlp_q_D.flac",
+        @"/tmp/rlp_q_E.flac",
+    ];
+
+    RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+    vc.view.frame = NSMakeRect(0, 0, 1100, 760);
+    [vc.view layoutSubtreeIfNeeded];
+
+    // 初始在曲 A（index=0）
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"index", @0);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[0]};
+    [vc reloadQueue];
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+
+    NSInteger rowCount = 0, hiCount = 0, hiIdx = -1;
+    NSString *hiPath = nil;
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 0 && [hiPath isEqualToString:tracks5[0]],
+       "Q1-precondition: 聆听室 queueList 初始高亮曲 A (index=0, 4行)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // Q1: 模拟状态从曲 A 切到曲 B（队列 JSON 使用 current=B）
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"current", tracks5[1]);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[1]};
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q1 highlighted index=%ld path=%s (rows=%ld)\n",
+                (long)hiIdx, hiPath.UTF8String ?: "(nil)", (long)rowCount);
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 1 && [hiPath isEqualToString:tracks5[1]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q1 切歌到 B 后聆听室 queueList 高亮行=B、行数不变且队列顺序不变",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // Q3: 连续切 3 首（C -> D -> 轮询 E）仍跟随
+    // 1) RLPPlaybackStatusNotification -> C (cur=C)
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"cur", tracks5[2]);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[2]};
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusNotification"
+                                                        object:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q3-1 highlighted index=%ld path=%s\n", (long)hiIdx, hiPath.UTF8String ?: "(nil)");
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 2 && [hiPath isEqualToString:tracks5[2]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q3a 聆听室连续第 1 次切歌跟随到 C (index=2)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // 2) applyStatusJSON -> D (index=3)
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"index", @3);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[3]};
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q3-2 highlighted index=%ld path=%s\n", (long)hiIdx, hiPath.UTF8String ?: "(nil)");
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 3 && [hiPath isEqualToString:tracks5[3]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q3b 聆听室连续第 2 次切歌跟随到 D (index=3)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+
+    // 3) activate + 1s 轮询定时器自动发现切到 E (current=@4，预览窗应滑到 1..4)
+    [vc activate];
+    PumpContract(0.05);
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"current", @4);
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": tracks5[4]};
+    PumpContract(1.15);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    std::printf("  [INFO] Q3-3 (poll) highlighted index=%ld path=%s\n", (long)hiIdx, hiPath.UTF8String ?: "(nil)");
+    CK(rowCount == 4 && hiCount == 1 && hiIdx == 4 && [hiPath isEqualToString:tracks5[4]] &&
+       [vc.queuePaths isEqualToArray:tracks5],
+       "Q3c 聆听室连续第 3 次通过轮询跟随到 E (index=4)",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld path=%@",
+        (long)rowCount, (long)hiCount, (long)hiIdx, hiPath ?: @"nil"]);
+    [vc viewDidDisappear];
+
+    // Q4: 当前不在队列 / 越界 / 空队列 -> 不崩、不高亮错行
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"current", @"/tmp/rlp_q_NOT_IN_QUEUE.flac");
+    gContractStatusMock = @{@"ok": @YES, @"playing": @YES, @"paused": @NO, @"currentPath": @"/tmp/rlp_q_NOT_IN_QUEUE.flac"};
+    [vc applyStatusJSON:gContractStatusMock];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(rowCount == 4 && hiCount == 0 && hiIdx == -1 && vc.queueCurrentIndex == -1,
+       "Q4a 聆听室当前曲目不在队列时不崩且不高亮任何行",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld curIdx=%ld",
+        (long)rowCount, (long)hiCount, (long)hiIdx, (long)vc.queueCurrentIndex]);
+
+    gContractQueueMock = MakeContractQueueJSON(tracks5, @"index", @99);
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(rowCount == 4 && hiCount == 0 && hiIdx == -1 && vc.queueCurrentIndex == -1,
+       "Q4b 聆听室队列越界 index=99 时不崩且不高亮错行",
+       [NSString stringWithFormat:@"rows=%ld hi=%ld idx=%ld curIdx=%ld",
+        (long)rowCount, (long)hiCount, (long)hiIdx, (long)vc.queueCurrentIndex]);
+
+    gContractQueueMock = @{@"ok": @YES, @"items": @[], @"metas": @[], @"cues": @[], @"current": tracks5[0]};
+    [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:nil];
+    PumpContract(0.05);
+    InspectQueueListState(vc, &rowCount, &hiCount, &hiIdx, &hiPath);
+    CK(vc.queueEmptyLabel != nil && rowCount == 1 && hiCount == 0 && vc.queueCurrentIndex == -1,
+       "Q4c 聆听室空队列时显示空态且不高亮错行",
+       [NSString stringWithFormat:@"empty=%d rows=%ld curIdx=%ld",
+        vc.queueEmptyLabel != nil, (long)rowCount, (long)vc.queueCurrentIndex]);
+
+    gContractQueueMock = nil;
+    gContractStatusMock = nil;
+    method_setImplementation(m, (IMP)gContractOrigGetJSONImp);
+    gContractOrigGetJSONImp = NULL;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         TestMountedRoomGeometry();
+        TestListeningRoomButtonAffordance();
         if (argc == 2 && std::strcmp(argv[1], "--geometry-only") == 0) return gFail ? 1 : 0;
         std::printf("=== test_native_listening_contract（聆听室 v3.3.11 契约 · 离线/null 核心）===\n");
 
@@ -506,6 +1470,94 @@ int main(int argc, char **argv) {
 
             [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&volume=-120"];
         }
+
+        // ---------- N4 聆听室底部入口改成「打开专辑页」，点击进入当前曲所属专辑详情而非曲目详情 ----------
+        {
+            RLPQuickStartViewController *n4vc = [[RLPQuickStartViewController alloc] init];
+            (void)n4vc.view;
+            NSButton *openBtn = (NSButton *)FindById(n4vc.view, @"room.openAlbum");
+            CK(openBtn != nil && openBtn == n4vc.npOpenButton,
+               "N4a 聆听室按钮暴露 room.openAlbum（并与 npOpenButton 一致）",
+               openBtn.identifier ?: @"nil");
+            CK(openBtn && [openBtn.title isEqualToString:RLPTr(@"打开专辑页")] &&
+               ![openBtn.title isEqualToString:RLPTr(@"打开曲目详情")],
+               "N4b 按钮标题为「打开专辑页」而非「打开曲目详情」",
+               openBtn.title ?: @"nil");
+            [n4vc applyLanguage];
+            CK(openBtn && [openBtn.title isEqualToString:RLPTr(@"打开专辑页")],
+               "N4c 语言刷新后标题仍为「打开专辑页」",
+               openBtn.title ?: @"nil");
+
+            __block NSInteger npFired = 0;
+            NSMutableArray<NSString *> *openedAlbums = [NSMutableArray array];
+            NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+            id obNP = [nc addObserverForName:@"RLPOpenNowPlayingNotification" object:nil queue:nil
+                                  usingBlock:^(NSNotification *note) {
+                (void)note;
+                ++npFired;
+            }];
+            id obAlb = [nc addObserverForName:RLPOpenAlbumNotification object:nil queue:nil
+                                   usingBlock:^(NSNotification *note) {
+                if ([note.object isKindOfClass:[NSString class]]) [openedAlbums addObject:note.object];
+            }];
+
+            n4vc.currentPath = @"/offline/ArtistA/SymphonyB/01.flac";
+            n4vc.lastMetaDict = @{@"title": @"Mov I", @"album": @"Symphony Album B", @"artist": @"Conductor A"};
+            RLPAlbum *alb0 = [[RLPAlbum alloc] init];
+            alb0.key = @"alb-other"; alb0.name = @"Other Album"; alb0.artist = @"Someone";
+            RLPAlbum *alb1 = [[RLPAlbum alloc] init];
+            alb1.key = @"alb-sym-b"; alb1.name = @"Symphony Album B"; alb1.artist = @"Conductor A";
+            n4vc.albumsData = @[alb0, alb1];
+
+            CK(openBtn && openBtn.enabled && openBtn.target == n4vc && openBtn.action == @selector(onOpenCurrentAlbum:),
+               "N4d openBtn 绑定 onOpenCurrentAlbum:",
+               NSStringFromSelector(openBtn.action ?: NULL));
+            [NSApp sendAction:openBtn.action to:openBtn.target from:openBtn];
+            CK(npFired == 0 && openedAlbums.count == 1 && [openedAlbums.lastObject isEqualToString:@"alb-sym-b"],
+               "N4e 点击打开当前曲所属专辑页（key=alb-sym-b）且不再打开 track detail",
+               [NSString stringWithFormat:@"np=%ld albums=%@", (long)npFired, openedAlbums]);
+
+            // direct albumKey 路径
+            n4vc.albumsData = @[];
+            n4vc.lastMetaDict = @{@"title": @"Mov I", @"album": @"Direct", @"albumKey": @"alb-direct-key"};
+            [NSApp sendAction:openBtn.action to:openBtn.target from:openBtn];
+            CK(npFired == 0 && openedAlbums.count == 2 && [openedAlbums.lastObject isEqualToString:@"alb-direct-key"],
+               "N4f metadata 含 albumKey 时直接打开对应专辑详情",
+               [NSString stringWithFormat:@"np=%ld albums=%@", (long)npFired, openedAlbums]);
+
+            // albumsData 为空时走 /api/lib/albums?q= 查询回落
+            n4vc.albumsData = @[];
+            n4vc.lastMetaDict = @{@"title": @"Mov II", @"album": @"Fallback Album", @"artist": @"Fallback Artist"};
+            Method getM = class_getInstanceMethod(RLPCoreClient.class, @selector(getJSON:completion:));
+            IMP origGet = method_getImplementation(getM);
+            __block NSString *queriedURL = nil;
+            IMP mockGet = imp_implementationWithBlock(^(id selfObj, NSString *path, RLPJSONCompletion done) {
+                (void)selfObj;
+                queriedURL = path;
+                if (done) {
+                    done(@{@"ok": @YES,
+                           @"albums": @[@{@"k": @"alb-fallback-k", @"name": @"Fallback Album", @"artist": @"Fallback Artist"}]});
+                }
+            });
+            method_setImplementation(getM, mockGet);
+            @try {
+                [NSApp sendAction:openBtn.action to:openBtn.target from:openBtn];
+            } @finally {
+                method_setImplementation(getM, origGet);
+                imp_removeBlock(mockGet);
+            }
+            CK(npFired == 0 && queriedURL && [queriedURL hasPrefix:@"/api/lib/albums?q="] &&
+               openedAlbums.count == 3 && [openedAlbums.lastObject isEqualToString:@"alb-fallback-k"],
+               "N4g 本地列表未命中时查询 /api/lib/albums?q= 并进入匹配专辑详情（key=alb-fallback-k）",
+               [NSString stringWithFormat:@"url=%@ np=%ld albums=%@", queriedURL ?: @"nil", (long)npFired, openedAlbums]);
+
+            [nc removeObserver:obNP];
+            [nc removeObserver:obAlb];
+        }
+
+        // 隔离：B1/B2/B3 会在离屏主窗里创建额外 VC，放在核心契约全部跑完后避免污染 C9 的设备/设置状态。
+        TestRoomCoverAndCacheFitB1B2B3();
+        TestListeningQueueFollow();
 
         [core shutdown];
         [fm removeItemAtPath:root error:nil];

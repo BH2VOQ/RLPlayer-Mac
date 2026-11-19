@@ -8,6 +8,7 @@
 // 纪律：所有写入走 /api/src/config 的 action 协议；密码留空 = 不改（后端 keepPass）。
 #import "RLPServersView.h"
 #import "RLPCoreClient.h"
+#import "RLPSettingsLayout.h"
 #import "RLPSupport.h"
 #import "RLPTheme.h"
 
@@ -23,20 +24,29 @@
 @end
 
 @interface RLPServersView ()
+@property (nonatomic, strong) NSStackView *rootStack;
 @property (nonatomic, strong) NSStackView *listStack;
 @property (nonatomic, strong) NSButton *addBtn;
-// 表单（默认隐藏；点「添加/编辑」展开）
+// 表单（默认隐藏；点「添加/编辑」展开，收起时移入 0×0 隐藏停靠槽，绝不留占位或白板）
+@property (nonatomic, strong) NSView *hiddenFormDock;
 @property (nonatomic, strong) NSView *formBox;
+@property (nonatomic, strong) NSLayoutConstraint *formWidthConstraint;
 @property (nonatomic, strong) NSTextField *formTitle;
 @property (nonatomic, strong) NSTextField *nameField;
 @property (nonatomic, strong) NSPopUpButton *kindPopup;
 @property (nonatomic, strong) NSTextField *baseField;
 @property (nonatomic, strong) NSTextField *userField;
 @property (nonatomic, strong) NSSecureTextField *passField;
+@property (nonatomic, strong) NSButton *saveBtn;
+@property (nonatomic, strong) NSButton *testFormBtn;
+@property (nonatomic, strong) NSButton *cancelBtn;
 @property (nonatomic, strong) NSTextField *formMsg;
+@property (nonatomic, assign) BOOL formVisible;
 @property (nonatomic, copy) NSString *editingId;   // 空 = 新增
 @property (nonatomic, strong) NSMutableArray<RLPServerRow *> *servers;
 @property (nonatomic, assign) NSUInteger seq;
+@property (nonatomic, assign) NSUInteger formOpSeq;
+@property (nonatomic, assign) BOOL hasLoadedOnce;
 @end
 
 @implementation RLPServersView
@@ -51,21 +61,135 @@
     return self;
 }
 
+- (void)updateFormMessageMaxWidth {
+    if (!self.formMsg) return;
+    const CGFloat avail = (self.bounds.size.width > 40.0) ? MAX(180.0, self.bounds.size.width - 28.0) : 420.0;
+    const CGFloat want = MIN(420.0, avail);
+    if (fabs(self.formMsg.preferredMaxLayoutWidth - want) > 0.5) {
+        self.formMsg.preferredMaxLayoutWidth = want;
+    }
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    const BOOL widthChanged = fabs(newSize.width - self.bounds.size.width) > 0.5;
+    [super setFrameSize:newSize];
+    if (widthChanged) {
+        [self updateFormMessageMaxWidth];
+    }
+}
+
+/// 向上通知 RLPFieldGrid / RLPSettingsGroup 重算内容高度，并标记外层 stack / scroll 重新布局。
+/// 绝不在这里直接调 layoutSubtreeIfNeeded，避免在约束求解过程中重入（见 RLPSettingsLayout 纪律）。
+- (void)notifyLayoutChanged {
+    [self invalidateIntrinsicContentSize];
+    [self setNeedsUpdateConstraints:YES];
+    [self setNeedsLayout:YES];
+    if (self.rootStack) {
+        [self.rootStack setNeedsUpdateConstraints:YES];
+        [self.rootStack setNeedsLayout:YES];
+    }
+    if (self.listStack) {
+        [self.listStack setNeedsLayout:YES];
+    }
+    BOOL notifiedGrid = NO;
+    NSStackView *enclosingDocStack = nil;
+    NSScrollView *enclosingScroll = nil;
+    for (NSView *v = self.superview; v; v = v.superview) {
+        if (!notifiedGrid && [v respondsToSelector:@selector(contentDidChange)]) {
+            [(id)v contentDidChange];
+            notifiedGrid = YES;
+        }
+        if ([v respondsToSelector:@selector(setNeedsUpdateConstraints:)]) {
+            [v setNeedsUpdateConstraints:YES];
+        }
+        if ([v isKindOfClass:[NSStackView class]] && v != self.rootStack) {
+            enclosingDocStack = (NSStackView *)v;
+        }
+        if ([v isKindOfClass:[NSScrollView class]]) {
+            enclosingScroll = (NSScrollView *)v;
+            break;
+        }
+    }
+    if (enclosingDocStack) {
+        [enclosingDocStack setNeedsUpdateConstraints:YES];
+        [enclosingDocStack setNeedsLayout:YES];
+    }
+    if (enclosingScroll) {
+        [enclosingScroll setNeedsLayout:YES];
+        [enclosingScroll.contentView setNeedsLayout:YES];
+    }
+}
+
+- (void)setFormVisible:(BOOL)visible notify:(BOOL)notify {
+    self.formVisible = visible;
+    if (self.formWidthConstraint) {
+        self.formWidthConstraint.active = NO;
+        self.formWidthConstraint = nil;
+    }
+    if (visible) {
+        if (self.formBox.superview != self.rootStack) {
+            [self.formBox removeFromSuperview];
+            [self.rootStack addArrangedSubview:self.formBox];
+        } else if (![self.rootStack.arrangedSubviews containsObject:self.formBox]) {
+            [self.rootStack addArrangedSubview:self.formBox];
+        }
+        self.formBox.hidden = NO;
+        self.formWidthConstraint = [self.formBox.widthAnchor constraintEqualToAnchor:self.rootStack.widthAnchor];
+        self.formWidthConstraint.active = YES;
+        [self updateFormMessageMaxWidth];
+    } else {
+        // 先结束 formBox 内活动输入框的 field editor，防止摘出视图时焦点响应器/光标图层残留。
+        if (self.window) {
+            NSResponder *fr = self.window.firstResponder;
+            if ([fr isKindOfClass:[NSView class]] && [(NSView *)fr isDescendantOf:self.formBox]) {
+                [self.window makeFirstResponder:nil];
+            }
+        }
+        if ([self.rootStack.arrangedSubviews containsObject:self.formBox]) {
+            [self.rootStack removeArrangedSubview:self.formBox];
+        }
+        [self.formBox removeFromSuperview];
+        self.formBox.hidden = YES;
+        self.formMsg.stringValue = @"";
+        self.formMsg.textColor = [RLPTheme current].mut;
+        if (self.hiddenFormDock && self.formBox.superview != self.hiddenFormDock) {
+            [self.hiddenFormDock addSubview:self.formBox];
+        }
+    }
+    if (notify) {
+        [self notifyLayoutChanged];
+    }
+}
+
 - (void)buildUI {
-    RLPTheme *t = [RLPTheme current];
     self.translatesAutoresizingMaskIntoConstraints = NO;
+    self.wantsLayer = NO;
 
     NSStackView *root = [[NSStackView alloc] initWithFrame:NSZeroRect];
     root.orientation = NSUserInterfaceLayoutOrientationVertical;
     root.alignment = NSLayoutAttributeLeading;
     root.spacing = 8;
+    root.detachesHiddenViews = YES;
     root.translatesAutoresizingMaskIntoConstraints = NO;
+    self.rootStack = root;
     [self addSubview:root];
     [NSLayoutConstraint activateConstraints:@[
         [root.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [root.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [root.topAnchor constraintEqualToAnchor:self.topAnchor],
         [root.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+    ]];
+
+    NSView *dock = [[NSView alloc] initWithFrame:NSZeroRect];
+    dock.translatesAutoresizingMaskIntoConstraints = NO;
+    dock.hidden = YES;
+    self.hiddenFormDock = dock;
+    [self addSubview:dock];
+    [NSLayoutConstraint activateConstraints:@[
+        [dock.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [dock.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [dock.widthAnchor constraintEqualToConstant:0],
+        [dock.heightAnchor constraintEqualToConstant:0],
     ]];
 
     self.addBtn = [NSButton buttonWithTitle:RLPTr(@"添加服务器") target:self action:@selector(onAdd:)];
@@ -83,10 +207,7 @@
     [self.listStack.widthAnchor constraintEqualToAnchor:root.widthAnchor].active = YES;
 
     [self buildForm];
-    self.formBox.hidden = YES;
-    [root addArrangedSubview:self.formBox];
-    [self.formBox.widthAnchor constraintEqualToAnchor:root.widthAnchor].active = YES;
-    (void)t;
+    [self setFormVisible:NO notify:NO];
 }
 
 - (void)buildForm {
@@ -95,49 +216,64 @@
     box.orientation = NSUserInterfaceLayoutOrientationVertical;
     box.alignment = NSLayoutAttributeLeading;
     box.spacing = 8;
+    box.detachesHiddenViews = NO;
     box.translatesAutoresizingMaskIntoConstraints = NO;
     box.identifier = @"srv.form";
     box.wantsLayer = YES;
     box.layer.cornerRadius = 10;
     box.layer.borderWidth = 1;
     box.layer.borderColor = t.line.CGColor;
+    box.layer.backgroundColor = t.bg3.CGColor;
+    box.layer.masksToBounds = YES;
     box.edgeInsets = NSEdgeInsetsMake(12, 14, 12, 14);
     self.formBox = box;
 
     self.formTitle = RLPLabel(RLPTr(@"添加服务器"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
     self.formTitle.identifier = @"srv.form.title";
+    self.formTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.formTitle setContentCompressionResistancePriority:1.0f
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
     [box addArrangedSubview:self.formTitle];
+    [self.formTitle.widthAnchor constraintLessThanOrEqualToAnchor:box.widthAnchor constant:-28].active = YES;
+
+    auto addFormField = ^(NSTextField *f) {
+        f.translatesAutoresizingMaskIntoConstraints = NO;
+        [f setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [box addArrangedSubview:f];
+        NSLayoutConstraint *prefW = [f.widthAnchor constraintEqualToConstant:320];
+        prefW.priority = NSLayoutPriorityDefaultHigh;
+        prefW.active = YES;
+        [f.widthAnchor constraintLessThanOrEqualToAnchor:box.widthAnchor constant:-28].active = YES;
+    };
 
     self.nameField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.nameField.placeholderString = RLPTr(@"名称（可选）");
     self.nameField.identifier = @"srv.form.name";
-    [[self.nameField.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [box addArrangedSubview:self.nameField];
+    addFormField(self.nameField);
 
     self.kindPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.kindPopup addItemWithTitle:@"Navidrome / Subsonic"];
     [self.kindPopup addItemWithTitle:@"Emby"];
     self.kindPopup.identifier = @"srv.form.kind";
     [box addArrangedSubview:self.kindPopup];
+    [self.kindPopup.widthAnchor constraintLessThanOrEqualToAnchor:box.widthAnchor constant:-28].active = YES;
 
     self.baseField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.baseField.placeholderString = @"https://music.example.com";
     self.baseField.identifier = @"srv.form.base";
-    [[self.baseField.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [box addArrangedSubview:self.baseField];
+    addFormField(self.baseField);
 
     self.userField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.userField.placeholderString = RLPTr(@"用户名");
     self.userField.identifier = @"srv.form.user";
-    [[self.userField.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [box addArrangedSubview:self.userField];
+    addFormField(self.userField);
 
     self.passField = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.passField.placeholderString = RLPTr(@"密码");
     self.passField.identifier = @"srv.form.pass";
-    [[self.passField.widthAnchor constraintEqualToConstant:320] setActive:YES];
-    [box addArrangedSubview:self.passField];
+    addFormField(self.passField);
 
     NSStackView *btns = [[NSStackView alloc] initWithFrame:NSZeroRect];
     btns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -145,21 +281,33 @@
     NSButton *save = [NSButton buttonWithTitle:RLPTr(@"保存") target:self action:@selector(onSave:)];
     save.bezelStyle = NSBezelStyleRounded;
     save.identifier = @"srv.form.save";
+    self.saveBtn = save;
     NSButton *test = [NSButton buttonWithTitle:RLPTr(@"测试") target:self action:@selector(onTestForm:)];
     test.bezelStyle = NSBezelStyleRounded;
     test.identifier = @"srv.form.test";
+    self.testFormBtn = test;
     NSButton *cancel = [NSButton buttonWithTitle:RLPTr(@"取消") target:self action:@selector(onCancel:)];
     cancel.bezelStyle = NSBezelStyleRounded;
     cancel.identifier = @"srv.form.cancel";
+    self.cancelBtn = cancel;
     for (NSButton *b in @[save, test, cancel]) [btns addArrangedSubview:b];
     [box addArrangedSubview:btns];
+    [btns.widthAnchor constraintLessThanOrEqualToAnchor:box.widthAnchor constant:-28].active = YES;
 
     self.formMsg = RLPLabel(@"", t.small, t.mut);
     self.formMsg.identifier = @"srv.form.msg";
     self.formMsg.maximumNumberOfLines = 2;
     self.formMsg.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.formMsg.widthAnchor constraintEqualToConstant:420] setActive:YES];
+    self.formMsg.preferredMaxLayoutWidth = 420;
+    [self.formMsg setContentCompressionResistancePriority:1.0f
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.formMsg setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                           forOrientation:NSLayoutConstraintOrientationVertical];
     [box addArrangedSubview:self.formMsg];
+    NSLayoutConstraint *msgPrefW = [self.formMsg.widthAnchor constraintEqualToConstant:420];
+    msgPrefW.priority = NSLayoutPriorityDefaultHigh;
+    msgPrefW.active = YES;
+    [self.formMsg.widthAnchor constraintLessThanOrEqualToAnchor:box.widthAnchor constant:-28].active = YES;
 }
 
 #pragma mark - 列表
@@ -192,16 +340,23 @@
 }
 
 - (void)showEmpty:(NSString *)text {
-    for (NSView *v in self.listStack.arrangedSubviews) {
+    self.hasLoadedOnce = YES;
+    for (NSView *v in [self.listStack.arrangedSubviews copy]) {
         [self.listStack removeArrangedSubview:v];
         [v removeFromSuperview];
     }
     NSTextField *l = RLPLabel(text, [RLPTheme current].small, [RLPTheme current].mut);
+    l.lineBreakMode = NSLineBreakByWordWrapping;
+    [l setContentCompressionResistancePriority:1.0f
+                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.listStack addArrangedSubview:l];
+    [l.widthAnchor constraintLessThanOrEqualToAnchor:self.listStack.widthAnchor].active = YES;
+    [self notifyLayoutChanged];
 }
 
 - (void)renderRows {
-    for (NSView *v in self.listStack.arrangedSubviews) {
+    self.hasLoadedOnce = YES;
+    for (NSView *v in [self.listStack.arrangedSubviews copy]) {
         [self.listStack removeArrangedSubview:v];
         [v removeFromSuperview];
     }
@@ -225,43 +380,62 @@
         main.orientation = NSUserInterfaceLayoutOrientationVertical;
         main.alignment = NSLayoutAttributeLeading;
         main.spacing = 1;
+        [main setContentCompressionResistancePriority:1.0f
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [main setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                         forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSString *kindName = [r.kind isEqualToString:@"emby"] ? @"Emby" : @"Navidrome / Subsonic";
         NSString *title = [NSString stringWithFormat:@"%@  ·  %@%@",
                            r.name.length ? r.name : r.base, kindName,
                            r.active ? [@"  ·  " stringByAppendingString:RLPTr(@"已启用")] : @""];
         NSTextField *nm = RLPLabel(title, t.body, r.active ? t.accentText : t.text);
         nm.identifier = @"srv.row.name";
+        nm.lineBreakMode = NSLineBreakByTruncatingTail;
+        nm.maximumNumberOfLines = 1;
+        [nm setContentCompressionResistancePriority:1.0f
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSString *sub = r.user.length ? [NSString stringWithFormat:@"%@ · %@", r.base, r.user] : r.base;
         NSTextField *url = RLPLabel(sub, t.small, t.mut);
         url.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        url.maximumNumberOfLines = 1;
+        [url setContentCompressionResistancePriority:1.0f
+                                      forOrientation:NSLayoutConstraintOrientationHorizontal];
         [main addArrangedSubview:nm];
         [main addArrangedSubview:url];
         [row addArrangedSubview:main];
 
         // 动作按钮：启用（未启用时）/ 测试 / 编辑 / 删除 —— 与 web renderSrcList 同口径。
+        auto addRowBtn = ^(NSButton *b) {
+            [b setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+            [b setContentHuggingPriority:NSLayoutPriorityRequired
+                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+            [row addArrangedSubview:b];
+        };
         if (!r.active) {
             NSButton *on = [NSButton buttonWithTitle:RLPTr(@"启用") target:self action:@selector(onActivate:)];
             on.bezelStyle = NSBezelStyleRounded;
             on.identifier = r.sid;
-            [row addArrangedSubview:on];
+            addRowBtn(on);
         }
         NSButton *test = [NSButton buttonWithTitle:RLPTr(@"测试") target:self action:@selector(onTestSaved:)];
         test.bezelStyle = NSBezelStyleRounded;
         test.identifier = r.sid;
-        [row addArrangedSubview:test];
+        addRowBtn(test);
         NSButton *edit = [NSButton buttonWithTitle:RLPTr(@"编辑") target:self action:@selector(onEdit:)];
         edit.bezelStyle = NSBezelStyleRounded;
         edit.identifier = r.sid;
-        [row addArrangedSubview:edit];
+        addRowBtn(edit);
         NSButton *del = [NSButton buttonWithTitle:RLPTr(@"删除") target:self action:@selector(onRemove:)];
         del.bezelStyle = NSBezelStyleRounded;
         del.identifier = r.sid;
         del.contentTintColor = t.danger;
-        [row addArrangedSubview:del];
+        addRowBtn(del);
 
         [self.listStack addArrangedSubview:row];
         [row.widthAnchor constraintEqualToAnchor:self.listStack.widthAnchor].active = YES;
     }
+    [self notifyLayoutChanged];
 }
 
 - (RLPServerRow *)rowForId:(NSString *)sid {
@@ -272,6 +446,7 @@
 #pragma mark - 表单
 
 - (void)showFormFor:(RLPServerRow *)r {
+    ++self.formOpSeq;
     self.editingId = r ? r.sid : @"";
     self.formTitle.stringValue = r ? [RLPTr(@"编辑服务器") stringByAppendingFormat:@" · %@",
                                       r.name.length ? r.name : r.base]
@@ -283,11 +458,23 @@
     self.passField.stringValue = @"";   // 密码红线：永不回填
     self.passField.placeholderString = r ? RLPTr(@"留空 = 保持原密码") : RLPTr(@"密码");
     self.formMsg.stringValue = @"";
-    self.formBox.hidden = NO;
+    self.formMsg.textColor = [RLPTheme current].mut;
+    self.saveBtn.enabled = YES;
+    self.testFormBtn.enabled = YES;
+    self.cancelBtn.enabled = YES;
+    [self setFormVisible:YES notify:YES];
 }
 
 - (void)onAdd:(id)sender { (void)sender; [self showFormFor:nil]; }
-- (void)onCancel:(id)sender { (void)sender; self.formBox.hidden = YES; self.editingId = @""; }
+- (void)onCancel:(id)sender {
+    (void)sender;
+    ++self.formOpSeq;
+    self.editingId = @"";
+    self.passField.stringValue = @"";
+    self.saveBtn.enabled = YES;
+    self.testFormBtn.enabled = YES;
+    [self setFormVisible:NO notify:YES];
+}
 
 - (void)onEdit:(NSButton *)sender {
     RLPServerRow *r = [self rowForId:sender.identifier];
@@ -324,26 +511,38 @@
 - (void)onSave:(id)sender {
     (void)sender;
     NSString *err = [self validateForm];
-    if (err) { self.formMsg.stringValue = err; self.formMsg.textColor = [RLPTheme current].danger; return; }
+    if (err) {
+        self.formMsg.stringValue = err;
+        self.formMsg.textColor = [RLPTheme current].danger;
+        [self notifyLayoutChanged];
+        return;
+    }
     const BOOL wasEdit = self.editingId.length > 0;
     NSString *body = [NSString stringWithFormat:@"action=%@%@&%@",
                       wasEdit ? @"update" : @"add",
                       wasEdit ? [@"&id=" stringByAppendingString:RLPEnc(self.editingId)] : @"",
                       [self formBody]];
+    const NSUInteger opSeq = ++self.formOpSeq;
+    self.saveBtn.enabled = NO;
     self.formMsg.stringValue = RLPTr(@"保存中…");
     self.formMsg.textColor = [RLPTheme current].mut;
+    [self notifyLayoutChanged];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/src/config" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.saveBtn.enabled = YES;
+        if (opSeq != self_.formOpSeq) return;
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *e = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
             self_.formMsg.stringValue = e;
             self_.formMsg.textColor = [RLPTheme current].danger;
+            [self_ notifyLayoutChanged];
             return;
         }
-        self_.formBox.hidden = YES;
         self_.editingId = @"";
+        self_.passField.stringValue = @"";
+        [self_ setFormVisible:NO notify:YES];
         RLPToast(wasEdit ? RLPTr(@"服务器已更新") : RLPTr(@"服务器已添加"));
         [self_ reload];
     }];
@@ -351,17 +550,23 @@
 
 - (void)onTestForm:(id)sender {
     (void)sender;
+    const NSUInteger opSeq = self.formOpSeq;
+    self.testFormBtn.enabled = NO;
     self.formMsg.stringValue = RLPTr(@"测试中…");
     self.formMsg.textColor = [RLPTheme current].mut;
+    [self notifyLayoutChanged];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/src/ping" body:[self formBody]
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        self_.testFormBtn.enabled = YES;
+        if (opSeq != self_.formOpSeq) return;
         const BOOL ok = json && [json[@"ok"] boolValue];
         NSString *e = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"失败");
         self_.formMsg.stringValue = ok ? RLPTr(@"连接成功") : [@"✗ " stringByAppendingString:e];
         self_.formMsg.textColor = ok ? [RLPTheme current].ok : [RLPTheme current].danger;
+        [self_ notifyLayoutChanged];
     }];
 }
 
@@ -400,14 +605,15 @@
 }
 
 - (void)onRemove:(NSButton *)sender {
-    RLPServerRow *r = [self rowForId:sender.identifier];
+    NSString *targetSid = [sender.identifier copy] ?: @"";
+    RLPServerRow *r = [self rowForId:targetSid];
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = [NSString stringWithFormat:RLPTr(@"删除服务器「%@」？"), r.name.length ? r.name : r.base];
     a.informativeText = RLPTr(@"只删配置，不动已下载缓存。");
     [a addButtonWithTitle:RLPTr(@"删除")];
     [a addButtonWithTitle:RLPTr(@"取消")];
     if ([a runModal] != NSAlertFirstButtonReturn) return;
-    NSString *body = [@"action=remove&id=" stringByAppendingString:RLPEnc(sender.identifier)];
+    NSString *body = [@"action=remove&id=" stringByAppendingString:RLPEnc(targetSid)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/src/config" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -417,9 +623,13 @@
             RLPToast(e);
             return;
         }
-        if ([self_.editingId isEqualToString:sender.identifier]) {
-            self_.formBox.hidden = YES;
+        if (targetSid.length && [self_.editingId isEqualToString:targetSid]) {
+            ++self_.formOpSeq;
             self_.editingId = @"";
+            self_.passField.stringValue = @"";
+            self_.saveBtn.enabled = YES;
+            self_.testFormBtn.enabled = YES;
+            [self_ setFormVisible:NO notify:YES];
         }
         RLPToast(RLPTr(@"已删除"));
         [self_ reload];
@@ -431,9 +641,14 @@
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
     self.formBox.layer.borderColor = t.line.CGColor;
+    self.formBox.layer.backgroundColor = t.bg3.CGColor;
     self.formTitle.textColor = t.text;
-    self.formMsg.textColor = t.mut;
-    [self renderRows];
+    if (!self.formMsg.stringValue.length) {
+        self.formMsg.textColor = t.mut;
+    }
+    if (self.hasLoadedOnce) {
+        [self renderRows];
+    }
 }
 
 @end

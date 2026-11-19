@@ -109,26 +109,22 @@
 }
 @end
 
-/// 导航项 = **web 版左导航的 1:1 副本**（ui_page.h 的 .side 结构）。
+/// 导航项 = **web 版左导航 + 顶部模式单入口**。
 ///
+/// 顶部快捷区（分组标题之前，900/1180 下均在侧栏可视区顶部）：
+///   单入口 station（随 _uiMode 显示 聆听室 / 数字音乐台；由顶栏模式开关自动切换）
 /// 分组与顺序逐条对齐 web：
 ///   资料库   : 专辑 / 艺术家 / 曲目 / 文件夹 / 流媒体（web data-v=remote）
 ///   播放列表 : 播放队列 / 最近播放 / 我的最爱
 ///   我的歌单 : web #sqList —— 标题「我的歌单」+「＋ 新建」，下方是**动态**歌单行；
 ///             空态是一整行可点的「＋ 新建歌单」（web .sqempty）
-///   音频引擎 : 快速开始（web data-v=station）/ 设置
-///
-/// 为什么不再按"模式"分叉：web 版没有聆听/专业双模式，那是本仓库自己发明的，
-/// 会让「web 有的我是否都有」无法机械验证。双模式留到 parity 全绿后作为薄表现层回归，
-/// 现在先把地基做平（见 docs/native-ui/PLAN.md）。
-///
-/// 2026-11-13：原来这里是**静态**的一行「保存的队列」，而 web 的「我的歌单」是
-/// 内联渲染的动态列表（paintSavedQueues，ui_script.h:3753-3798）。
-/// 侧栏因此少了 条目 / ✎ 重命名 / × 删除 / 空态整行 —— 用户图二演示的正是动态条目。
-/// 现在把这一层按 web 复刻；歌单行由 /api/sq/list 填充，不再是硬编码条目。
+///   音频引擎 : 设置（原底部聆听室已统一上移到顶部，不留重复/不同步入口）
 static NSArray<NSDictionary *> *RLPSidebarItems(NSString *uiMode) {
     const BOOL isPro = [uiMode isEqualToString:@"pro"];
     return @[
+        @{@"name": isPro ? @"数字音乐台" : @"聆听室",
+          @"icon": isPro ? @"slider.horizontal.3" : @"headphones",
+          @"key": @"station"},
         @{@"sec": @"资料库"},
         @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
         @{@"name": @"艺术家",   @"icon": @"person.2",     @"key": @"artists"},
@@ -140,11 +136,7 @@ static NSArray<NSDictionary *> *RLPSidebarItems(NSString *uiMode) {
         @{@"name": @"最近播放", @"icon": @"clock",        @"key": @"recent"},
         @{@"name": @"我的最爱", @"icon": @"heart",        @"key": @"favorites"},
         @{@"sec": @"音频引擎"},
-        // station 在聆听模式为「聆听室」，专业模式为「数字音乐台」；两种模式均保留 settings 入口。
-        @{@"name": isPro ? @"数字音乐台" : @"聆听室",
-          @"icon": isPro ? @"slider.horizontal.3" : @"headphones",
-          @"key": @"station"},
-        @{@"name": @"设置",     @"icon": @"gearshape", @"key": @"settings"},
+        @{@"name": @"设置",     @"icon": @"gearshape",    @"key": @"settings"},
     ];
 }
 
@@ -183,27 +175,24 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
                                                    object:nil];
     }
     return self;
-    // 选中必须在**表格已经有行之后**才设：reloadData 之前 selectRowIndexes 会被丢弃，
-    // 侧栏于是永远没有高亮（本轮实测到的真故障：selectedRow 恒为 -1）。
-    [_tableView reloadData];
-    if (_pendingRow >= 0 && _pendingRow < (NSInteger)_menuItems.count) {
-        const NSInteger want = _pendingRow;
-        _pendingRow = -1;
-        _selectedRow = want;
-        _lastSelectedRow = want;
-        [_tableView reloadData];
-    }
-
 }
 
 - (NSInteger)rowCount { return (NSInteger)_menuItems.count; }
 
 - (NSInteger)navRowCount {
-    // 「我的歌单」的空态行（web .sqempty）是可点入口但不是 .nav，不计入导航项。
-    NSInteger n = 0;
-    for (NSDictionary *it in _menuItems)
-        if (!it[@"sec"] && ![it[@"empty"] boolValue]) ++n;
-    return n;
+    // 「我的歌单」的空态行（web .sqempty）是可点入口但不是 .nav，不计入导航项；
+    // 顶部 station 单入口随模式显示，按唯一静态导航 key 计数。
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSDictionary *it in _menuItems) {
+        if (it[@"sec"] || [it[@"empty"] boolValue] || it[@"sqindex"]) continue;
+        NSString *k = it[@"key"];
+        if (k.length) [seen addObject:k];
+    }
+    return (NSInteger)seen.count;
+}
+
+- (BOOL)item:(NSDictionary *)item matchesKey:(NSString *)key {
+    return key.length && [item[@"key"] isEqualToString:key];
 }
 
 #pragma mark - 「我的歌单」：web #sqList 的原生复刻
@@ -230,7 +219,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         }
     } else if (prevKey.length) {
         for (NSInteger i = 0; i < (NSInteger)_menuItems.count; ++i) {
-            if ([_menuItems[i][@"key"] isEqualToString:prevKey]) {
+            if ([self item:_menuItems[i] matchesKey:prevKey]) {
                 _selectedRow = i;
                 _lastSelectedRow = i;
                 break;
@@ -303,9 +292,15 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
             [rows addObject:@{@"name": name,
                               @"n": [x[@"n"] respondsToSelector:@selector(integerValue)] ? x[@"n"] : @0}];
         }
+        NSScrollView *scroll = self_->_tableView.enclosingScrollView;
+        const BOOL wasAtTop = (!scroll || scroll.contentView.bounds.origin.y <= 0.5);
         self_->_savedQueues = rows;
         [self_ rebuildMenuItems];
         [self_->_tableView reloadData];
+        if (wasAtTop && scroll) {
+            [scroll.contentView scrollToPoint:NSZeroPoint];
+            [scroll reflectScrolledClipView:scroll.contentView];
+        }
     }];
 }
 
@@ -443,11 +438,13 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     scroll.drawsBackground = NO;
     scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
+    scroll.automaticallyAdjustsContentInsets = NO;
     [view addSubview:scroll];
 
     RLPSidebarTable *tv = [[RLPSidebarTable alloc] initWithFrame:NSZeroRect];
     tv.ownerVC = self;
     _tableView = tv;
+    if (@available(macOS 11.0, *)) _tableView.style = NSTableViewStylePlain;
     _tableView.backgroundColor = [NSColor clearColor];
     _tableView.headerView = nil;
     _tableView.rowHeight = 34;
@@ -495,6 +492,17 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         [sub.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
         [sub.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:1],
     ]];
+
+    [_tableView reloadData];
+    if (_pendingRow >= 0 && _pendingRow < (NSInteger)_menuItems.count && !RLPRowIsSection(_menuItems, _pendingRow)) {
+        const NSInteger want = _pendingRow;
+        _pendingRow = -1;
+        _selectedRow = want;
+        _lastSelectedRow = want;
+        [_tableView reloadData];
+    }
+    [scroll.contentView scrollToPoint:NSZeroPoint];
+    [scroll reflectScrolledClipView:scroll.contentView];
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return (NSInteger)_menuItems.count; }
@@ -662,10 +670,13 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if ([item[@"empty"] boolValue]) return [self emptySavedQueueCellForTableView:tableView];
     if (item[@"sqindex"]) return [self savedQueueCellForTableView:tableView row:row item:item];
 
-    NSTableCellView *cell = [tableView makeViewWithIdentifier:@"Cell" owner:self];
+    const BOOL isStation = [item[@"key"] isEqualToString:@"station"];
+    NSString *cellId = isStation ? @"side.station" : @"Cell";
+
+    NSTableCellView *cell = [tableView makeViewWithIdentifier:cellId owner:self];
     if (!cell) {
         cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
-        cell.identifier = @"Cell";
+        cell.identifier = cellId;
         cell.wantsLayer = YES;
 
         // 选中/悬停的底是**内缩的圆角胶囊**（web 版 .nav 就是 margin 8 + radius 8），
@@ -693,16 +704,19 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         label.identifier = @"label";
         label.font = [NSFont systemFontOfSize:13];
         label.lineBreakMode = NSLineBreakByTruncatingTail;
+        label.maximumNumberOfLines = 1;
+        label.usesSingleLineMode = YES;
         label.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:label];
 
+        const CGFloat rightPad = isStation ? -10.0 : -12.0;
         [NSLayoutConstraint activateConstraints:@[
             [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
             [iconView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [iconView.widthAnchor constraintEqualToConstant:16],
             [iconView.heightAnchor constraintEqualToConstant:16],
             [label.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10],
-            [label.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:-12],
+            [label.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:rightPad],
             [label.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
         ]];
     }
@@ -722,6 +736,9 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     label.font = selected ? [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
                           : [NSFont systemFontOfSize:13];
     label.textColor = selected ? t.accentText : t.text;
+    cell.toolTip = isStation
+        ? ([_uiMode isEqualToString:@"pro"] ? RLPTr(@"专业工作台") : RLPTr(@"聆听室"))
+        : nil;
 
     NSView *pill = nil;
     for (NSView *sub in cell.subviews)
@@ -752,6 +769,29 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (row >= 0 && row != _selectedRow) [self selectRow:row];
 }
 
+- (void)scrollToRowIfNeeded:(NSInteger)row {
+    NSScrollView *scroll = _tableView.enclosingScrollView;
+    if (!scroll || row < 0 || row >= (NSInteger)_menuItems.count) return;
+    const CGFloat clipH = scroll.contentView.bounds.size.height;
+    if (clipH <= 0.5) return;
+    if (row <= 1) {
+        if (scroll.contentView.bounds.origin.y > 0.5) {
+            [scroll.contentView scrollToPoint:NSZeroPoint];
+            [scroll reflectScrolledClipView:scroll.contentView];
+        }
+        return;
+    }
+    const NSRect rowRect = [_tableView rectOfRow:row];
+    const NSRect vis = scroll.documentVisibleRect;
+    if (NSContainsRect(vis, rowRect)) return;
+    if (NSMaxY(rowRect) <= clipH) {
+        [scroll.contentView scrollToPoint:NSZeroPoint];
+        [scroll reflectScrolledClipView:scroll.contentView];
+        return;
+    }
+    [_tableView scrollRowToVisible:row];
+}
+
 // 选中态**自己持有**，不依赖 NSTableView.selectedRow。
 // 实测：表格不在 key window 里时 selectRowIndexes 会静默失败（调用后 selectedRow 仍是 -1），
 // 于是侧栏永远没有高亮。导航选中是业务状态，本来就不该托付给控件的焦点相关行为。
@@ -764,6 +804,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     _selectedRow = row;
     _lastSelectedRow = row;
     [_tableView reloadData];
+    [self scrollToRowIfNeeded:row];
     if (self.onSelect) self.onSelect(row);
     NSString *k = [self keyForRow:row];
     if (k.length && self.onSelectKey) self.onSelectKey(k);
@@ -789,7 +830,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (BOOL)selectKey:(NSString *)key {
     if (!key.length) return NO;
     for (NSInteger i = 0; i < (NSInteger)_menuItems.count; ++i) {
-        if ([_menuItems[i][@"key"] isEqualToString:key]) { [self selectRow:i]; return YES; }
+        if ([self item:_menuItems[i] matchesKey:key]) { [self selectRow:i]; return YES; }
     }
     return NO;
 }

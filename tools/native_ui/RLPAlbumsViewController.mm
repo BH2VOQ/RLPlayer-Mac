@@ -233,7 +233,10 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 @property (nonatomic, strong) NSButton *emptyStationBtn;
 @end
 
-@implementation RLPAlbumsViewController
+@implementation RLPAlbumsViewController {
+    CGFloat _lastLayoutWidth;
+    BOOL _relayouting;
+}
 
 - (instancetype)init {
     self = [super initWithNibName:nil bundle:nil];
@@ -246,11 +249,16 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     return self;
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
 - (NSInteger)albumCount { return (NSInteger)self.albums.count; }
 
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
-    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 900, 640)];
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 674, 520)];
+    root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     root.wantsLayer = YES;
     root.layer.backgroundColor = t.bg.CGColor;
     self.view = root;
@@ -258,6 +266,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.titleLabel = [NSTextField labelWithString:RLPTr(@"专辑")];
     self.titleLabel.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
     self.titleLabel.textColor = t.text;
+    [self.titleLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     // 标题与计数统一由主窗口顶栏承载（web #pth/#cnt 同口径），页内不再画。
     self.titleLabel.hidden = YES;
@@ -268,6 +278,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.countLabel.font = t.small;
     self.countLabel.textColor = t.mut;
     self.countLabel.alignment = NSTextAlignmentRight;
+    [self.countLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.countLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.countLabel.hidden = YES;   // 计数走顶栏 RLPPageCountNotification
     [root addSubview:self.countLabel];
@@ -281,7 +293,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     layout.minimumInteritemSpacing = 16;         // .grid gap:16
     layout.minimumLineSpacing = 16;
 
-    self.collection = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
+    self.collection = [[NSCollectionView alloc] initWithFrame:NSMakeRect(0, 0, 674, 520)];
+    self.collection.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.collection.collectionViewLayout = layout;
     self.collection.dataSource = self;
     self.collection.delegate = self;
@@ -313,6 +326,13 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     scroll.documentView = self.collection;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [root addSubview:scroll];
+    if (scroll.contentView) {
+        scroll.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(clipViewFrameDidChange:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:scroll.contentView];
+    }
 
     // ---- 空态卡（web .empty-guide-card）：0 张专辑时盖在网格区上方，说明 + 三个入口 ----
     self.emptyCard = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -428,7 +448,12 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 - (void)setEmptyStateVisible:(BOOL)visible {
     self.emptyCard.hidden = !visible;
     self.collection.enclosingScrollView.hidden = visible;
-    if (!visible) return;
+    if (!visible) {
+        const CGFloat w = [self effectiveGridWidth];
+        if (w > 1.0) [self relayoutGridForWidth:w];
+        [self.collection setNeedsLayout:YES];
+        return;
+    }
     if (self.query.length > 0) {
         self.emptyTitleLabel.stringValue = [NSString stringWithFormat:RLPTr(@"未找到与 “%@” 相关的专辑"), self.query];
         self.emptyHintLabel.stringValue = RLPTr(@"请尝试缩短搜索词，或检查是否有错别字");
@@ -481,6 +506,9 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 
 /// 每次切到本页都重报一次计数（主窗口 sync 会先清空计数）。
 - (void)activate {
+    const CGFloat w = [self effectiveGridWidth];
+    if (w > 1.0) [self relayoutGridForWidth:w];
+    [self.view setNeedsLayout:YES];
     if (self.albums.count) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
             object:[NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)self.albums.count]];
@@ -519,10 +547,19 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         NSArray<RLPAlbum *> *list = [RLPAlbum albumsFromJSON:json];
         self_.hasLoaded = YES;
         [self_.albums setArray:list];
+        const CGFloat w = [self_ effectiveGridWidth];
+        if (w > 1.0) [self_ relayoutGridForWidth:w];
         [self_.collection reloadData];
         NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)list.count];
         self_.countLabel.stringValue = cnt;
         [self_ setEmptyStateVisible:(list.count == 0)];
+        if (self_.view.superview) {
+            [self_.view setNeedsLayout:YES];
+            if (!self_.collection.enclosingScrollView.hidden) {
+                [self_.collection setNeedsLayout:YES];
+            }
+            [self_.view layoutSubtreeIfNeeded];
+        }
         // 顶栏计数（web #cnt 同口径）：页加载完上报，主窗口显示在页标题旁。
         [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification"
             object:cnt];
@@ -615,6 +652,43 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 /// 按可用宽度重算卡片尺寸 —— CSS repeat(auto-fill,minmax(152px,1fr)) 的等价算法：
 /// 先算能放几列（列下限 152、间距 16），再把剩余宽度均分给各列（1fr）。
 /// 不这么做的话卡片恒为 152 宽，右侧留一条空白，与 web 铺满的观感不一致。
+- (CGFloat)effectiveGridWidth {
+    NSScrollView *scroll = self.collection.enclosingScrollView;
+    if (scroll && scroll.contentView && scroll.contentView.bounds.size.width > 1.0) {
+        return scroll.contentView.bounds.size.width;
+    }
+    const CGFloat viewW = self.view.bounds.size.width;
+    if (viewW > 1.0) return viewW;
+    if (self.view.superview && self.view.superview.bounds.size.width > 1.0) {
+        return self.view.superview.bounds.size.width;
+    }
+    return 0.0;
+}
+
+- (void)clipViewFrameDidChange:(NSNotification *)note {
+    (void)note;
+    if (_relayouting) return;
+    NSScrollView *scroll = self.collection.enclosingScrollView;
+    if (!scroll || scroll.hidden || !scroll.contentView) return;
+    const CGFloat w = scroll.contentView.bounds.size.width;
+    if (w <= 1.0) return;
+    NSCollectionViewFlowLayout *l = [self.collection.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]
+        ? (NSCollectionViewFlowLayout *)self.collection.collectionViewLayout : nil;
+    const CGFloat avail = w - 36.0;
+    NSInteger cols = (avail >= 152.0) ? (NSInteger)floor((avail + 16.0) / 168.0) : 1;
+    if (cols < 1) cols = 1;
+    const CGFloat expectedItemW = (avail >= 152.0) ? floor((avail - 16.0 * (cols - 1)) / cols) : 152.0;
+    const BOOL needsUpdate = fabs(_lastLayoutWidth - w) >= 0.5 ||
+                             fabs(self.collection.frame.size.width - w) >= 0.5 ||
+                             (l && fabs(l.itemSize.width - expectedItemW) >= 0.5);
+    if (!needsUpdate) return;
+    _relayouting = YES;
+    [self relayoutGridForWidth:w];
+    [self.collection setNeedsLayout:YES];
+    [self.view setNeedsLayout:YES];
+    _relayouting = NO;
+}
+
 - (void)relayoutGridForWidth:(CGFloat)w {
     if (![self.collection.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]) return;
     NSCollectionViewFlowLayout *l = (NSCollectionViewFlowLayout *)self.collection.collectionViewLayout;
@@ -624,16 +698,55 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     NSInteger cols = (NSInteger)floor((avail + gap) / (minW + gap));
     if (cols < 1) cols = 1;
     const CGFloat itemW = floor((avail - gap * (cols - 1)) / cols);
-    if (fabs(l.itemSize.width - itemW) < 0.5) return;
+    const BOOL widthChanged = fabs(_lastLayoutWidth - w) >= 0.5;
+    const BOOL itemChanged = fabs(l.itemSize.width - itemW) >= 0.5;
+    const BOOL colWidthMismatch = fabs(self.collection.frame.size.width - w) >= 0.5;
+    if (!widthChanged && !itemChanged && !colWidthMismatch) return;
+    _lastLayoutWidth = w;
     // web：封面(正方形) + .nm margin-top 9 + 行高 15 + .ar margin-top 2 + 行高 13 = +39；
     // 行距 16 由 layout.minimumLineSpacing 负责。旧实现文字区写 62（行间距比 web 大 23pt）。
     l.itemSize = NSMakeSize(itemW, itemW + 39);
+    if (colWidthMismatch) {
+        NSRect cf = self.collection.frame;
+        cf.size.width = w;
+        self.collection.frame = cf;
+    }
     [l invalidateLayout];
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    const CGFloat w = [self effectiveGridWidth];
+    if (w > 1.0) [self relayoutGridForWidth:w];
 }
 
 - (void)viewDidLayout {
     [super viewDidLayout];
-    [self relayoutGridForWidth:self.view.bounds.size.width];
+    if (_relayouting) return;
+    _relayouting = YES;
+    for (int pass = 0; pass < 2; ++pass) {
+        const CGFloat w = [self effectiveGridWidth];
+        if (w <= 1.0) break;
+        NSCollectionViewFlowLayout *l = [self.collection.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]
+            ? (NSCollectionViewFlowLayout *)self.collection.collectionViewLayout : nil;
+        const CGFloat prevItemW = l ? l.itemSize.width : 0.0;
+        const CGFloat prevColW = self.collection.frame.size.width;
+        const CGFloat prevLastW = _lastLayoutWidth;
+        [self relayoutGridForWidth:w];
+        const BOOL changed = (l && fabs(l.itemSize.width - prevItemW) >= 0.5) ||
+                             fabs(self.collection.frame.size.width - prevColW) >= 0.5 ||
+                             fabs(_lastLayoutWidth - prevLastW) >= 0.5;
+        NSScrollView *scroll = self.collection.enclosingScrollView;
+        if (!scroll || scroll.hidden) break;
+        if (changed || pass == 0) {
+            [scroll layoutSubtreeIfNeeded];
+        } else {
+            break;
+        }
+        const CGFloat nextW = [self effectiveGridWidth];
+        if (fabs(nextW - w) < 0.5) break;
+    }
+    _relayouting = NO;
 }
 
 - (void)applyTheme {

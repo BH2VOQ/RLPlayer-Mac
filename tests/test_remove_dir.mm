@@ -87,7 +87,7 @@ int main() {
 
         // ---- R3 后端契约静态核对：info 与真删共用同一套安全判据 ----
         NSString *src = [NSString stringWithContentsOfFile:
-            @"/Users/august/Downloads/DQ/RLPlayer/src/net/library.h"
+            @"<repo>/src/net/library.h"
             encoding:NSUTF8StringEncoding error:nil];
         CK([src containsString:@"checkRemovableDirLocked"] &&
            [src containsString:@"scanDirForRemoval"] &&

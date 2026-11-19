@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import <AppKit/AppKit.h>
 #import "RLPNowPlayingViewController.h"
+#import "RLPKnowledgeView.h"
 #import "RLPTheme.h"
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
@@ -16,6 +17,16 @@
 @interface RLPNowPlayingViewController (RLPCoverTestSeam)
 - (void)setCoverAtPath:(NSString *)coverPath forTrack:(NSString *)track;
 - (void)resetCoverForTrack:(NSString *)track;
+- (void)renderRailMetadata;
+- (void)layoutWebPlayback;
+- (void)openDataDrawer;
+- (void)closeDataDrawer;
+- (void)onRailDensity:(id)sender;
+@end
+@interface RLPKnowledgeView (NPDetailsTest)
+- (void)renderMetaFixture:(NSDictionary *)fixture;
+- (void)loadDrawerContext:(NSDictionary *)context;
+- (CGFloat)renderedContentHeight;
 @end
 @interface NSObject (RLPRailMomentumTest)
 - (void)beginMomentumWithVelocity:(CGFloat)v;
@@ -38,16 +49,46 @@ static RLPDataCompletion pendingCover;
 /// 不能只把 webStatus 塞进 KVC（那样 refresh 里的复位分支根本没跑）。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, id> *fixtures;
 @property (nonatomic, assign) BOOL fakeStarted;
+@property (nonatomic, strong) NSMutableArray<NSString *> *requestLog;
+@property (nonatomic, assign) BOOL holdSettings;
+@property (nonatomic, copy, nullable) RLPJSONCompletion pendingSettings;
+@property (nonatomic, assign) BOOL holdHealth;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *pendingHealths;
+@property (nonatomic, assign) BOOL holdCancel;
+@property (nonatomic, copy, nullable) RLPJSONCompletion pendingCancel;
 @end
 @implementation RLPRequestSpy
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _requestLog = [NSMutableArray array];
+        _pendingHealths = [NSMutableArray array];
+    }
+    return self;
+}
 - (BOOL)started{return self.fakeStarted;}
 - (void)postData:(NSString *)path body:(NSData *)body contentType:(NSString *)contentType completion:(RLPJSONCompletion)done {
     (void)contentType; g_lastDataPath = path ?: @""; g_lastDataLen = body.length;
+    [self.requestLog addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
     if (done) done(@{ @"ok": @YES });
 }
-- (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {lastPath=path;lastBody=body;if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];if([path isEqualToString:@"/api/lyrics/ai"])pendingLyricAi=[done copy];}
+- (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
+    lastPath=path;lastBody=body;
+    [self.requestLog addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
+    if([path hasPrefix:@"/api/fav?"])pendingFav=[done copy];
+    if([path isEqualToString:@"/api/lyrics/ai"])pendingLyricAi=[done copy];
+    if([path isEqualToString:@"/api/anl/cancel"] && done){
+        if(self.holdCancel){self.pendingCancel=[done copy];return;}
+        done(@{@"ok":@YES});
+    }
+}
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
+    [self.requestLog addObject:[NSString stringWithFormat:@"GET %@", path ?: @""]];
     if(holdNPRequests&&done&&[path hasPrefix:@"/api/lyrics?file="]){pendingLyrics=[done copy];return;}
+    if(self.holdSettings&&done&&[path isEqualToString:@"/api/settings"]){self.pendingSettings=[done copy];return;}
+    if(self.holdHealth&&done&&([path hasPrefix:@"/api/track/health"]||[path hasPrefix:@"/api/health"])){
+        [self.pendingHealths addObject:[done copy]];return;
+    }
     id hit=nil;
     for(NSString *key in self.fixtures) if([path hasPrefix:key]){hit=self.fixtures[key];break;}
     if(done)done([hit isKindOfClass:[NSDictionary class]]?hit:nil);
@@ -133,6 +174,18 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)layoutWebPlayback;
 - (BOOL)lyricAiBusy;
 - (void)applyLanguage;
+- (void)onToggleAnalysis:(id)sender;
+- (void)onToggleAuto:(id)sender;
+- (void)onToggleRail:(id)sender;
+- (void)onAnlExpand:(id)sender;
+- (void)onAnlReanalyze:(id)sender;
+- (void)openDataDrawer;
+- (void)closeDataDrawer;
+- (void)renderMetaChipsFromMeta:(NSDictionary *)json;
+- (void)applyMetaChipVisibility;
+- (void)applyCastChipStyle;
+- (void)applyCoverSourceGate;
+- (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -233,29 +286,16 @@ int main(){@autoreleasepool{
   if([vc respondsToSelector:@selector(applyPlayModeUI)]){[vc setValue:@0 forKey:@"playbackMode"];[vc applyPlayModeUI];}
  }
 
- // ---- 侧栏面板内置收起键：web #npAnalHide / #npRailHide（22x22 圆形，与顶栏开关同源状态）----
- // 旧码只有右上角两个总开关，面板头部没有 web 的那枚收起键（元素缺失）。
+ // ---- 侧栏面板内置收起键：分析面板头部已按 N2 移除（npAnalHide 不存在），右栏保留 #npRailHide ----
  {
   [(NSView *)vc.view layoutSubtreeIfNeeded];   // 面板是内层视图，尺寸由 layoutWebPlayback 写
   NSButton *anlHide=(NSButton *)find(vc.view,@"npAnalHide");
   NSButton *railHide=(NSButton *)find(vc.view,@"npRailHide");
-  ck(anlHide!=nil,"web #npAnalHide panel-local hide key exists");
+  ck(anlHide==nil && [vc valueForKey:@"anlHide"]==nil,"N2 分析面板头部收起键 npAnalHide 已移除");
   ck(railHide!=nil,"web #npRailHide panel-local hide key exists");
-  if(anlHide&&railHide){
-    ck(fabs(anlHide.frame.size.width-22)<0.6&&fabs(anlHide.frame.size.height-22)<0.6,
-       "npAnalHide is 22x22 like web .anlhide");
+  if(railHide){
     ck(fabs(railHide.frame.size.width-22)<0.6&&fabs(railHide.frame.size.height-22)<0.6,
        "npRailHide is 22x22 like web .nprailhide");
-    ck(anlHide.wantsLayer&&anlHide.layer.cornerRadius>=10.5, "npAnalHide is a circle (web border-radius:50%)");
-    {   // v1.1.7.81：web `.anlhide{top:7;right:8}` 的定位框是 padding box，面板有 border:1 ⟹ 外缘 右 9 / 顶 8。
-        NSView *ap0=[vc valueForKey:@"analysisPanel"];
-        const CGFloat anlRight = NSWidth(ap0.bounds) - NSMaxX(anlHide.frame);
-        const CGFloat anlTop = NSHeight(ap0.bounds) - NSMaxY(anlHide.frame);
-        ck(fabs(anlRight-9.0)<1.0,
-           [[NSString stringWithFormat:@"npAnalHide 右端距面板外缘 = 9pt（8 + 边框 1；got %.1f）", anlRight] UTF8String]);
-        ck(fabs(anlTop-8.0)<1.0,
-           [[NSString stringWithFormat:@"npAnalHide 顶部距面板外缘 = 8pt（7 + 边框 1；got %.1f）", anlTop] UTF8String]);
-    }
     {   // v1.1.7.80：web `.nprailhead` 在 border-box 面板内，`.nprailhide` 右缘 = 内容内缘 11（旧值 8）。
         NSView *rp0=[vc valueForKey:@"railPanel"];
         const CGFloat rightMargin = NSWidth(rp0.bounds) - NSMaxX(railHide.frame);
@@ -265,12 +305,7 @@ int main(){@autoreleasepool{
         ck(fabs(topMargin-12.0)<1.0,
            [[NSString stringWithFormat:@"npRailHide 顶部距面板内缘 = 12pt（web 在 24pt 行内居中；got %.1f）", topMargin] UTF8String]);
     }
-    NSView *ap=[vc valueForKey:@"analysisPanel"];NSView *rp=[vc valueForKey:@"railPanel"];
-    [anlHide performClick:nil];
-    ck(ap.hidden,"npAnalHide hides the analysis panel");
-    ck([[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPAnalysisHidden"],
-       "npAnalHide persists the same hidden state as the top-right toggle");
-    ap.hidden=NO;[[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"RLPNPAnalysisHidden"];
+    NSView *rp=[vc valueForKey:@"railPanel"];
     [railHide performClick:nil];
     ck(rp.hidden,"npRailHide hides the AI rail panel");
     ck([[NSUserDefaults standardUserDefaults] boolForKey:@"RLPNPRailHidden"],
@@ -686,12 +721,9 @@ int main(){@autoreleasepool{
    ck(fabs(KernOf(kind)-1.6)<0.05,
       [[NSString stringWithFormat:@"刷新后 npKind 字距仍 1.6（got %.2f，text=「%@」）",KernOf(kind),kind.stringValue] UTF8String]);
   }
-  // #24 左栏分析标题：web .anllab letter-spacing:1.5（代码里已接，本轮补判据防回归）
-  NSTextField *anl=(NSTextField *)[vc valueForKey:@"anlLab"];
-  ck(anl!=nil,"anlLab 存在（#24 判据前提）");
-  if(anl)
-   ck(fabs(KernOf(anl)-1.5)<0.05,
-      [[NSString stringWithFormat:@"anlLab 字距 1.5（web .anllab；got %.2f）",KernOf(anl)] UTF8String]);
+  // N2：左栏分析标题已按反馈图三删除，不再保留 npAnlLab；验证移除彻底且无残留
+  ck([vc valueForKey:@"anlLab"]==nil && find(vc.view,@"npAnlLab")==nil && find(vc.view,@"npAnlStat")==nil,
+     "N2 anlLab/anlStat 头部控件已删除");
  }
 
  // ---- #40 歌词视口渐隐：web `.nplyric2{ mask-image:linear-gradient(180deg,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%) }` ----
@@ -913,7 +945,11 @@ int main(){@autoreleasepool{
        [[NSString stringWithFormat:@"抽屉宽=min(430,44vw)（want %.0f got %.0f）",wantW,drawer.frame.size.width] UTF8String]);
     ck(fabs(NSMaxX(drawer.frame)-(W-14.0))<1.0&&fabs(NSMinY(drawer.frame)-14.0)<1.0,
        [[NSString stringWithFormat:@"top/right 14pt（frame=%@）",NSStringFromRect(drawer.frame)] UTF8String]);
-    ck(fabs(drawer.frame.size.height-(H-28.0))<1.0,"抽屉高 = 页面高-28（top/bottom 14）");
+    NSView *ctlD=(NSView *)[vc valueForKey:@"webControls"];
+    const CGFloat wantH=ctlD ? MAX(60.0, NSMinY(ctlD.frame)-8.0-14.0) : (H-28.0);
+    ck(fabs(drawer.frame.size.height-wantH)<1.5 && (!ctlD || NSMaxY(drawer.frame)<=NSMinY(ctlD.frame)-7.5),
+       [[NSString stringWithFormat:@"抽屉底边让出底栏控制区（wantH %.0f gotH %.0f maxY %.0f ctlTop %.0f）",
+         wantH,drawer.frame.size.height,NSMaxY(drawer.frame),ctlD?NSMinY(ctlD.frame):0.0] UTF8String]);
     ck(fabs(drawer.layer.cornerRadius-18.0)<0.6,"抽屉圆角 18（web border-radius:18px）");
     ck(drawer.layer.borderWidth>=1.0,"抽屉 1px 描边（--line2）");
     ck(drawer.layer.shadowOpacity>0.30&&fabs(drawer.layer.shadowRadius-40.0)<1.0,
@@ -1119,7 +1155,691 @@ int main(){@autoreleasepool{
  pendingFav=nil;pendingLyricAi=nil;method_setImplementation(shared,old);
  // ---- Live language switch must refresh tooltips captured at construction ----
  RLPSetLanguage(@"en");[vc applyLanguage];
- {id bar=[vc valueForKey:@"webControls"];ck(bar != nil,"language fixture contains actual playback controls");NSArray *keys=@[@"castButton",@"saveButton",@"closeButton",@"analysisToggle",@"railToggle",@"anlHide",@"railHide",@"coverSetBtn",@"coverResetBtn"];NSArray *barKeys=@[@"seek",@"repBtn",@"volKnob",@"volDbField",@"volMuteBtn"];NSMutableArray *stale=[NSMutableArray array];for(NSString*k in keys){NSView*v=[vc valueForKey:k];NSString*tip=[(id)v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"%@=%@",k,tip]];}for(NSString*k in barKeys){id v=[bar valueForKey:k];NSString*tip=[v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"bar.%@=%@",k,tip]];}ck(stale.count==0,"language switch refreshes tooltips built at construction");if(stale.count)printf("    stale: %s\n",[[stale componentsJoinedByString:@" | "] UTF8String]);}
+ {id bar=[vc valueForKey:@"webControls"];ck(bar != nil,"language fixture contains actual playback controls");NSArray *keys=@[@"castButton",@"saveButton",@"closeButton",@"analysisToggle",@"railToggle",@"railHide",@"coverSetBtn",@"coverResetBtn"];NSArray *barKeys=@[@"seek",@"repBtn",@"volKnob",@"volDbField",@"volMuteBtn"];NSMutableArray *stale=[NSMutableArray array];for(NSString*k in keys){NSView*v=[vc valueForKey:k];NSString*tip=[(id)v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"%@=%@",k,tip]];}for(NSString*k in barKeys){id v=[bar valueForKey:k];NSString*tip=[v respondsToSelector:@selector(toolTip)]?[v valueForKey:@"toolTip"]:nil;if(HasCJK(tip))[stale addObject:[NSString stringWithFormat:@"bar.%@=%@",k,tip]];}ck(stale.count==0,"language switch refreshes tooltips built at construction");if(stale.count)printf("    stale: %s\n",[[stale componentsJoinedByString:@" | "] UTF8String]);}
  RLPSetLanguage(@"zh");[vc applyLanguage];
+ // ---- N1/N2/N3: 900x600 覆盖页经 NSLayoutConstraint 四边 pin 到主窗 contentView 时底栏完整可见不裁切 ----
+ {
+  NSUserDefaults *ud=[NSUserDefaults standardUserDefaults];
+  const BOOL savedAnlHidden=[ud boolForKey:@"RLPNPAnalysisHidden"];
+  const BOOL savedRailHidden=[ud boolForKey:@"RLPNPRailHidden"];
+  [ud setBool:NO forKey:@"RLPNPAnalysisHidden"];
+  [ud setBool:NO forKey:@"RLPNPRailHidden"];
+
+  NSWindow *win=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,900,600)
+                                            styleMask:NSWindowStyleMaskBorderless
+                                              backing:NSBackingStoreBuffered defer:NO];
+  win.contentView=[[NSView alloc] initWithFrame:NSMakeRect(0,0,900,600)];
+  [win setContentSize:NSMakeSize(900,600)];
+
+  RLPNowPlayingViewController *np=[RLPNowPlayingViewController new];
+  NSView *nv=np.view;
+  nv.translatesAutoresizingMaskIntoConstraints=NO;
+  [win.contentView addSubview:nv];
+  [NSLayoutConstraint activateConstraints:@[
+   [nv.leadingAnchor constraintEqualToAnchor:win.contentView.leadingAnchor],
+   [nv.trailingAnchor constraintEqualToAnchor:win.contentView.trailingAnchor],
+   [nv.topAnchor constraintEqualToAnchor:win.contentView.topAnchor],
+   [nv.bottomAnchor constraintEqualToAnchor:win.contentView.bottomAnchor],
+  ]];
+  [win.contentView layoutSubtreeIfNeeded];
+
+  NSView *ctl=find(nv,@"np.controls");
+  if(!ctl){
+   NSView *seek=find(nv,@"np.seek") ?: find(nv,@"np.vol");
+   ctl=seek.superview;
+  }
+  NSView *knob=find(ctl ?: nv,@"npVolKnob");
+  NSView *mute=find(ctl ?: nv,@"npVolFloor");
+  NSView *wf=find(nv,@"np.waveform");
+  NSView *anal=find(nv,@"npAnal");
+  NSView *ly=find(nv,@"npLyric");
+  NSView *rail=find(nv,@"npRail");
+
+  void (^checkBottomBarInBounds)(CGFloat,CGFloat,const char *) = ^(CGFloat wantW,CGFloat wantH,const char *tag){
+   const CGFloat bw=nv.bounds.size.width, bh=nv.bounds.size.height;
+   const BOOL hostOk=(fabs(bw-wantW)<1.0 && fabs(bh-wantH)<1.0);
+   if(!ctl || !knob || !mute){
+    ck(NO,[[NSString stringWithFormat:@"%s 控件齐备(ctl=%d knob=%d mute=%d)",tag,ctl!=nil,knob!=nil,mute!=nil] UTF8String]);
+    return;
+   }
+   const NSRect ctlC=[nv convertRect:ctl.bounds fromView:ctl];
+   const NSRect knobC=[nv convertRect:knob.bounds fromView:knob];
+   const NSRect muteC=[nv convertRect:mute.bounds fromView:mute];
+   const NSRect ctlW=[win.contentView convertRect:ctl.bounds fromView:ctl];
+   const NSRect knobW=[win.contentView convertRect:knob.bounds fromView:knob];
+   const NSRect muteW=[win.contentView convertRect:mute.bounds fromView:mute];
+   const BOOL ctlOk=(!ctl.hidden && ctlC.size.height>10.0 && ctlC.size.width<=wantW+1.0 &&
+                     NSMinY(ctlC)>=-1.0 && NSMaxY(ctlC)<=wantH+1.0 &&
+                     NSMinY(ctlW)>=-1.0 && NSMaxY(ctlW)<=wantH+1.0);
+   const BOOL knobOk=(!knob.hidden && knobC.size.height>1.0 &&
+                      NSMinY(knobC)>=-1.0 && NSMaxY(knobC)<=wantH+1.0 &&
+                      NSMinY(knobW)>=-1.0 && NSMaxY(knobW)<=wantH+1.0);
+   const BOOL muteOk=(!mute.hidden && muteC.size.height>1.0 &&
+                      NSMinY(muteC)>=-1.0 && NSMaxY(muteC)<=wantH+1.0 &&
+                      NSMinY(muteW)>=-1.0 && NSMaxY(muteW)<=wantH+1.0);
+   const BOOL wfOk=(wf==nil || NSMaxY([nv convertRect:wf.bounds fromView:wf])<=NSMinY(ctlC)+0.5);
+   printf("    [%s] nv=%.0fx%.0f ctl=%s knob=%s mute=%s ctlWin=%s\n",
+          tag, bw, bh,
+          [NSStringFromRect(ctlC) UTF8String],
+          [NSStringFromRect(knobC) UTF8String],
+          [NSStringFromRect(muteC) UTF8String],
+          [NSStringFromRect(ctlW) UTF8String]);
+   ck(hostOk && ctlOk && knobOk && muteOk && wfOk,
+      [[NSString stringWithFormat:@"%s %.0fx%.0f 底栏完整落在[0,%.0f]内(ctlMaxY=%.1f knobMaxY=%.1f muteMaxY=%.1f)",
+        tag, wantW, wantH, wantH, NSMaxY(ctlC), NSMaxY(knobC), NSMaxY(muteC)] UTF8String]);
+  };
+
+  // N1: 900x600 首开经 NSLayoutConstraint 四边 pin 到 contentView
+  checkBottomBarInBounds(900.0, 600.0, "N1");
+  if(ctl){
+   ck(fabs(ctl.frame.size.height-64.0)<1.0 && NSMaxY(ctl.frame)<=601.0,
+      [[NSString stringWithFormat:@"N1b 900x600 已重算紧凑底栏(h=%.1f maxY=%.1f，不再停留 1180x760 的 y=676/h=68)",
+        ctl.frame.size.height, NSMaxY(ctl.frame)] UTF8String]);
+  }
+
+  // N2: 同一 VC 宿主尺寸 1180x760 -> 900x600 -> 1180x760 来回切换 + 缓存重入，每档底栏完整不裁
+  [win setContentSize:NSMakeSize(1180,760)];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(1180.0, 760.0, "N2a(1180x760)");
+
+  [win setContentSize:NSMakeSize(900,600)];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N2b(900x600)");
+
+  [win setContentSize:NSMakeSize(1180,760)];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(1180.0, 760.0, "N2c(1180x760)");
+
+  [nv removeFromSuperview];
+  [win setContentSize:NSMakeSize(900,600)];
+  [win.contentView addSubview:nv];
+  [NSLayoutConstraint activateConstraints:@[
+   [nv.leadingAnchor constraintEqualToAnchor:win.contentView.leadingAnchor],
+   [nv.trailingAnchor constraintEqualToAnchor:win.contentView.trailingAnchor],
+   [nv.topAnchor constraintEqualToAnchor:win.contentView.topAnchor],
+   [nv.bottomAnchor constraintEqualToAnchor:win.contentView.bottomAnchor],
+  ]];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N2d(reattach 900x600)");
+
+  // N3: 900x600 下打开/展开分析面板、切换资料栏、打开页内资料抽屉及多行歌词/芯片，均不把底栏推出去
+  [np setValue:@"/offline/n3-900x600.flac" forKey:@"currentPath"];
+  [np applyLyricText:@"[00:01.00]line 1\n[00:02.00]line 2\n[00:03.00]line 3\n[00:04.00]line 4\n[00:05.00]line 5\n[00:06.00]line 6"
+             forPath:@"/offline/n3-900x600.flac"];
+  [np renderMetaChipsFromMeta:@{
+   @"year": @2024,
+   @"genre": @"Classical / Chamber / Orchestral Very Long Genre Label",
+   @"albumArtist": @"Berlin Philharmonic / Herbert von Karajan",
+   @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"MusicBrainz" } }
+  }];
+  [np setValue:@{@"title":@"N3 Symphony",@"album":@"Album",@"artist":@"Artist"} forKey:@"trackMetadata"];
+  [np renderRailMetadata];
+  if(anal.hidden)[np onToggleAnalysis:nil];
+  if(rail.hidden)[np onToggleRail:nil];
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3a(panels+chips)");
+
+  [np onAnlExpand:nil];   // L0 -> L1
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3b(anl L1)");
+
+  [np onAnlExpand:nil];   // L1 -> L2
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3c(anl L2)");
+
+  [np onAnlExpand:nil];   // L2 -> L0
+  id chipsObjN3=[np valueForKey:@"railCards"];
+  NSArray<NSView *> *chipsN3=[chipsObjN3 isKindOfClass:[NSArray class]]?(NSArray<NSView *>*)chipsObjN3:@[];
+  if(chipsN3.count>0){
+   [(id)np performSelector:@selector(onRailCard:) withObject:chipsN3[0]];
+  }else{
+   [np openDataDrawer];
+  }
+  [win.contentView layoutSubtreeIfNeeded];
+  checkBottomBarInBounds(900.0, 600.0, "N3d(npDrawer open)");
+  NSView *drawerN3=find(nv,@"npDrawer");
+  if(drawerN3 && !drawerN3.hidden){
+   const NSRect drC=[nv convertRect:drawerN3.bounds fromView:drawerN3];
+   ck(NSMinY(drC)>=0.0 && NSMaxY(drC)<=601.0,
+      [[NSString stringWithFormat:@"N3e 900x600 下 npDrawer 完整落在[0,600]内(frame=%@)",NSStringFromRect(drC)] UTF8String]);
+  }
+  const NSRect ctlCNow=ctl ? [nv convertRect:ctl.bounds fromView:ctl] : NSZeroRect;
+  const NSRect wfCNow=wf ? [nv convertRect:wf.bounds fromView:wf] : NSZeroRect;
+  if(wf && ctl){
+   const BOOL panelsClearWf=(!anal || anal.hidden || NSMaxY([nv convertRect:anal.bounds fromView:anal])<=NSMinY(wfCNow)+0.5)
+                         && (!ly || NSMaxY([nv convertRect:ly.bounds fromView:ly])<=NSMinY(wfCNow)+0.5)
+                         && (!rail || rail.hidden || NSMaxY([nv convertRect:rail.bounds fromView:rail])<=NSMinY(wfCNow)+0.5);
+   ck(panelsClearWf && NSMaxY(wfCNow)<=NSMinY(ctlCNow)+0.5,
+      "N3f 三栏不压波形、波形不压底栏");
+  }
+  [np closeDataDrawer];
+
+  // ---- N1 / N2 / N3 UI 回归判据（图二/三/六）----
+  {
+   [np setValue:[RLPPlaybackStatus statusFromJSON:@{@"ok":@YES,@"playing":@YES,@"paused":@NO,@"current":@"/offline/npui.flac",@"dur":@120.0}] forKey:@"webStatus"];
+   [np setValue:@"/offline/npui.flac" forKey:@"currentPath"];
+   [np setValue:@{@"title":@"N1 Track",@"album":@"Album",@"artist":@"Artist",@"coverSource":@"embed"} forKey:@"trackMetadata"];
+   [np applyMetaChipVisibility];
+
+   // N1: 1800 / 1600 宽下「推送到设备 / 添加到歌单」按钮高度一致且图标与文字垂直中心线偏差 <= 1pt
+   NSButton *castBtn = (NSButton *)find(nv, @"npCastBtn");
+   NSButton *saveBtn = (NSButton *)find(nv, @"npAddSq");
+   for (NSArray<NSNumber *> *sz in @[@[@1800,@1000], @[@1600,@900]]) {
+    const CGFloat W = sz[0].doubleValue, H = sz[1].doubleValue;
+    [win setContentSize:NSMakeSize(W, H)];
+    [win.contentView layoutSubtreeIfNeeded];
+    const BOOL vis = (castBtn && saveBtn && !castBtn.hidden && !saveBtn.hidden);
+    ck(vis, [[NSString stringWithFormat:@"N1_%dx%d 投放/加歌单按钮可见",(int)W,(int)H] UTF8String]);
+    if (vis) {
+     const NSRect cf = castBtn.frame, sf = saveBtn.frame;
+     const BOOL sameH = (fabs(NSHeight(cf) - NSHeight(sf)) <= 0.5 && fabs(NSHeight(cf) - 24.0) <= 0.5);
+     const NSRect cir = [castBtn.cell imageRectForBounds:castBtn.bounds];
+     const NSRect ctr = [castBtn.cell titleRectForBounds:castBtn.bounds];
+     const NSRect sir = [saveBtn.cell imageRectForBounds:saveBtn.bounds];
+     const NSRect str = [saveBtn.cell titleRectForBounds:saveBtn.bounds];
+     const CGFloat cDy = fabs(NSMidY(cir) - NSMidY(ctr));
+     const CGFloat sDy = fabs(NSMidY(sir) - NSMidY(str));
+     const CGFloat cGap = NSMinX(ctr) - NSMaxX(cir);
+     const CGFloat sGap = NSMinX(str) - NSMaxX(sir);
+     const CGFloat btnGap = NSMinX(sf) - NSMaxX(cf);
+     printf("    [N1 %dx%d] cast=%s ir=%s tr=%s dy=%.2f | save=%s ir=%s tr=%s dy=%.2f | gap=%.1f\n",
+            (int)W, (int)H,
+            NSStringFromRect(cf).UTF8String, NSStringFromRect(cir).UTF8String, NSStringFromRect(ctr).UTF8String, cDy,
+            NSStringFromRect(sf).UTF8String, NSStringFromRect(sir).UTF8String, NSStringFromRect(str).UTF8String, sDy, btnGap);
+     ck(sameH, [[NSString stringWithFormat:@"N1_%d cast(%.1f)/save(%.1f) 高度一致且等于 24pt",(int)W,NSHeight(cf),NSHeight(sf)] UTF8String]);
+     ck(!NSIsEmptyRect(cir) && !NSIsEmptyRect(ctr) && cDy <= 1.0 && fabs(NSMidY(cir) - NSMidY(castBtn.bounds)) <= 1.0 && cGap >= 3.0,
+        [[NSString stringWithFormat:@"N1_%d cast 图标/文字垂直中心线偏差 %.2fpt <= 1pt 且有间距 %.1f",(int)W,cDy,cGap] UTF8String]);
+     ck(!NSIsEmptyRect(sir) && !NSIsEmptyRect(str) && sDy <= 1.0 && fabs(NSMidY(sir) - NSMidY(saveBtn.bounds)) <= 1.0 && sGap >= 3.0,
+        [[NSString stringWithFormat:@"N1_%d save 图标/文字垂直中心线偏差 %.2fpt <= 1pt 且有间距 %.1f",(int)W,sDy,sGap] UTF8String]);
+     ck(fabs(NSMidY(cf) - NSMidY(sf)) <= 0.5 && btnGap >= 5.5,
+        [[NSString stringWithFormat:@"N1_%d 两按钮同行等距 gap=%.1f",(int)W,btnGap] UTF8String]);
+    }
+   }
+
+   // N2 & N3: 900x600 与 1180x760 两档布局检查（分析头部删除/三栏均衡/底栏完整/封面右下角设置按钮）
+   NSView *coverV = find(nv, @"npCover");
+   NSButton *setCoverB = (NSButton *)find(nv, @"npSetCover");
+   NSButton *rstCoverB = (NSButton *)find(nv, @"npResetCover");
+   NSView *anlSegV = find(nv, @"npAnlSeg");
+   NSView *anlBodyV = find(nv, @"npAnlBody");
+   NSView *titleV = find(nv, @"npTitle");
+   NSView *subV = find(nv, @"npSub");
+   NSView *metaV = find(nv, @"npMeta");
+
+   ck(find(nv, @"npAnlLab")==nil && find(nv, @"npAnlStat")==nil && find(nv, @"npAnalHide")==nil,
+      "N2a 音频分析头部 npAnlLab/npAnlStat/npAnalHide 不再存在");
+   ck([np respondsToSelector:@selector(anlAutoTickForPath:playing:paused:)] &&
+      find(nv, @"npAnlAuto")!=nil && find(nv, @"npAnlToggle")!=nil && find(nv, @"npAnlRun")!=nil,
+      "N2b 自动分析方法与无头动作分段控件完整保留");
+
+   for (NSArray<NSNumber *> *sz in @[@[@900,@600], @[@1180,@760]]) {
+    const CGFloat W = sz[0].doubleValue, H = sz[1].doubleValue;
+    [win setContentSize:NSMakeSize(W, H)];
+    [win.contentView layoutSubtreeIfNeeded];
+    checkBottomBarInBounds(W, H, [[NSString stringWithFormat:@"N2_bar_%dx%d",(int)W,(int)H] UTF8String]);
+    if (anal && ly && rail && anlSegV && anlBodyV) {
+     const BOOL noOverlap = (NSMaxX(anal.frame) + 4.0 < NSMinX(ly.frame)) && (NSMaxX(ly.frame) + 4.0 < NSMinX(rail.frame));
+     const BOOL symCols = (fabs(NSWidth(anal.frame) - NSWidth(rail.frame)) <= 0.5) && (NSWidth(ly.frame) > NSWidth(anal.frame) * 1.9);
+     const BOOL inHost = NSContainsRect(nv.bounds, anal.frame) && NSContainsRect(nv.bounds, ly.frame) && NSContainsRect(nv.bounds, rail.frame);
+     const BOOL headlessClean = !anlSegV.hidden && !anlBodyV.hidden &&
+                                (NSMinY(anlSegV.frame) >= NSMaxY(anlBodyV.frame) - 0.5) &&
+                                (NSMaxY(anlSegV.frame) <= NSHeight(anal.bounds) - 9.0);
+     printf("    [N2 %dx%d] anal=%s ly=%s rail=%s anlSeg=%s anlBody=%s\n",
+            (int)W, (int)H,
+            NSStringFromRect(anal.frame).UTF8String, NSStringFromRect(ly.frame).UTF8String, NSStringFromRect(rail.frame).UTF8String,
+            NSStringFromRect(anlSegV.frame).UTF8String, NSStringFromRect(anlBodyV.frame).UTF8String);
+     ck(noOverlap && symCols && inHost && headlessClean,
+        [[NSString stringWithFormat:@"N2_%dx%d 无头两段式分析卡+对称三栏无重叠无越界",(int)W,(int)H] UTF8String]);
+    }
+    if (coverV && setCoverB) {
+     const NSRect covF = coverV.frame;
+     const NSRect setF = setCoverB.frame;
+     const BOOL insideCov = !setCoverB.hidden && NSContainsRect(covF, setF);
+     const BOOL bottomRight = (fabs((NSMaxX(covF) - NSMaxX(setF)) - 8.0) < 1.0) &&
+                              (fabs((NSMaxY(covF) - NSMaxY(setF)) - 8.0) < 1.0) &&
+                              (NSMidX(setF) > NSMidX(covF)) && (NSMinY(setF) > NSMidY(covF));
+     BOOL disjointFromOthers = YES;
+     for (NSView *other in @[anal ?: [NSView new], titleV ?: [NSView new], subV ?: [NSView new],
+                             metaV ?: [NSView new], ly ?: [NSView new], rail ?: [NSView new], ctl ?: [NSView new]]) {
+      if (other.hidden) continue;
+      NSRect inter = NSIntersectionRect(setF, other.frame);
+      if (inter.size.width > 0.5 && inter.size.height > 0.5) { disjointFromOthers = NO; break; }
+     }
+     printf("    [N3 %dx%d] cover=%s setCover=%s anal=%s\n",
+            (int)W, (int)H,
+            NSStringFromRect(covF).UTF8String, NSStringFromRect(setF).UTF8String, NSStringFromRect(anal.frame).UTF8String);
+     ck(insideCov && bottomRight && disjointFromOthers,
+        [[NSString stringWithFormat:@"N3_%dx%d 设置封面胶囊悬浮于封面右下角且不与其它控件相交",(int)W,(int)H] UTF8String]);
+
+     // 手动封面状态：自动胶囊也应同处封面右下区域且相互不重叠
+     [np setValue:@{@"title":@"N1 Track",@"coverSource":@"manual"} forKey:@"trackMetadata"];
+     [np applyCoverSourceGate];
+     [win.contentView layoutSubtreeIfNeeded];
+     if (rstCoverB && !rstCoverB.hidden) {
+      const NSRect rstF = rstCoverB.frame;
+      const NSRect setF2 = setCoverB.frame;
+      ck(NSContainsRect(covF, rstF) && NSContainsRect(covF, setF2) && NSMaxX(rstF) + 4.0 <= NSMinX(setF2),
+         [[NSString stringWithFormat:@"N3_%dx%d 手动封面双胶囊共居右下区不互压 rst=%s set=%s",(int)W,(int)H,
+           NSStringFromRect(rstF).UTF8String, NSStringFromRect(setF2).UTF8String] UTF8String]);
+     }
+     [np setValue:@{@"title":@"N1 Track",@"coverSource":@"embed"} forKey:@"trackMetadata"];
+     [np applyCoverSourceGate];
+    }
+  }
+  }
+  // ---- A1-A4: AI 详细档全字段 + 抽屉分区内容/滚动/空态 + 900x600 & 1180x760 边界与底栏让位 ----
+  {
+   __block void (^__weak wCollectFields)(NSView *, NSString *, NSMutableArray<NSTextField *> *);
+   void (^collectFields)(NSView *, NSString *, NSMutableArray<NSTextField *> *);
+   collectFields = ^(NSView *root, NSString *ident, NSMutableArray<NSTextField *> *out) {
+    if (!root || root.hidden) return;
+    if ([root isKindOfClass:[NSTextField class]] && [root.identifier isEqualToString:ident]) {
+     NSTextField *tf = (NSTextField *)root;
+     if (tf.stringValue.length > 0) [out addObject:tf];
+    }
+    void (^rec)(NSView *, NSString *, NSMutableArray<NSTextField *> *) = wCollectFields;
+    for (NSView *sub in root.subviews) if (rec) rec(sub, ident, out);
+   };
+   wCollectFields = collectFields;
+   __block void (^__weak wCollectViews)(NSView *, NSString *, NSMutableArray<NSView *> *);
+   void (^collectViews)(NSView *, NSString *, NSMutableArray<NSView *> *);
+   collectViews = ^(NSView *root, NSString *ident, NSMutableArray<NSView *> *out) {
+    if (!root || root.hidden) return;
+    if ([root.identifier isEqualToString:ident] || (ident.length && [root.identifier hasPrefix:ident])) {
+     [out addObject:root];
+    }
+    void (^rec)(NSView *, NSString *, NSMutableArray<NSView *> *) = wCollectViews;
+    for (NSView *sub in root.subviews) if (rec) rec(sub, ident, out);
+   };
+   wCollectViews = collectViews;
+
+   // A1: 真实 meta fixture（含 year/genre/label/catalog/credits/recording/mastering/sources/confidence/cached_at）
+   NSDictionary *metaFixture = @{
+    @"title": @"Winterreise, Op. 89: Gute Nacht",
+    @"artist": @"Ian Bostridge",
+    @"album": @"Schubert: Winterreise",
+    @"albumArtist": @"Ian Bostridge & Leif Ove Andsnes",
+    @"year": @2004,
+    @"genre": @"Classical / Lieder Art Song",
+    @"label": @"EMI Classics",
+    @"catalog": @"07243 5 57790 2 1",
+    @"duration": @"05:38",
+    @"credits": @{
+     @"composer": @"Franz Schubert",
+     @"lyricist": @"Wilhelm Müller",
+     @"arranger": @"Original Lieder Urtext Edition",
+     @"performer": @"Ian Bostridge (Tenor) & Leif Ove Andsnes (Piano)"
+    },
+    @"recording": @"Potton Hall, Suffolk, UK (2004-02, 24-bit/96kHz PCM)",
+    @"mastering": @"Abbey Road Studios High-Resolution Remaster",
+    @"sources": @[ @"MusicBrainz", @"Discogs", @"Wikipedia" ],
+    @"confidence": @"0.95",
+    @"cached_at": @"2026-11-18 10:15:00"
+   };
+   const NSInteger fixtureNonEmptyCount = 18;
+   RLPKnowledgeView *kv = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(0, 0, 420, 620)];
+   [kv renderMetaFixture:metaFixture];
+   [kv layoutSubtreeIfNeeded];
+   NSMutableArray<NSTextField *> *a1Vals = [NSMutableArray array];
+   collectFields(kv, @"npDrawerFieldVal", a1Vals);
+   BOOL noEllipsisTrunc = YES;
+   NSMutableString *allRenderedText = [NSMutableString string];
+   for (NSTextField *vf in a1Vals) {
+    [allRenderedText appendString:vf.stringValue];
+    [allRenderedText appendString:@" "];
+    if ([vf.stringValue hasSuffix:@"…"] || vf.lineBreakMode == NSLineBreakByTruncatingTail) {
+     noEllipsisTrunc = NO;
+    }
+   }
+   BOOL hasAllCriticalValues = [allRenderedText containsString:@"2004"]
+    && [allRenderedText containsString:@"Classical / Lieder Art Song"]
+    && [allRenderedText containsString:@"EMI Classics"]
+    && [allRenderedText containsString:@"07243 5 57790 2 1"]
+    && [allRenderedText containsString:@"Franz Schubert"]
+    && [allRenderedText containsString:@"Wilhelm Müller"]
+    && [allRenderedText containsString:@"Original Lieder Urtext Edition"]
+    && [allRenderedText containsString:@"Ian Bostridge (Tenor) & Leif Ove Andsnes (Piano)"]
+    && [allRenderedText containsString:@"Abbey Road Studios High-Resolution Remaster"]
+    && [allRenderedText containsString:@"MusicBrainz"]
+    && [allRenderedText containsString:@"0.95"]
+    && [allRenderedText containsString:@"2026-11-18 10:15:00"];
+   printf("A1: knowledge visible fields=%lu (fixture=%ld), noEllipsis=%d, critical=%d\n",
+          (unsigned long)a1Vals.count, (long)fixtureNonEmptyCount, noEllipsisTrunc, hasAllCriticalValues);
+   ck((NSInteger)a1Vals.count >= fixtureNonEmptyCount && noEllipsisTrunc && hasAllCriticalValues,
+      "A1 RLPKnowledgeView 详细档可见字段数 >= fixture 非空字段数，且关键值完整无…截断");
+
+   // A1b: 右栏详细档（railDensity=1）下，卡片展示全部非空字段且无…截断
+   [np setValue:@"/offline/a1-lieder.flac" forKey:@"currentPath"];
+   [np setValue:@{
+    @"title": metaFixture[@"title"],
+    @"artist": metaFixture[@"artist"],
+    @"album": metaFixture[@"album"],
+    @"albumArtist": metaFixture[@"albumArtist"],
+    @"year": metaFixture[@"year"],
+    @"genre": metaFixture[@"genre"],
+    @"label": metaFixture[@"label"],
+    @"catalog": metaFixture[@"catalog"],
+    @"track": @"1",
+    @"codec": @"flac",
+    @"sampleRate": @96000,
+    @"bits": @24,
+    @"channels": @2,
+    @"credits": metaFixture[@"credits"],
+    @"recording": metaFixture[@"recording"],
+    @"mastering": metaFixture[@"mastering"],
+    @"confidence": metaFixture[@"confidence"],
+    @"cached_at": metaFixture[@"cached_at"],
+    @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"MusicBrainz", @"label": @"Discogs" } }
+   } forKey:@"trackMetadata"];
+   [np setValue:[@{
+    @"track": [@{ @"state": @"ok", @"data": @{
+     @"from_cache": @YES,
+     @"generated_at": @1763450000,
+     @"confidence": @"0.95",
+     @"fields": @{
+      @"演唱": @"Ian Bostridge",
+      @"作曲": @"Franz Schubert",
+      @"作词": @"Wilhelm Müller",
+      @"编曲": @"Original Lieder Urtext Edition",
+      @"厂牌": @"EMI Classics",
+      @"目录号": @"07243 5 57790 2 1",
+      @"录音": @"Potton Hall, Suffolk, UK (2004-02, 24-bit/96kHz PCM)",
+      @"母带": @"Abbey Road Studios High-Resolution Remaster"
+     },
+     @"sections": @[ @{
+      @"heading": @"背景与演绎",
+      @"paragraphs": @[ @{ @"text": @"舒伯特声乐套曲《冬之旅》开篇曲《晚安》，声部与钢琴伴奏具有典型浪漫派室内乐张力。", @"citations": @[@"1"] } ]
+     } ],
+     @"citations": @[ @{ @"id": @"1", @"source": @"Discogs", @"title": @"EMI 07243 5 57790 2 1", @"url": @"https://www.discogs.com/release/1" } ]
+    } } mutableCopy],
+    @"release": [@{ @"state": @"ok", @"data": @{
+     @"from_cache": @NO,
+     @"fields": @{ @"出版方": @"EMI Classics", @"专辑类型": @"Studio Album", @"语种": @"德语" },
+     @"__album": @{
+      @"year": @2004,
+      @"sr": @96000,
+      @"bits": @24,
+      @"tracks": @[
+       @{ @"n": @1, @"title": @"Gute Nacht", @"dur": @338 },
+       @{ @"n": @2, @"title": @"Die Wetterfahne", @"dur": @112 },
+       @{ @"n": @3, @"title": @"Gefrorne Tränen", @"dur": @156 },
+       @{ @"n": @4, @"title": @"Erstarrung", @"dur": @175 },
+       @{ @"n": @5, @"title": @"Der Lindenbaum", @"dur": @282 },
+       @{ @"n": @6, @"title": @"Wasserflut", @"dur": @244 }
+      ]
+     }
+    } } mutableCopy],
+    @"person": [@{ @"state": @"ok", @"data": @{
+     @"from_cache": @NO,
+     @"fields": @{
+      @"简介": @"Ian Bostridge 是英国著名抒情男高音，以对舒伯特声乐套曲《冬之旅》《美丽的磨坊姑娘》的深度诠释闻名国际乐坛。",
+      @"活跃年代": @"1993–至今",
+      @"代表作品": @"Schubert: Winterreise / Die schöne Müllerin"
+     }
+    } } mutableCopy]
+   } mutableCopy] forKey:@"railStates"];
+   [np setValue:[@{
+    @"track": @{ @"kind": @"track", @"name": metaFixture[@"title"], @"artist": metaFixture[@"artist"], @"album": metaFixture[@"album"] },
+    @"release": @{ @"kind": @"release", @"name": metaFixture[@"album"], @"artist": metaFixture[@"albumArtist"] },
+    @"person": @{ @"kind": @"person", @"name": metaFixture[@"albumArtist"], @"artist": @"" }
+   } mutableCopy] forKey:@"railTargets"];
+   NSSegmentedControl *segA1 = (NSSegmentedControl *)[np valueForKey:@"railDensity"];
+   segA1.selectedSegment = 1;
+   [np onRailDensity:segA1];
+   [win.contentView layoutSubtreeIfNeeded];
+   NSMutableArray<NSTextField *> *railKvVals = [NSMutableArray array];
+   collectFields(rail, @"npChipKV.val", railKvVals);
+   BOOL railNoTrunc = YES;
+   for (NSTextField *vf in railKvVals) {
+    if ([vf.stringValue hasSuffix:@"…"] || vf.lineBreakMode == NSLineBreakByTruncatingTail) railNoTrunc = NO;
+   }
+   printf("A1b: rail detail rows=%lu noTrunc=%d\n", (unsigned long)railKvVals.count, railNoTrunc);
+   ck(railKvVals.count >= 12 && railNoTrunc, "A1b 右栏详细档展示完整多字段且无…截断");
+
+   // A3: 空 payload 显示明确空态而非白屏空白
+   [kv renderMetaFixture:@{}];
+   [kv layoutSubtreeIfNeeded];
+   NSView *emptyView = find(kv, @"npDrawerEmpty");
+   NSTextField *emptyTitle = (NSTextField *)find(kv, @"npDrawerEmptyTitle");
+   ck(emptyView && !emptyView.hidden && emptyView.frame.size.height > 20.0 && emptyTitle.stringValue.length > 0,
+      "A3 空 payload 显示明确空态提示卡片而非白屏空白");
+
+   // A2 & A4: 在 900x600 和 1180x760 下打开抽屉，验证分区标题、可滚动条目、内容占比 > 60%、不越界且不遮挡底栏
+   NSArray<NSValue *> *sizes = @[
+    [NSValue valueWithSize:NSMakeSize(900.0, 600.0)],
+    [NSValue valueWithSize:NSMakeSize(1180.0, 760.0)]
+   ];
+   for (NSValue *szVal in sizes) {
+    const NSSize sz = [szVal sizeValue];
+    [win setContentSize:sz];
+    id chipsObjA = [np valueForKey:@"railCards"];
+    NSArray<NSView *> *chipsA = [chipsObjA isKindOfClass:[NSArray class]] ? (NSArray<NSView *> *)chipsObjA : @[];
+    if (chipsA.count > 0) [(id)np performSelector:@selector(onRailCard:) withObject:chipsA[0]];
+    else [np openDataDrawer];
+    [win.contentView layoutSubtreeIfNeeded];
+
+    NSView *dr = find(nv, @"npDrawer");
+    NSView *hdr = dr ? find(dr, @"npdhead") : nil;
+    NSView *secHost = dr ? find(dr, @"npDrawerSections") : nil;
+    NSScrollView *drScroll = dr ? (NSScrollView *)find(dr, @"npDrawerScroll") : nil;
+    NSMutableArray<NSTextField *> *secTitles = [NSMutableArray array];
+    if (dr) collectFields(dr, @"npDrawerSectionTitle", secTitles);
+    NSMutableArray<NSView *> *secCards = [NSMutableArray array];
+    if (secHost) collectViews(secHost, @"npDrawerSection.", secCards);
+
+    RLPKnowledgeView *npKV = (RLPKnowledgeView *)[np valueForKey:@"knowledge"];
+    const CGFloat drH = dr ? dr.frame.size.height : 0.0;
+    const CGFloat hdrH = hdr ? hdr.frame.size.height : 0.0;
+    const CGFloat contentH = npKV ? [npKV renderedContentHeight] : (secHost ? secHost.frame.size.height : 0.0);
+    const CGFloat filledH = hdrH + MIN(drScroll ? drScroll.bounds.size.height : drH, contentH);
+    const double ratio = drH > 0.0 ? (filledH / drH) : 0.0;
+    const CGFloat docH = drScroll.documentView ? drScroll.documentView.frame.size.height : 0.0;
+    const CGFloat clipH = drScroll ? drScroll.contentView.bounds.size.height : 0.0;
+    printf("A2(%.0fx%.0f): drH=%.0f hdrH=%.0f contentH=%.0f ratio=%.2f sections=%lu docH=%.0f clipH=%.0f\n",
+           sz.width, sz.height, drH, hdrH, contentH, ratio, (unsigned long)secCards.count, docH, clipH);
+    ck(dr && !dr.hidden && ratio > 0.60 && secTitles.count >= 4 && secCards.count >= 2 && docH > clipH,
+       [[NSString stringWithFormat:@"A2(%.0fx%.0f) 抽屉内容占比=%.0f%% >60%% 且含 %lu 个分区可滚动",
+         sz.width, sz.height, ratio * 100.0, (unsigned long)secTitles.count] UTF8String]);
+    // A2-scroll: 内容必须真的可滚动（旧码 docH>clipH 也可能因为 scroll 未接管 wheel 而失效）
+    if (drScroll && docH > clipH + 1.0) {
+        const CGFloat maxY = docH - clipH;
+        [drScroll.contentView scrollToPoint:NSMakePoint(0, maxY)];
+        [drScroll reflectScrolledClipView:drScroll.contentView];
+        const CGFloat bottomY = drScroll.contentView.bounds.origin.y;
+        [drScroll.contentView scrollToPoint:NSMakePoint(0, 0)];
+        [drScroll reflectScrolledClipView:drScroll.contentView];
+        ck(bottomY > 0.5 && bottomY <= maxY + 1.0,
+           [[NSString stringWithFormat:@"A2(%.0fx%.0f) 抽屉可从顶部滚到底部（origin=%.1f/%.1f）",
+             sz.width, sz.height, bottomY, maxY] UTF8String]);
+    }
+
+    const NSRect drR = dr ? [nv convertRect:dr.bounds fromView:dr] : NSZeroRect;
+    const NSRect ctlR = ctl ? [nv convertRect:ctl.bounds fromView:ctl] : NSZeroRect;
+    const BOOL inBounds = dr && NSMinX(drR) >= -0.5 && NSMaxX(drR) <= sz.width + 0.5
+                       && NSMinY(drR) >= -0.5 && NSMaxY(drR) <= sz.height + 0.5;
+    const BOOL ctlInBounds = ctl && NSMinX(ctlR) >= -0.5 && NSMaxX(ctlR) <= sz.width + 0.5
+                          && NSMinY(ctlR) >= -0.5 && NSMaxY(ctlR) <= sz.height + 0.5;
+    const BOOL clearsBar = ctl && (NSMaxY(drR) <= NSMinY(ctlR) + 0.5);
+    printf("A4(%.0fx%.0f): drR=%s ctlR=%s inBounds=%d ctlIn=%d clearsBar=%d\n",
+           sz.width, sz.height, NSStringFromRect(drR).UTF8String, NSStringFromRect(ctlR).UTF8String,
+           inBounds, ctlInBounds, clearsBar);
+    ck(inBounds && ctlInBounds && clearsBar,
+       [[NSString stringWithFormat:@"A4(%.0fx%.0f) 抽屉不越界且不遮挡底栏控制条", sz.width, sz.height] UTF8String]);
+    [np closeDataDrawer];
+   }
+  }
+
+  [ud setBool:savedAnlHidden forKey:@"RLPNPAnalysisHidden"];
+  [ud setBool:savedRailHidden forKey:@"RLPNPRailHidden"];
+  [win orderOut:nil];
+  static NSWindow *sN1Window; sN1Window=win; (void)sN1Window;
+ }
+
+ // ---- A1/A2/A3/A4：statusFromJSON 路径兼容 · autoanl 异步启动/不重复/切歌取消重跑/失败不暂停 · 分析控件零暂停 ----
+ {
+  RLPRequestSpy *prevSpy = spy;
+  RLPRequestSpy *anlSpy = [RLPRequestSpy new];
+  anlSpy.fakeStarted = YES;
+  spy = anlSpy;
+  Method sharedM = class_getClassMethod(RLPCoreClient.class, @selector(shared));
+  IMP origSharedImp = method_setImplementation(sharedM, (IMP)fakeShared);
+
+  auto CountPrefix = ^NSUInteger(NSString *prefix) {
+      NSUInteger n = 0;
+      for (NSString *entry in anlSpy.requestLog) {
+          if ([entry hasPrefix:prefix]) ++n;
+      }
+      return n;
+  };
+  auto HealthCount = ^NSUInteger {
+      NSUInteger n = 0;
+      for (NSString *entry in anlSpy.requestLog) {
+          if ([entry hasPrefix:@"GET /api/track/health"] || [entry hasPrefix:@"GET /api/health"]) ++n;
+      }
+      return n;
+  };
+  auto PauseCount = ^NSUInteger {
+      NSUInteger n = 0;
+      for (NSString *entry in anlSpy.requestLog) {
+          if ([entry containsString:@"/api/pause"]) ++n;
+      }
+      return n;
+  };
+
+  // A1 + A2.1：status 使用 currentPath，且 /api/settings 慢于 /api/status 返回时仍自动触发一次
+  RLPNowPlayingViewController *np2 = [RLPNowPlayingViewController new];
+  (void)np2.view;
+  np2.view.frame = NSMakeRect(0, 0, 1180, 760);
+  [np2.view layoutSubtreeIfNeeded];
+
+  anlSpy.holdSettings = YES;
+  anlSpy.fixtures = [@{
+      @"/api/status": @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                         @"currentPath": @"/offline/autoA.flac", @"dur": @120.0 },
+      @"/api/track/health": @{ @"ok": @YES, @"cached": @NO,
+                               @"health": @{ @"dr_available": @YES, @"dr_db": @13.4 } },
+      @"/api/lyrics": @{ @"ok": @NO },
+      @"/api/queue": @{ @"ok": @YES, @"items": @[], @"mode": @0 },
+      @"/api/fav/list": @{ @"ok": @YES, @"files": @[] },
+      @"/api/meta": @{ @"ok": @YES }
+  } mutableCopy];
+
+  [np2 refresh];
+  ck([[np2 valueForKey:@"currentPath"] isEqual:@"/offline/autoA.flac"],
+     "A1 status 只含 currentPath 时 refresh 后 currentPath 非空");
+  ck(HealthCount() == 0 && anlSpy.pendingSettings != nil,
+     "A2 settings 未落地前尚未发 /api/track/health 且已发出 /api/settings");
+
+  RLPJSONCompletion settingsDone = anlSpy.pendingSettings;
+  anlSpy.pendingSettings = nil;
+  anlSpy.holdSettings = NO;
+  if (settingsDone) settingsDone(@{ @"ok": @YES, @"kv": @{ @"autoanl": @"1", @"eq": @"", @"ir": @"" } });
+  ck(HealthCount() == 1,
+     "A2 settings(autoanl=1) 晚于 status 返回后自动触发 1 次 /api/track/health");
+
+  // 同曲二次 status 不重复分析
+  [np2 refresh];
+  ck(HealthCount() == 1, "A2 同曲二次 /api/status 不重复触发分析");
+
+  // A2.2：切歌（使用 path 字段）先 cancel 旧分析，cancel 完成后重跑新曲，且分析失败不暂停
+  anlSpy.holdHealth = YES;
+  anlSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                       @"path": @"/offline/autoB.flac", @"dur": @110.0 };
+  [np2 refresh]; // 启动 autoB 在途（或触发 cancel 后启动 autoB）
+  ck(HealthCount() == 2 && [[np2 valueForKey:@"anlBusy"] boolValue],
+     "A2 切歌 path 字段识别 autoB 并进入分析中");
+
+  // 在 autoB 分析仍在途时再切换到 autoC（使用 file 字段 + holdCancel）
+  anlSpy.holdCancel = YES;
+  anlSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                       @"file": @"/offline/autoC.flac", @"dur": @130.0 };
+  [np2 refresh];
+  ck(CountPrefix(@"POST /api/anl/cancel") == 1 && HealthCount() == 2,
+     "A2 切歌先发 /api/anl/cancel，未排空前不提前发新曲分析");
+
+  anlSpy.holdHealth = NO;
+  anlSpy.fixtures[@"/api/track/health"] = @{ @"ok": @NO, @"error": @"decode failed" };
+  RLPJSONCompletion cancelDone = anlSpy.pendingCancel;
+  anlSpy.pendingCancel = nil;
+  anlSpy.holdCancel = NO;
+  if (cancelDone) cancelDone(@{ @"ok": @YES });
+
+  ck(HealthCount() == 3 && ![[np2 valueForKey:@"anlBusy"] boolValue] &&
+     PauseCount() == 0 && [anlSpy.fixtures[@"/api/status"][@"playing"] boolValue],
+     "A2 cancel 完成后启动 autoC，分析失败不暂停（pause=0, playing=YES）");
+
+  // A2.3：失败后同曲再次 status 不死循环重试
+  [np2 refresh];
+  ck(HealthCount() == 3, "A2 分析失败后同曲二次 status 不重复发请求");
+
+  // A2.4：autoanl=0 不发自动分析
+  RLPNowPlayingViewController *npOff = [RLPNowPlayingViewController new];
+  (void)npOff.view;
+  NSUInteger healthBeforeOff = HealthCount();
+  anlSpy.fixtures[@"/api/settings"] = @{ @"ok": @YES, @"kv": @{ @"autoanl": @"0", @"eq": @"", @"ir": @"" } };
+  anlSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                       @"currentPath": @"/offline/noAuto.flac", @"dur": @90.0 };
+  [npOff refresh];
+  ck(HealthCount() == healthBeforeOff && [[npOff valueForKey:@"currentPath"] isEqual:@"/offline/noAuto.flac"],
+     "A2 autoanl=0 时播放本地曲不发自动分析请求");
+
+  // A3 + A4：点击所有「分析 / 音质分析」控件前后 playing 不变且 /api/pause 请求数 = 0
+  NSUserDefaults *anlUd = [NSUserDefaults standardUserDefaults];
+  id savedAnlHiddenObj = [anlUd objectForKey:@"RLPNPAnalysisHidden"];
+  [anlUd setBool:NO forKey:@"RLPNPAnalysisHidden"];
+  [anlSpy.requestLog removeAllObjects];
+  anlSpy.fixtures[@"/api/track/health"] = @{ @"ok": @YES, @"cached": @NO,
+                                           @"health": @{ @"dr_available": @YES, @"dr_db": @14.0 } };
+  NSWindow *anlWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                 styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+  anlWin.contentView = np2.view;
+  [anlWin makeFirstResponder:np2.view];
+  [np2.view layoutSubtreeIfNeeded];
+
+  NSButton *analToggle = (NSButton *)find(np2.view, @"npAnalToggle");
+  NSButton *anlAutoBtn = (NSButton *)find(np2.view, @"npAnlAuto");
+  NSButton *anlExpBtn = (NSButton *)find(np2.view, @"npAnlToggle");
+  NSButton *anlRunBtn = (NSButton *)find(np2.view, @"npAnlRun");
+  NSButton *anlReBtn = (NSButton *)find(np2.view, @"npAnlRecalculate");
+  NSView *dynCard = find(np2.view, @"anl.dyn");
+
+  ck(analToggle && anlAutoBtn && anlExpBtn && anlRunBtn && anlReBtn &&
+     !analToggle.keyEquivalent.length && !anlAutoBtn.keyEquivalent.length &&
+     !anlExpBtn.keyEquivalent.length && !anlRunBtn.keyEquivalent.length &&
+     !anlReBtn.keyEquivalent.length &&
+     analToggle.refusesFirstResponder && anlAutoBtn.refusesFirstResponder &&
+     anlExpBtn.refusesFirstResponder && anlRunBtn.refusesFirstResponder &&
+     anlReBtn.refusesFirstResponder,
+     "A3 分析区控件无空格 keyEquivalent 且 refusesFirstResponder=YES");
+
+  const BOOL playingBefore = [anlSpy.fixtures[@"/api/status"][@"playing"] boolValue];
+  if (analToggle) { [analToggle performClick:nil]; [analToggle performClick:nil]; }
+  if (anlAutoBtn) { [anlAutoBtn performClick:nil]; [anlAutoBtn performClick:nil]; }
+  if (anlExpBtn) [anlExpBtn performClick:nil];
+  if (anlRunBtn) [anlRunBtn performClick:nil];
+  if (anlReBtn) [anlReBtn performClick:nil];
+  if (dynCard) {
+      NSEvent *tapEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                          location:NSMakePoint(10, 10)
+                                     modifierFlags:0 timestamp:0
+                                      windowNumber:anlWin.windowNumber
+                                           context:nil eventNumber:1 clickCount:1 pressure:1.0];
+      [dynCard mouseDown:tapEv];
+  }
+  const BOOL playingAfter = [anlSpy.fixtures[@"/api/status"][@"playing"] boolValue];
+  printf("A4 np requestLog (%lu): %s | pause=%lu\n",
+         (unsigned long)anlSpy.requestLog.count,
+         [anlSpy.requestLog componentsJoinedByString:@", "].UTF8String ?: "",
+         (unsigned long)PauseCount());
+  ck(playingBefore && playingAfter && PauseCount() == 0 && anlWin.firstResponder == np2.view,
+     "A3/A4 点击全部音质分析控件后 playing 不变、pause=0 且未抢占 firstResponder");
+
+  [anlWin orderOut:nil];
+  static NSWindow *sAnlWindow; sAnlWindow = anlWin; (void)sAnlWindow;
+  if (savedAnlHiddenObj) [anlUd setObject:savedAnlHiddenObj forKey:@"RLPNPAnalysisHidden"];
+  else [anlUd removeObjectForKey:@"RLPNPAnalysisHidden"];
+  method_setImplementation(sharedM, origSharedImp);
+  spy = prevSpy;
+ }
  printf("np web: %d failures\n",fail);return fail?1:0;
 }}

@@ -601,6 +601,83 @@ inline std::atomic<bool>& UnmountFailTestFlag() {
     return f;
 }
 
+// ---------------- 仅测试用的「强制备份恢复失败」注入 ----------------
+// 默认关闭。打开后安装后版本校验触发备份恢复时直接回报失败，用于稳定验证 U2 恢复失败分支。
+inline std::atomic<bool>& RestoreFailTestFlag() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+
+// U2：只读读取目标 .app/Contents/Info.plist 中的 CFBundleShortVersionString（绝不启动可执行文件，
+// 也不走 NSBundle/CFBundle 缓存以免在替换后读到旧缓存）。
+inline bool ReadAppBundleShortVersion(const std::string& appPath,
+                                      std::string& outVer,
+                                      std::string& outErr) {
+    outVer.clear();
+    outErr.clear();
+    if (appPath.empty()) {
+        outErr = "目标 .app 路径为空";
+        return false;
+    }
+    @autoreleasepool {
+        NSString* appNS = [NSString stringWithUTF8String:appPath.c_str()];
+        if (!appNS.length) {
+            outErr = "目标 .app 路径编码无效";
+            return false;
+        }
+        NSString* plistPath = [[appNS stringByAppendingPathComponent:@"Contents"]
+                                stringByAppendingPathComponent:@"Info.plist"];
+        NSData* data = [NSData dataWithContentsOfFile:plistPath];
+        if (!data) {
+            outErr = "无法读取 Info.plist";
+            return false;
+        }
+        NSError* parseErr = nil;
+        id plist = [NSPropertyListSerialization propertyListWithData:data
+                                                             options:NSPropertyListImmutable
+                                                              format:nullptr
+                                                               error:&parseErr];
+        if (![plist isKindOfClass:[NSDictionary class]]) {
+            outErr = "Info.plist 格式无效";
+            return false;
+        }
+        id raw = [(NSDictionary*)plist objectForKey:@"CFBundleShortVersionString"];
+        if (![raw isKindOfClass:[NSString class]]) {
+            outErr = "缺少 CFBundleShortVersionString";
+            return false;
+        }
+        NSString* trimmed = [(NSString*)raw stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!trimmed.length) {
+            outErr = "CFBundleShortVersionString 为空";
+            return false;
+        }
+        outVer = [trimmed UTF8String];
+        return true;
+    }
+}
+
+inline std::string StripLeadingVAndTrim(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace((unsigned char)s[b])) ++b;
+    while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
+    std::string t = s.substr(b, e - b);
+    if (!t.empty() && (t[0] == 'v' || t[0] == 'V')) t.erase(t.begin());
+    return t;
+}
+
+inline bool VersionsEqualForBundle(const std::string& actual, const std::string& expected) {
+    const std::string aNorm = StripLeadingVAndTrim(actual);
+    const std::string eNorm = StripLeadingVAndTrim(expected);
+    if (aNorm.empty() || eNorm.empty()) return false;
+    const rta::update::Version va = rta::update::parse_version(actual);
+    const rta::update::Version ve = rta::update::parse_version(expected);
+    if (va.valid && ve.valid) {
+        return rta::update::compare_versions(va, ve) == rta::update::VersionCmp::Equal;
+    }
+    return aNorm == eNorm;
+}
+
 // 把外部命令输出压成一行（错误文案要能放进一行日志 / UI 提示）
 inline std::string TrimCmdOutput(const std::string& s) {
     std::string r;
@@ -609,6 +686,57 @@ inline std::string TrimCmdOutput(const std::string& s) {
     while (!r.empty() && r.back() == ' ') r.pop_back();
     while (!r.empty() && r.front() == ' ') r.erase(r.begin());
     return r;
+}
+
+inline bool RestoreAppBundleFromBackup(const std::string& targetApp,
+                                       const std::string& backupApp,
+                                       std::string& outErr) {
+    outErr.clear();
+    if (RestoreFailTestFlag().load()) {
+        outErr = "测试注入：备份恢复失败";
+        return false;
+    }
+    if (backupApp.empty()) {
+        outErr = "无可用旧版本备份";
+        return false;
+    }
+    if (!IsDirectory(backupApp)) {
+        outErr = "备份目录不存在：" + backupApp;
+        return false;
+    }
+
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* targetNS = [NSString stringWithUTF8String:targetApp.c_str()];
+    NSString* badNS = [NSString stringWithUTF8String:(targetApp + ".mismatch-tmp-" +
+                                                      std::to_string((long long)::getpid())).c_str()];
+    if (badNS && [fm fileExistsAtPath:badNS]) {
+        [fm removeItemAtPath:badNS error:nil];
+    }
+
+    BOOL movedBadAside = NO;
+    if (targetNS && badNS && [fm fileExistsAtPath:targetNS]) {
+        NSError* mvErr = nil;
+        movedBadAside = [fm moveItemAtPath:targetNS toPath:badNS error:&mvErr];
+    }
+
+    std::string dittoOut;
+    const int rc = RunCapture("/usr/bin/ditto " + ShellQuote(backupApp) + " " +
+                              ShellQuote(targetApp) + " 2>&1", dittoOut);
+    if (rc != 0) {
+        if (movedBadAside && targetNS && badNS && ![fm fileExistsAtPath:targetNS]) {
+            [fm moveItemAtPath:badNS toPath:targetNS error:nil];
+        }
+        outErr = "ditto 恢复备份失败：" + TrimCmdOutput(dittoOut);
+        return false;
+    }
+    if (movedBadAside && badNS && [fm fileExistsAtPath:badNS]) {
+        [fm removeItemAtPath:badNS error:nil];
+    }
+    if (!IsDirectory(targetApp)) {
+        outErr = "恢复后目标 .app 目录不存在";
+        return false;
+    }
+    return true;
 }
 
 // install 阶段失败必须落盘（2026-11-07 现场教训：整单失败时日志里只有 BEGIN_INSTALL_ENTER，
@@ -1074,6 +1202,10 @@ void set_test_force_unmount_failure(bool enabled) {
     detail_native::UnmountFailTestFlag().store(enabled);
 }
 
+void set_test_force_restore_failure(bool enabled) {
+    detail_native::RestoreFailTestFlag().store(enabled);
+}
+
 bool mount_image(const std::string& dmgPath, const std::string& mountPoint,
                  std::string& outAppPath, std::string& err) {
     outAppPath.clear();
@@ -1451,10 +1583,13 @@ bool install_from_local_dmg(const std::string& dmgPath,
 //
 // ⚠️ 顺序即安全边界：verify 必须在 mount 之前。改成流式下载**不改变**这一顺序。
 // ---------------------------------------------------------------------------
-bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
-                          const InstallPipelineOptions& opts,
-                          std::string& outErr, std::string& outBackup) {
-    outErr.clear();
+static bool run_install_pipeline_impl(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
+                                      const InstallPipelineOptions& opts,
+                                      InstallOutcome& outOutcome,
+                                      std::string& outCompatManualRestartErr,
+                                      std::string& outBackup) {
+    outOutcome = InstallOutcome{};
+    outCompatManualRestartErr.clear();
     outBackup.clear();
 
     auto report = [&](const char* stage, const std::string& d, int pct) {
@@ -1479,14 +1614,6 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
         : opts.mountPoint;
 
     // ---------- 0. 遗留挂载自愈（2026-11-07）----------
-    // 旧版本把挂载点写死成 <temp>/rlplayer-update-mnt，踩过这个 bug 的用户机器上可能
-    // **还挂着一份从没卸干净的镜像**（本机现在就有一条 /dev/disk25s1 挂在
-    // .../T/rlplayer-update-mnt 上，已经挂了一天多）。发版后应当自愈，而不是等用户手工 detach。
-    //
-    // 规则：
-    //   * 只有"那个路径确实还是挂载点"才动它（别人的目录/普通文件一概不碰）；
-    //   * 清理走的是 unmount_image() 那一套（重试 → diskutil → 仅自家路径才 -force）；
-    //   * **清不掉不阻断**本次更新（新挂载点已每轮唯一，两者不冲突），但必须留痕。
     {
         const std::string staleMnt = rta::platform::join(rta::platform::temp_dir_utf8(),
                                                          "rlplayer-update-mnt");
@@ -1506,13 +1633,11 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
     ::unlink(dmgPath.c_str());
     ::unlink((dmgPath + ".part").c_str());
 
-    // 进度：单调不减 + 变化才上报。用头文件里的 DownloadPctTracker（生产与测试同一份）
-    // 而不是在这里内联一套 —— 否则测试测的是测试自己写的逻辑（铁律 3）。
     auto tracker = std::make_shared<DownloadPctTracker>();
-    tracker->expectedSize = plan.size;          // 清单给了 size 就以它为准
+    tracker->expectedSize = plan.size;
     DownloadProgressFn onProgress = ^(long long written, long long total) {
         int pct = 0;
-        if (!tracker->update(written, total, pct)) return;     // 没变化 ⟹ 不刷 UI
+        if (!tracker->update(written, total, pct)) return;
         const long long denom = (plan.size > 0) ? plan.size : total;
         std::string d = "正在下载 " + plan.remoteVersion + "（" +
                         std::to_string((long long)written / 1024) + " KB";
@@ -1526,19 +1651,18 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
                                                opts.downloadTimeoutSeconds, onProgress, cancel);
     if (dl.cancelled) {
         ::unlink(dmgPath.c_str());
-        outErr = "更新已取消（未做任何改动）";
+        outOutcome.ok = false;
+        outOutcome.code = InstallResultCode::Cancelled;
+        outOutcome.cancelled = true;
+        outOutcome.message = "更新已取消（未做任何改动）";
         return false;
     }
     if (!dl.ok) {
-        // 失败可重试（不改状态、不写"已是最新"）
         std::string msg = (dl.status == 401 || dl.status == 403)
                               ? "下载失败：鉴权被拒（检查 update.conf）"
                               : "下载失败（可重试）";
         if (dl.status > 0) msg += " HTTP " + std::to_string(dl.status);
         if (!dl.error.empty()) msg += "：" + dl.error;
-        // 2026-10-26：下载失败也必须留痕。用户截图只给了「下载地址不在白名单」，
-        // 而这句话只在 download_to_file 的白名单闸门里出现 —— 不把**当时的 URL**
-        // 记下来，就无法判断到底是哪一版二进制、哪一份清单给出的地址。
         {
             char line[1200];
             std::snprintf(line, sizeof line,
@@ -1548,93 +1672,177 @@ bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelTo
             detail_native::AppendUpdateLog(line);
         }
         ::unlink(dmgPath.c_str());
-        outErr = redact_token(msg, token);
+        outOutcome.ok = false;
+        outOutcome.code = InstallResultCode::Failed;
+        outOutcome.cancelled = false;
+        outOutcome.message = redact_token(msg, token);
         return false;
     }
     report("downloading", "下载完成（" + std::to_string(dl.bytes) + " 字节）",
            InstallProgressRange::kDownloadEnd);
 
     // ---------- 2. 校验（篡改/截断必失败 ⟹ 丢弃，绝不挂载）----------
-    // ⚠️ 位置是硬要求：**必须在挂载之前**。这条闸门（sha256 + size）是安全边界。
     report("verifying", "正在校验 sha256 …", InstallProgressRange::kDownloadEnd);
     const VerifyResult vr = verify_downloaded_file(dmgPath, plan.sha256, plan.size);
     if (!vr.ok) {
-        if (!opts.keepDmgOnFailure) ::unlink(dmgPath.c_str());   // ← 关键：失败即丢弃
-        outErr = "校验失败，已丢弃：" + vr.error;
-        // 落盘（token 已脱敏）：失败必须有现场，不能只剩一行 BEGIN_INSTALL_ENTER
+        if (!opts.keepDmgOnFailure) ::unlink(dmgPath.c_str());
+        outOutcome.ok = false;
+        outOutcome.code = InstallResultCode::Failed;
+        outOutcome.cancelled = false;
+        outOutcome.message = "校验失败，已丢弃：" + vr.error;
         detail_native::AppendInstallFailLog("verify", redact_token(vr.error, token));
         return false;
     }
     report("verifying", "sha256 校验通过", InstallProgressRange::kVerifyEnd);
 
-    // 取消的最后一个安全边界：校验已过但还没动 .app，此时取消是零代价的
+    // 取消的最后一个安全边界：校验已过但还没动 .app，此时取消是零代价的；
+    // 一旦越过此边界进入 installing 阶段，取消不再生效，任何失败都必须如实报错。
     if (cancel.cancelled()) {
         ::unlink(dmgPath.c_str());
-        outErr = "更新已取消（未做任何改动）";
+        outOutcome.ok = false;
+        outOutcome.code = InstallResultCode::Cancelled;
+        outOutcome.cancelled = true;
+        outOutcome.message = "更新已取消（未做任何改动）";
         return false;
     }
 
     // ---------- 3+4. 挂载 → 备份 → 替换 → 卸载（复用有序流水线）----------
-    // ⚠️ install_from_local_dmg 内部第一件事就是**再校验一次** sha256（双重闸门）。
     report("installing", "正在安装…", InstallProgressRange::kVerifyEnd);
     std::string backup, ierr, iwarn;
     const bool installed = install_from_local_dmg(dmgPath, plan.sha256, plan.size,
                                                  mntPath, target, backup, ierr, iwarn);
     ::unlink(dmgPath.c_str());
-    ::rmdir(mntPath.c_str());          // 结束（成功或失败）都清掉挂载点目录
+    ::rmdir(mntPath.c_str());
     outBackup = backup;
     if (!installed) {
-        // 失败的具体 stage/原因已由 install_from_local_dmg 落盘（UPDATE_INSTALL_FAIL），
-        // 这里**不重复写**一行，避免同一次失败在日志里出现两条互相打架的记录。
-        outErr = ierr;
+        outOutcome.ok = false;
+        outOutcome.code = InstallResultCode::Failed;
+        outOutcome.cancelled = false;
+        outOutcome.message = ierr;
         return false;
     }
     if (!iwarn.empty()) {
-        // 装好了但没卸干净：**不再算整单失败**（2026-11-07 真 BUG 的修复点）。
-        // 只落一行 warning 留痕，然后照常往下走到自动重启与 report("done")。
         char line[2000];
         std::snprintf(line, sizeof line, "UPDATE_UNMOUNT_WARN stage=unmount err=%s",
                       redact_token(iwarn, token).c_str());
         detail_native::AppendUpdateLog(line);
     }
-    fprintf(stderr, "RLPlayer: 更新已安装到 %s（备份：%s）\n",
-            target.c_str(), backup.empty() ? "无（全新安装）" : backup.c_str());
+
+    // ---------- 4.5 U2 安装结果校验（只读 Info.plist 的 CFBundleShortVersionString）----------
+    {
+        std::string actualVer, plistErr;
+        const bool gotVer = detail_native::ReadAppBundleShortVersion(target, actualVer, plistErr);
+        const bool verMatched = gotVer && detail_native::VersionsEqualForBundle(actualVer, plan.remoteVersion);
+        if (!verMatched) {
+            const std::string actualLabel = gotVer ? actualVer : ("<缺失: " + plistErr + ">");
+            const std::string expectedLabel = plan.remoteVersion.empty() ? "<空>" : plan.remoteVersion;
+
+            std::string restoreErr;
+            const bool restored = detail_native::RestoreAppBundleFromBackup(target, backup, restoreErr);
+            std::string failMsg;
+            if (restored) {
+                failMsg = "安装后版本校验失败：目标包版本不匹配（实际版本：" + actualLabel +
+                          "，期望版本：" + expectedLabel + "），已从备份恢复";
+            } else {
+                failMsg = "目标包版本不匹配且恢复失败（实际版本：" + actualLabel +
+                          "，期望版本：" + expectedLabel + "）：" + restoreErr;
+            }
+            detail_native::AppendInstallFailLog("verify_version", redact_token(failMsg, token));
+            outOutcome.ok = false;
+            outOutcome.code = InstallResultCode::Failed;
+            outOutcome.cancelled = false;
+            outOutcome.versionVerified = false;
+            outOutcome.installedVersion = actualVer;
+            outOutcome.message = failMsg;
+            return false;
+        }
+        outOutcome.versionVerified = true;
+        outOutcome.installedVersion = actualVer;
+    }
+
+    fprintf(stderr, "RLPlayer: 更新已安装到 %s（版本：%s，备份：%s）\n",
+            target.c_str(), outOutcome.installedVersion.c_str(),
+            backup.empty() ? "无（全新安装）" : backup.c_str());
     report("installing", "安装完成", InstallProgressRange::kInstallEnd);
 
     // ---------- 5. 自动重启 ----------
-    // 只在 opts.autoRestart 时做（测试必须关掉：绝不真的 open 一个 .app）。
     if (opts.autoRestart) {
         std::string scriptPath, serr;
         AutoRestartOptions ro;
         ro.sleepMs = 1500;
-        ro.waitPid = (long long)::getpid();    // 等本进程真的退出再起新实例
+        ro.waitPid = (long long)::getpid();
         if (!schedule_auto_restart(target, scriptPath, serr, ro)) {
             fprintf(stderr, "RLPlayer: 自动重启失败（%s），回退到手动重启提示\n", serr.c_str());
-            // 失败不改变"安装成功"这个事实，但要让调用方知道要不要提示手动重启
-            outErr = "installed-but-needs-manual-restart:" + serr;
+            outOutcome.code = InstallResultCode::InstalledManualRestart;
+            outOutcome.autoRestartScheduled = false;
+            outOutcome.message = "更新已安装，请手动重启";
+            outCompatManualRestartErr = "installed-but-needs-manual-restart:" + serr;
+        } else {
+            outOutcome.code = InstallResultCode::InstalledAutoRestart;
+            outOutcome.autoRestartScheduled = true;
+            outOutcome.message = "更新已安装，正在自动重启";
         }
+    } else {
+        outOutcome.code = InstallResultCode::InstalledManualRestart;
+        outOutcome.autoRestartScheduled = false;
+        outOutcome.message = "更新已安装，请手动重启";
     }
+    outOutcome.ok = true;
+    outOutcome.cancelled = false;
     report("done", "更新完成", InstallProgressRange::kDone);
     return true;
+}
+
+bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
+                          const InstallPipelineOptions& opts,
+                          InstallOutcome& outOutcome, std::string& outBackup) {
+    std::string compatManualErr;
+    return run_install_pipeline_impl(plan, progress, cancel, opts,
+                                     outOutcome, compatManualErr, outBackup);
+}
+
+bool run_install_pipeline(const CheckResult& plan, ProgressFn progress, CancelToken cancel,
+                          const InstallPipelineOptions& opts,
+                          std::string& outErr, std::string& outBackup) {
+    InstallOutcome outcome;
+    std::string compatManualErr;
+    const bool ok = run_install_pipeline_impl(plan, progress, cancel, opts,
+                                              outcome, compatManualErr, outBackup);
+    if (!ok) {
+        outErr = outcome.message;
+    } else if (!compatManualErr.empty()) {
+        outErr = compatManualErr;
+    } else {
+        outErr.clear();
+    }
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
 // 一键更新（异步）：run_install_pipeline + 主线程收尾
 // ⚠️ 任何一步失败都**立即中止**且不碰现有 .app（除替换阶段的备份回滚）。
 // ---------------------------------------------------------------------------
-void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done, CancelToken cancel) {
-    // 先做一次纯本地合法性检查：只有 UpdateAvailable 才允许安装
+void begin_install_outcome(const CheckResult& plan, ProgressFn progress,
+                           InstallOutcomeFn done, CancelToken cancel) {
+    auto emitFail = [&](const char* msg) {
+        if (!done) return;
+        InstallOutcome o;
+        o.ok = false;
+        o.code = InstallResultCode::Failed;
+        o.cancelled = false;
+        o.autoRestartScheduled = false;
+        o.message = msg ? msg : "";
+        done(o);
+    };
+
     if (plan.decision != Decision::UpdateAvailable) {
-        if (done) done(false, @"没有可用的更新计划");
+        emitFail("没有可用的更新计划");
         return;
     }
-    // 勾选状态可能在“检查完成”与“点击安装”之间改变，安装入口再次检查当前策略。
     if (parse_version(plan.remoteVersion).has_pre() && !detail_native::LoadUpdBeta()) {
-        if (done) done(false, @"已关闭预发布更新，请重新检查正式版本");
+        emitFail("已关闭预发布更新，请重新检查正式版本");
         return;
     }
-    // 2026-10-26 诊断：用户实测「下载地址不在白名单」，但日志里 url=[] 是空的。
-    // 这行记录**入口看到的**原始值，用来区分"plan 本来就是空的"与"后面被改坏了"。
     {
         char line[1200];
         std::snprintf(line, sizeof line,
@@ -1646,43 +1854,31 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
         char line[1200];
         std::snprintf(line, sizeof line, "BEGIN_INSTALL_REJECT url=[%s]\n", plan.downloadUrl.c_str());
         detail_native::AppendUpdateLog(line);
-        if (done) done(false, @"下载地址不在白名单，已拒绝");
+        emitFail("下载地址不在白名单，已拒绝");
         return;
     }
     if (!is_hex64(plan.sha256)) {
-        if (done) done(false, @"清单未提供合法的 sha256，已拒绝安装");
+        emitFail("清单未提供合法的 sha256，已拒绝安装");
         return;
     }
     if (rta::platform::temp_dir_utf8().empty()) {
-        if (done) done(false, @"没有可用的临时目录");
+        emitFail("没有可用的临时目录");
         return;
     }
 
-    // ⚠️ 2026-10-26 修的真 BUG（用户实测「下载地址不在白名单」，日志里 url=[] 为空）：
-    //   plan 是 **const 引用参数**，而下面的 dispatch_async 是**异步**执行。
-    //   调用方 mac_host.mm 传的是 `self.lastUpdatePlan`（结构体属性）⟹ 取值得临时对象，
-    //   begin_install 一返回临时对象就析构，block 里那个引用立刻悬垂；
-    //   等后台队列真跑起来，读到的 downloadUrl 是被回收的内存（实测就是空串）。
-    //   症状极具迷惑性：**入口检查通过**（临时对象那时还活着），异步下载时才变空
-    //   ⟹ 白名单闸门拒绝空串，UI 显示「下载地址不在白名单」，看起来像白名单配错了。
-    //   修法：进 block 前做**值拷贝**，block 按值捕获这份拷贝，生命周期与 block 一致。
     const CheckResult planCopy = plan;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         InstallPipelineOptions opts;      // 生产默认：目标=当前 .app，自动重启=开
-        std::string err, backup;
-        const bool ok = run_install_pipeline(planCopy, progress, cancel, opts, err, backup);
-
-        // outErr 以 "installed-but-needs-manual-restart:" 开头 = 装好了但没重启成 ⟹ 走兜底
-        const bool installedButNoRestart =
-            ok && err.rfind("installed-but-needs-manual-restart:", 0) == 0;
+        InstallOutcome outcome;
+        std::string backup;
+        (void)run_install_pipeline(planCopy, progress, cancel, opts, outcome, backup);
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (!ok) {
-                if (done) done(false, [NSString stringWithUTF8String:err.c_str()]);
+            if (!outcome.ok) {
+                if (done) done(outcome);
                 return;
             }
-            if (installedButNoRestart) {
-                // 兜底：脚本建不出来/派发失败（磁盘满、权限、临时目录不可用）⟹ 必须提示
+            if (outcome.code == InstallResultCode::InstalledManualRestart || !outcome.autoRestartScheduled) {
                 NSAlert* a = [[NSAlert alloc] init];
                 a.messageText = @"更新已安装";
                 a.informativeText = [NSString stringWithFormat:
@@ -1691,19 +1887,28 @@ void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done,
                     planCopy.remoteVersion.c_str()];
                 [a addButtonWithTitle:@"好"];
                 [a runModal];
-                if (done) done(true, @"更新已安装，请手动重启");
+                InstallOutcome manualOut = outcome;
+                manualOut.code = InstallResultCode::InstalledManualRestart;
+                manualOut.autoRestartScheduled = false;
+                if (manualOut.message.empty()) manualOut.message = "更新已安装，请手动重启";
+                if (done) done(manualOut);
                 return;
             }
-            // 正常路径：脚本已在等本进程退出，这里干净退出即可
-            if (done) done(true, @"更新已安装，正在自动重启");
+            if (done) done(outcome);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                               // NSApp terminate 会走 applicationWillTerminate（协作式停核心），
-                               // 比 exit(0) 干净；脚本已经在等本 pid 消失。
                                [NSApp terminate:nil];
                            });
         });
     });
+}
+
+void begin_install(const CheckResult& plan, ProgressFn progress, InstallFn done, CancelToken cancel) {
+    begin_install_outcome(plan, progress, ^(const InstallOutcome& outcome) {
+        if (!done) return;
+        NSString* msg = [NSString stringWithUTF8String:outcome.message.c_str()] ?: @"";
+        done(outcome.ok, msg);
+    }, cancel);
 }
 
 } // namespace rta::update

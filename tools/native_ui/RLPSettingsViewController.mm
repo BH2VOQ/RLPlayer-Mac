@@ -419,10 +419,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) RLPSettingsGroup *netGroup;
 
 // ---- 诊断页（web data-g=diag）----
+@property (nonatomic, strong) RLPSettingsGroup *diagGroup;
 @property (nonatomic, strong) NSButton *diagZipBtn;
 @property (nonatomic, strong) NSButton *diagJsonBtn;
 @property (nonatomic, strong) NSButton *diagSummaryBtn;
 @property (nonatomic, strong) NSTextField *diagMsg;
+@property (nonatomic, strong) NSButton *diagChannelsBtn;
+@property (nonatomic, strong) NSTextField *diagChannelsLabel;
+@property (nonatomic, assign) BOOL diagChannelsChecking;
 // 2026-11-13（第九/十/十一项）：诊断与反馈**不再用 NSPopover 承载**。
 // 旧实现把真实控件搬进气泡，而 RLPCardController 只钉宽、没给 preferredContentSize，
 // 搬进去的 620pt 宽 NSScrollView 又没有宽度约束 ⟹ 气泡塌成空框（用户截图：空白气泡）。
@@ -466,10 +470,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, copy) void (^fbUploadTransport)(NSString *url, NSString *body, void (^reply)(NSInteger status, NSData * _Nullable body));
 /// 诊断摘要数据的测试接缝（生产路径仍走 /api/diag）。
 @property (nonatomic, copy) void (^diagSummaryTransport)(void (^done)(NSDictionary * _Nullable json));
+/// 通道连通性检查的测试接缝（生产路径走 /api/diag/channels）。
+@property (nonatomic, copy) void (^diagChannelsTransport)(void (^done)(NSDictionary * _Nullable json));
 @property (nonatomic, strong) NSSwitch *streamSwitch;
 
 // ---- 共用子界面 ----
-@property (nonatomic, strong) RLPServersView *serversView;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *srvGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *castGroup;
+@property (nonatomic, strong, nullable) RLPServersView *serversView;
 @property (nonatomic, strong) RLPMetaSourcesView *metaSourcesView;
 @property (nonatomic, strong) RLPLibStatsView *libStatsView;
 @property (nonatomic, strong) NSSwitch *metaOnSwitch;
@@ -481,6 +489,33 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSButton *metaMoreBtn;
 @property (nonatomic, strong) NSStackView *metaAdvancedStack;
 @property (nonatomic) BOOL metaAdvancedVisible;
+@property (nonatomic, weak, nullable) NSStackView *metaHostStack;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaTopGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaDataGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaAiGroup;
+@property (nonatomic, strong, nullable) RLPSettingsGroup *metaSearchGroup;
+@property (nonatomic, strong, nullable) NSStackView *metaTwoColStack;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *metaAdvWidthConstraint;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *metaTwoColWidthConstraint;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *metaSearchWidthConstraint;
+@property (nonatomic, copy, nullable) NSArray<NSLayoutConstraint *> *metaVerticalCardWidthConstraints;
+@property (nonatomic, strong, nullable) NSView *metaModelContainer;
+@property (nonatomic, strong, nullable) NSStackView *metaModelPrimaryRow;
+@property (nonatomic, strong, nullable) NSStackView *metaModelSecondaryRow;
+@property (nonatomic, strong, nullable) NSView *metaModelHiddenDock;
+@property (nonatomic, copy, nullable) NSArray<NSLayoutConstraint *> *metaModelRowConstraints;
+@property (nonatomic, strong, nullable) NSButton *llmSaveBtn;
+@property (nonatomic, strong, nullable) NSButton *llmTestBtn;
+@property (nonatomic, strong, nullable) NSButton *llmClearBtn;
+@property (nonatomic, strong, nullable) NSView *metaAiBtnContainer;
+@property (nonatomic, strong, nullable) NSStackView *metaAiBtnRow1;
+@property (nonatomic, strong, nullable) NSStackView *metaAiBtnRow2;
+@property (nonatomic, copy, nullable) NSArray<NSLayoutConstraint *> *metaAiBtnConstraints;
+/// 响应式状态缓存：-1 未初始化，0 窄布局，1 宽布局，2 折叠/隐藏下拉等模式。
+@property (nonatomic, assign) NSInteger metaResponsiveTwoColMode;
+@property (nonatomic, assign) NSInteger metaResponsiveModelMode;
+@property (nonatomic, assign) NSInteger metaResponsiveAiBtnMode;
+@property (nonatomic, assign) BOOL metaResponsiveUpdating;
 @property (nonatomic, strong) RLPEqualizerView *eqView;
 /// EQ 子界面的未提交状态（切页签 / 切语言 / 切主题时由 showTab 收发，见 rlp_captureDraftState）。
 @property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *eqDraftState;
@@ -522,6 +557,14 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 /// 最近一次从后端回填到各控件的值（用于识别未触发 textDidChange 的草稿改动）。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *lastLoadedValues;
 @property (nonatomic, assign) NSUInteger llmSeq;
+@property (nonatomic, assign) BOOL llmModelMsgIsWarn;
+@property (nonatomic, assign) BOOL hasCapturedLlmModelState;
+@property (nonatomic, copy, nullable) NSArray<NSString *> *capturedLlmModelTitles;
+@property (nonatomic, assign) NSInteger capturedLlmModelSelectedIndex;
+@property (nonatomic, assign) BOOL capturedLlmModelHidden;
+@property (nonatomic, copy, nullable) NSString *capturedLlmModelMsg;
+@property (nonatomic, assign) BOOL capturedLlmModelMsgIsWarn;
+@property (nonatomic, assign) BOOL suppressNextLlmAutoLoad;
 
 - (void)reloadDataIncludingEqualizer:(BOOL)reloadEq;
 
@@ -550,6 +593,91 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 - (void)snapshotDraftsOfOutgoingPaneIfNeededForTab:(RLPSTab)tab;
 - (void)restorePendingDraftsForTab:(RLPSTab)tab inPane:(NSView *)pane;
 
+// 元数据页响应式布局（折叠态脱离宽约束 + 窄窗回落单列）
+- (void)resetMetaResponsiveState;
+- (CGFloat)metaTargetHostWidthPreferringViewBounds:(BOOL)preferViewBounds;
+- (void)updateMetaResponsiveLayoutForHostWidth:(CGFloat)hostW;
+- (BOOL)updateMetaModelRowLayoutForBodyWidth:(CGFloat)bodyW;
+- (BOOL)updateMetaAiBtnRowLayoutForBodyWidth:(CGFloat)bodyW;
+- (void)captureLlmModelStateIfNeeded;
+- (void)restoreLlmModelStateIfNeeded;
+
+@end
+
+/// 设置页滚动容器：当纵向滚动条随展开/折叠显隐、contentView 宽度发生 ±17pt 变化而
+/// scroll 自身 frame 未变时，AppKit `-tile` 改了 clip frame 却不会触发 docView 重算，
+/// 导致 stack 停留在旧宽（714>697 或 657<674）。在 layout/tile 后同步一次 docView 布局。
+@interface RLPSettingsScrollView : NSScrollView
+@end
+
+@implementation RLPSettingsScrollView {
+    BOOL _rlpSyncingWidth;
+}
+
+- (void)clampVerticalScrollIfNeeded {
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    if (!clip || !doc) return;
+    const CGFloat clipH = clip.bounds.size.height;
+    const CGFloat docH = doc.frame.size.height;
+    if (clipH <= 1.0 || docH <= 1.0) return;
+    const CGFloat maxY = MAX(0.0, docH - clipH);
+    NSPoint o = clip.bounds.origin;
+    if (o.y > maxY + 0.5 || o.y < -0.5) {
+        o.y = MIN(maxY, MAX(0.0, o.y));
+        [clip scrollToPoint:o];
+        [self reflectScrolledClipView:clip];
+    }
+}
+
+- (void)tile {
+    const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
+    [super tile];
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
+    if (clip && doc && clipW > 1.0 &&
+        (fabs(clipW - prevClipW) > 0.5 ||
+         fabs(doc.frame.size.width - clipW) > 0.5 ||
+         fabs(doc.bounds.size.width - clipW) > 0.5)) {
+        [clip setNeedsLayout:YES];
+        [doc setNeedsLayout:YES];
+        [self setNeedsLayout:YES];
+    }
+    [self clampVerticalScrollIfNeeded];
+}
+
+- (void)layout {
+    const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
+    [super layout];
+    if (_rlpSyncingWidth) return;
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
+    if (!clip || !doc || clipW <= 1.0) {
+        [self clampVerticalScrollIfNeeded];
+        return;
+    }
+    if (fabs(clipW - prevClipW) > 0.5 ||
+        fabs(doc.frame.size.width - clipW) > 0.5 ||
+        fabs(doc.bounds.size.width - clipW) > 0.5) {
+        _rlpSyncingWidth = YES;
+        for (int pass = 0; pass < 2; ++pass) {
+            const CGFloat curClipW = clip.bounds.size.width;
+            if (curClipW <= 1.0) break;
+            if (fabs(doc.frame.size.width - curClipW) <= 0.5 &&
+                fabs(doc.bounds.size.width - curClipW) <= 0.5) {
+                break;
+            }
+            [clip setNeedsLayout:YES];
+            [doc setNeedsLayout:YES];
+            [super layout];
+        }
+        _rlpSyncingWidth = NO;
+    }
+    [self clampVerticalScrollIfNeeded];
+}
+
 @end
 
 @implementation RLPSettingsViewController
@@ -566,6 +694,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         _tab = RLPSTabAdv;
         _uiMode = @"listen";
         _activeGroup = 0;
+        _metaResponsiveTwoColMode = -1;
+        _metaResponsiveModelMode = -1;
+        _metaResponsiveAiBtnMode = -1;
     }
     return self;
 }
@@ -612,6 +743,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
                                   t.small, t.mut);
     self.modeHintLabel.identifier = @"settings.modeHint";
     self.modeHintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.modeHintLabel.maximumNumberOfLines = 1;
+    self.modeHintLabel.toolTip = self.modeHintLabel.stringValue;
     self.modeHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.modeHintLabel];
 
@@ -641,11 +774,17 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     [host addSubview:self.paneHost];
 
     self.statusLine = RLPLabel(@"", t.small, t.mut);
+    self.statusLine.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.statusLine.maximumNumberOfLines = 1;
     self.statusLine.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:self.statusLine];
 
-    [self.modeHintLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+    // fittingSize 按 NSLayoutPriorityFittingSizeCompression(50) 压缩；必须低于 50，
+    // 否则隐藏的 modeHintLabel 也会把页根 fittingSize 顶到 755~945pt（超出 900 主窗可用宽 674）。
+    [self.modeHintLabel setContentCompressionResistancePriority:1.0f
                                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.statusLine setContentCompressionResistancePriority:1.0f
+                                              forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     [NSLayoutConstraint activateConstraints:@[
         [self.groupTabs.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
@@ -862,15 +1001,47 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     }
     // 诊断页每次进入补一次通道探活（web bindFeedbackCard 同语义；30s 内不重复，见 probeFeedbackChannel）。
     if (tab == RLPSTabDiag) [self probeFeedbackChannel];
+    if (outgoingPane != nil && tab != self.shownTab) {
+        NSString *tabKey = RLPSettingsKeyForTab(tab) ?: @"adv";
+        RLPDiagEvent(@"nav", @"settings_tab_switch",
+                     [NSString stringWithFormat:@"settings:%@", tabKey], nil, 0, -1, nil);
+    }
     self.shownTab = tab;
+    if (tab == RLPSTabStream) {
+        if (self.srvGroup) [self.srvGroup contentDidChange];
+        if (self.castGroup) [self.castGroup contentDidChange];
+        [pane setNeedsLayout:YES];
+        if (!freshlyBuilt && [RLPCoreClient shared].started && self.serversView) {
+            [self.serversView reload];
+        }
+    }
+    if (tab == RLPSTabMeta) {
+        const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
+    }
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    if (self.shownTab == RLPSTabMeta || self.tab == RLPSTabMeta) {
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:YES]];
+    }
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    if (self.shownTab == RLPSTabMeta || self.tab == RLPSTabMeta) {
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:YES]];
+    }
 }
 
 /// 每个页签 = 一个纵向滚动的 NSStackView。
 - (NSView *)buildPane:(RLPSTab)tab {
     RLPTheme *t = [RLPTheme current];
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    RLPSettingsScrollView *scroll = [[RLPSettingsScrollView alloc] initWithFrame:NSZeroRect];
     scroll.drawsBackground = NO;
     scroll.hasVerticalScroller = YES;
+    scroll.hasHorizontalScroller = NO;
     scroll.autohidesScrollers = YES;
 
     NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
@@ -960,6 +1131,7 @@ static NSString *RLPBackendKeyForControl(NSString *identifier) {
                                                 @"browseRoot", @"addroot", @"rescan", @"roots",
                                                 @"libstats", @"diagzip", @"diagjson", @"diagsummary",
                                                 @"diagsummarytext", @"diagupload", @"diagmsg",
+                                                @"diagchannelsbtn", @"diagchannels",
                                                 @"updchannel", @"vercur", @"updcheck", @"updinstall",
                                                 @"updmsg", @"updbar", @"updfill", @"updnote",
                                                 @"fbtext", @"fbcount", @"fbchan", @"fbdiag",
@@ -1024,6 +1196,8 @@ static NSString *RLPControlIdentifier(NSString *key) {
             @"sp_diagzip": @"sp_diagzip", @"sp_diagjson": @"sp_diagjson",
             @"sp_diagsummary": @"sp_diagsummary",
             @"sp_diagmsg": @"sp_diagmsg",
+            @"sp_diagchannelsbtn": @"sp_diagchannelsbtn",
+            @"sp_diagchannels": @"sp_diagchannels",
             @"sp_updchannel": @"sp_updchannel", @"sp_vercur": @"sp_vercur",
             @"sp_updcheck": @"sp_updcheck", @"sp_updinstall": @"sp_updinstall",
             @"sp_updbeta": @"sp_updbeta", @"sp_updmsg": @"sp_updmsg",
@@ -1338,6 +1512,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (notSent) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", 503, durMs, @"core_not_started");
             [self_ applySettingsSaveFailure:kv
                                        text:[NSString stringWithFormat:@"%@%@",
                                              RLPTr(@"保存失败："), RLPTr(@"核心未启动")]];
@@ -1345,11 +1523,20 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             return;
         }
         if (timedOut || !json) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", timedOut ? 504 : 500, durMs,
+                         timedOut ? @"timeout" : @"empty_response");
             [self_ applySettingsSaveFailure:@{} text:RLPTr(@"保存失败：服务没响应")];
             if (completion) completion(NO);
             return;
         }
         if (![json[@"ok"] boolValue]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", 400, durMs, @"rejected");
             NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
                           ? json[@"error"] : RLPTr(@"保存失败");
             // 后端明确拒绝：控件会被退回最近一次读回的真值 ⟹ 文案要说明"原值还在"，
@@ -1378,6 +1565,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         }
         if (accepted.count) [self_ applySettingsSaveSuccess:accepted seq:seq];
         if (dropped.count) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", 422, durMs, @"dropped_keys");
             // 只说"这些键没写进去"：不承诺"已保留原值"（这几个控件可能根本没有已知旧值可退）。
             [self_ applySettingsSaveFailure:dropped
                                        text:[NSString stringWithFormat:@"%@%@",
@@ -1489,6 +1680,8 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.fbServerOK = -1;
     [self fbChannelText:RLPTr(@"正在检查反馈通道…") kind:0];
     [self fbUpdateSendEnabled];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
+    RLPDiagEvent(@"action", @"diag_channels_check", @"settings:diag", nil, 0, -1, @"start");
 
     __weak __typeof__(self) weakSelf = self;
     __block BOOL settled = NO;
@@ -1497,6 +1690,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             __typeof__(self) self_ = weakSelf;
             if (!self_ || settled) return;
             settled = YES;
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
             if (self_.fbProbeDeadline) { [self_.fbProbeDeadline invalidate]; self_.fbProbeDeadline = nil; }
             self_.fbChannelChecking = NO;
             self_.fbLastChannelCheck = [NSDate date];
@@ -1505,6 +1699,8 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             const auto wd = rta::feedback::parse_feedback_watchdog((int)status, raw);
             if (wd.reachable) {
                 self_.fbServerOK = 1;
+                RLPDiagEvent(@"action", @"diag_channels_check", @"settings:diag", nil,
+                             status > 0 ? status : 200, durMs, @"ok");
                 NSString *line = RLPTr(@"反馈通道已连接");
                 if (wd.rate_per_minute > 0) {
                     line = [NSString stringWithFormat:@"%@%@%ld%@", line, RLPTr(@"（每分钟最多 "),
@@ -1513,6 +1709,9 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
                 [self_ fbChannelText:line kind:1];
             } else {
                 self_.fbServerOK = 0;
+                RLPDiagEvent(@"error", @"diag_channels_check", @"settings:diag", nil,
+                             status > 0 ? status : (timedOut ? 504 : 503), durMs,
+                             timedOut ? @"timeout" : @"unreachable");
                 NSString *msg = [NSString stringWithUTF8String:wd.error.c_str()] ?: @"";
                 if (timedOut) msg = RLPTr(@"反馈通道无响应，请稍后重试");
                 if ([msg stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length == 0)
@@ -1544,6 +1743,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             self_.fbChannelChecking = NO;
             self_.fbServerOK = 0;
             self_.fbLastChannelCheck = [NSDate date];
+            RLPDiagEvent(@"error", @"diag_channels_check", @"settings:diag", nil, 504, 12000.0, @"timeout");
             [self_ fbChannelText:RLPTr(@"反馈通道无响应，请稍后重试") kind:2];
             [self_ fbUpdateSendEnabled];
         }];
@@ -1574,6 +1774,15 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.metaAdvancedVisible = !self.metaAdvancedVisible;
     self.metaAdvancedStack.hidden = !self.metaAdvancedVisible;
     sender.title = (self.metaAdvancedVisible ? RLPTr(@"高级选项 ▴") : RLPTr(@"高级选项 ▾"));
+    const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
+    [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
+    if (self.metaAdvancedVisible) {
+        [self.metaDataGroup contentDidChange];
+        [self.metaAiGroup contentDidChange];
+        [self.metaSearchGroup contentDidChange];
+    }
+    [self.metaAdvancedStack setNeedsLayout:YES];
+    [self.metaHostStack setNeedsLayout:YES];
 }
 
 - (void)applyKV:(NSDictionary *)kv toSwitch:(NSSwitch *)sw key:(NSString *)key {
@@ -2411,17 +2620,19 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     // 这里把两个子视图分别放进对应卡片体（addFullRow ⟹ 是卡片的共同后代，不再是页面并列）。
     RLPSettingsGroup *srvGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"流媒体服务器"),
         RLPTr(@"可保存多台，同一时刻启用一台；只取原始文件，不转码"), t);
+    self.srvGroup = srvGroup;
     [stack addArrangedSubview:srvGroup];
 
-    self.serversView = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 620, 240)];
+    self.serversView = [[RLPServersView alloc] initWithFrame:NSMakeRect(0, 0, 620, 120)];
     self.serversView.translatesAutoresizingMaskIntoConstraints = NO;
     [srvGroup addFullRow:self.serversView];
-    [[self.serversView.heightAnchor constraintGreaterThanOrEqualToConstant:120] setActive:YES];
+    [[self.serversView.heightAnchor constraintGreaterThanOrEqualToConstant:64] setActive:YES];
     [self.serversView reload];
 
     // 投放面板（设备发现 / 推送 / 停止 / 升频选项 / 实时状态）与 web 同源 /api/cast/*
     RLPSettingsGroup *castGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"推送到设备（UPnP / DLNA）"),
         RLPTr(@"一键把当前曲目推送到局域网渲染器；之后的切歌 / 暂停 / 进度都作用在它上面"), t);
+    self.castGroup = castGroup;
     [stack addArrangedSubview:castGroup];
 
     self.castView = [[RLPCastView alloc] initWithFrame:NSMakeRect(0, 0, 620, 420)];
@@ -2489,6 +2700,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     RLPSettingsGroup *diagGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"导出诊断包"), nil, t);
     diagGroup.identifier = @"sp_diaggroup";
     [stack addArrangedSubview:diagGroup];
+    self.diagGroup = diagGroup;
 
     self.diagZipBtn = [self primaryButton:@"导出诊断包（.zip）" ident:@"sp_diagzip"
                                    action:@selector(onExportDiagZip:)];
@@ -2509,6 +2721,34 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.diagMsg = [self hintForKey:@"sp_diagmsg" width:300];
     [diagRow addArrangedSubview:self.diagMsg];
     [diagGroup addFullRow:diagRow];
+
+    self.diagChannelsBtn = [self secondaryButton:@"检查反馈/更新通道"
+                                           ident:@"sp_diagchannelsbtn"
+                                          action:@selector(onCheckDiagChannels:)];
+    [self.diagChannelsBtn setContentHuggingPriority:NSLayoutPriorityRequired
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.diagChannelsBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    self.diagChannelsLabel = RLPLabel(@"", t.small, t.mut2);
+    self.diagChannelsLabel.identifier = @"sp_diagchannels";
+    self.diagChannelsLabel.maximumNumberOfLines = 4;
+    self.diagChannelsLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.diagChannelsLabel.selectable = YES;
+    [self.diagChannelsLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.diagChannelsLabel setContentCompressionResistancePriority:1.0f
+                                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.diagChannelsLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired
+                                                       forOrientation:NSLayoutConstraintOrientationVertical];
+    [[self.diagChannelsLabel.widthAnchor constraintLessThanOrEqualToConstant:380] setActive:YES];
+
+    NSStackView *chanRow = [[NSStackView alloc] init];
+    chanRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    chanRow.alignment = NSLayoutAttributeCenterY;
+    chanRow.spacing = 10;
+    [chanRow addArrangedSubview:self.diagChannelsBtn];
+    [chanRow addArrangedSubview:self.diagChannelsLabel];
+    [diagGroup addFullRow:chanRow];
 
     // 两行说明（web 原文，逐字）：第一行主文案，第二行补「已脱敏」。
     [diagGroup addNote:RLPTr(@"一个 zip 打包全部日志 / 系统信息 / 设置摘要")];
@@ -2662,10 +2902,332 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
 
 #pragma mark - 元数据
 
+/// 把卡片标题条的说明文字压缩阻力降到 < NSLayoutPriorityFittingSizeCompression(50)，
+/// 避免 ~600-950pt 说明把 card/_head 的 fittingSize 顶宽，悬停保留完整 tooltip。
+static void RLPTuneMetaGroup(RLPSettingsGroup *group) {
+    if (!group) return;
+    for (NSView *sub in group.subviews) {
+        if (![sub.identifier isEqualToString:@"set.group.head"]) continue;
+        NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
+        for (NSView *hv in sub.subviews) {
+            if ([hv isKindOfClass:[NSTextField class]]) [fields addObject:(NSTextField *)hv];
+        }
+        if (fields.count >= 1) {
+            NSTextField *titleLabel = fields[0];
+            titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+            titleLabel.maximumNumberOfLines = 1;
+            [titleLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+        }
+        if (fields.count >= 2) {
+            NSTextField *hintLabel = fields[1];
+            hintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+            hintLabel.maximumNumberOfLines = 1;
+            if (hintLabel.stringValue.length) hintLabel.toolTip = hintLabel.stringValue;
+            [hintLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+            [hintLabel setContentCompressionResistancePriority:1.0f
+                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
+        }
+        break;
+    }
+}
+
+static void RLPTuneMetaTextField(NSTextField *tf) {
+    if (!tf) return;
+    tf.translatesAutoresizingMaskIntoConstraints = NO;
+    [tf setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [tf setContentCompressionResistancePriority:1.0f
+                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSTextFieldCell *cell = [tf.cell isKindOfClass:[NSTextFieldCell class]]
+        ? (NSTextFieldCell *)tf.cell : nil;
+    if (cell) {
+        cell.scrollable = YES;
+        cell.wraps = NO;
+        cell.usesSingleLineMode = YES;
+    }
+}
+
+static void RLPTuneMetaPopup(NSPopUpButton *pop) {
+    if (!pop) return;
+    pop.translatesAutoresizingMaskIntoConstraints = NO;
+    [pop setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [pop setContentCompressionResistancePriority:1.0f
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+    if ([pop.cell isKindOfClass:[NSPopUpButtonCell class]]) {
+        NSPopUpButtonCell *cell = (NSPopUpButtonCell *)pop.cell;
+        cell.lineBreakMode = NSLineBreakByTruncatingTail;
+        cell.usesSingleLineMode = YES;
+    }
+}
+
+static void RLPTuneMetaDescendantLabel(NSView *root, NSString *ident) {
+    if (!root || !ident.length) return;
+    if ([root.identifier isEqualToString:ident]) {
+        [root setContentCompressionResistancePriority:1.0f
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+        return;
+    }
+    for (NSView *sub in root.subviews) {
+        RLPTuneMetaDescendantLabel(sub, ident);
+    }
+}
+
+static void RLPMetaClearStackRow(NSStackView *row) {
+    if (!row) return;
+    for (NSView *v in [row.arrangedSubviews copy]) {
+        [row removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+}
+
+- (void)resetMetaResponsiveState {
+    self.metaHostStack = nil;
+    self.metaTopGroup = nil;
+    self.metaDataGroup = nil;
+    self.metaAiGroup = nil;
+    self.metaSearchGroup = nil;
+    self.metaTwoColStack = nil;
+    self.metaAdvWidthConstraint = nil;
+    self.metaTwoColWidthConstraint = nil;
+    self.metaSearchWidthConstraint = nil;
+    self.metaVerticalCardWidthConstraints = nil;
+    self.metaModelContainer = nil;
+    self.metaModelPrimaryRow = nil;
+    self.metaModelSecondaryRow = nil;
+    self.metaModelHiddenDock = nil;
+    self.metaModelRowConstraints = nil;
+    self.llmSaveBtn = nil;
+    self.llmTestBtn = nil;
+    self.llmClearBtn = nil;
+    self.metaAiBtnContainer = nil;
+    self.metaAiBtnRow1 = nil;
+    self.metaAiBtnRow2 = nil;
+    self.metaAiBtnConstraints = nil;
+    self.metaResponsiveTwoColMode = -1;
+    self.metaResponsiveModelMode = -1;
+    self.metaResponsiveAiBtnMode = -1;
+}
+
+- (CGFloat)metaTargetHostWidthPreferringViewBounds:(BOOL)preferViewBounds {
+    if (preferViewBounds && self.view.superview && self.view.bounds.size.width > 1.0) {
+        return self.view.bounds.size.width;
+    }
+    if (self.paneHost && self.paneHost.bounds.size.width > 1.0) {
+        return self.paneHost.bounds.size.width;
+    }
+    if (self.view.superview && self.view.superview.bounds.size.width > 1.0) {
+        return self.view.superview.bounds.size.width;
+    }
+    if (self.view.window) {
+        NSView *content = self.view.window.contentView;
+        if (content && content.bounds.size.width > 1.0) {
+            if (self.view.superview == content) return content.bounds.size.width;
+            return MAX(0.0, content.bounds.size.width - 226.0);
+        }
+    }
+    return self.view.bounds.size.width;
+}
+
+- (BOOL)updateMetaModelRowLayoutForBodyWidth:(CGFloat)bodyW {
+    if (!self.metaModelContainer || !self.metaModelPrimaryRow || !self.metaModelSecondaryRow ||
+        !self.metaModelHiddenDock || !self.llmModelPopup || !self.llmModel || !self.llmModelRefresh) {
+        return NO;
+    }
+    const NSInteger targetMode = self.llmModelPopup.hidden ? 0 : (bodyW >= 460.0 ? 1 : 2);
+    if (targetMode == self.metaResponsiveModelMode) return NO;
+
+    if (self.metaModelRowConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:self.metaModelRowConstraints];
+        self.metaModelRowConstraints = nil;
+    }
+    RLPMetaClearStackRow(self.metaModelPrimaryRow);
+    RLPMetaClearStackRow(self.metaModelSecondaryRow);
+    [self.metaModelSecondaryRow removeFromSuperview];
+    [self.llmModelPopup removeFromSuperview];
+    [self.llmModel removeFromSuperview];
+    [self.llmModelRefresh removeFromSuperview];
+
+    [self.llmModel setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                              forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModel setContentCompressionResistancePriority:1.0f
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelPopup setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelPopup setContentCompressionResistancePriority:1.0f
+                                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelRefresh setContentHuggingPriority:NSLayoutPriorityDefaultHigh
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.llmModelRefresh setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
+    if (targetMode == 0) {
+        [self.metaModelHiddenDock addSubview:self.llmModelPopup];
+        self.llmModelPopup.frame = NSZeroRect;
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModel];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelRefresh];
+        [cs addObject:[self.metaModelPrimaryRow.bottomAnchor
+            constraintEqualToAnchor:self.metaModelContainer.bottomAnchor]];
+    } else if (targetMode == 1) {
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelPopup];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModel];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelRefresh];
+        NSLayoutConstraint *eq =
+            [self.llmModelPopup.widthAnchor constraintEqualToAnchor:self.llmModel.widthAnchor];
+        eq.priority = NSLayoutPriorityDefaultLow + 100;
+        [cs addObjectsFromArray:@[
+            [self.metaModelPrimaryRow.bottomAnchor
+                constraintEqualToAnchor:self.metaModelContainer.bottomAnchor],
+            eq,
+        ]];
+    } else {
+        [self.metaModelContainer addSubview:self.metaModelSecondaryRow];
+        [self.metaModelPrimaryRow addArrangedSubview:self.llmModelPopup];
+        [self.metaModelSecondaryRow addArrangedSubview:self.llmModel];
+        [self.metaModelSecondaryRow addArrangedSubview:self.llmModelRefresh];
+        NSLayoutConstraint *fillPop =
+            [self.llmModelPopup.widthAnchor constraintEqualToAnchor:self.metaModelPrimaryRow.widthAnchor];
+        fillPop.priority = NSLayoutPriorityDefaultHigh;
+        [cs addObjectsFromArray:@[
+            [self.metaModelSecondaryRow.leadingAnchor
+                constraintEqualToAnchor:self.metaModelContainer.leadingAnchor],
+            [self.metaModelSecondaryRow.trailingAnchor
+                constraintEqualToAnchor:self.metaModelContainer.trailingAnchor],
+            [self.metaModelSecondaryRow.topAnchor
+                constraintEqualToAnchor:self.metaModelPrimaryRow.bottomAnchor constant:8],
+            [self.metaModelSecondaryRow.bottomAnchor
+                constraintEqualToAnchor:self.metaModelContainer.bottomAnchor],
+            fillPop,
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:cs];
+    self.metaModelRowConstraints = cs;
+    self.metaResponsiveModelMode = targetMode;
+    return YES;
+}
+
+- (BOOL)updateMetaAiBtnRowLayoutForBodyWidth:(CGFloat)bodyW {
+    if (!self.metaAiBtnContainer || !self.metaAiBtnRow1 || !self.metaAiBtnRow2 ||
+        !self.llmSaveBtn || !self.llmTestBtn || !self.llmClearBtn) {
+        return NO;
+    }
+    const NSInteger targetMode = (bodyW >= 450.0) ? 0 : 1;
+    if (targetMode == self.metaResponsiveAiBtnMode) return NO;
+
+    if (self.metaAiBtnConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:self.metaAiBtnConstraints];
+        self.metaAiBtnConstraints = nil;
+    }
+    RLPMetaClearStackRow(self.metaAiBtnRow1);
+    RLPMetaClearStackRow(self.metaAiBtnRow2);
+    [self.metaAiBtnRow2 removeFromSuperview];
+    [self.llmSaveBtn removeFromSuperview];
+    [self.llmTestBtn removeFromSuperview];
+    [self.llmClearBtn removeFromSuperview];
+
+    NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
+    if (targetMode == 0) {
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmSaveBtn];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmTestBtn];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmClearBtn];
+        [cs addObject:[self.metaAiBtnRow1.bottomAnchor
+            constraintEqualToAnchor:self.metaAiBtnContainer.bottomAnchor]];
+    } else {
+        [self.metaAiBtnContainer addSubview:self.metaAiBtnRow2];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmSaveBtn];
+        [self.metaAiBtnRow1 addArrangedSubview:self.llmTestBtn];
+        [self.metaAiBtnRow2 addArrangedSubview:self.llmClearBtn];
+        [cs addObjectsFromArray:@[
+            [self.metaAiBtnRow2.leadingAnchor
+                constraintEqualToAnchor:self.metaAiBtnContainer.leadingAnchor],
+            [self.metaAiBtnRow2.trailingAnchor
+                constraintLessThanOrEqualToAnchor:self.metaAiBtnContainer.trailingAnchor],
+            [self.metaAiBtnRow2.topAnchor
+                constraintEqualToAnchor:self.metaAiBtnRow1.bottomAnchor constant:8],
+            [self.metaAiBtnRow2.bottomAnchor
+                constraintEqualToAnchor:self.metaAiBtnContainer.bottomAnchor],
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:cs];
+    self.metaAiBtnConstraints = cs;
+    self.metaResponsiveAiBtnMode = targetMode;
+    return YES;
+}
+
+- (void)updateMetaResponsiveLayoutForHostWidth:(CGFloat)hostW {
+    if (self.metaResponsiveUpdating) return;
+    if (!self.metaAdvancedStack || !self.metaTwoColStack ||
+        !self.metaDataGroup || !self.metaAiGroup || !self.metaSearchGroup) {
+        return;
+    }
+    self.metaResponsiveUpdating = YES;
+    const CGFloat avail = MAX(0.0, hostW - 48.0);
+    // 0 = 折叠收起态（adv 隐藏，断开与 stack 等宽链）；1 = 展开单列堆叠；2 = 展开两列并排（>=840pt 内容区）
+    const NSInteger targetTwoColMode = !self.metaAdvancedVisible ? 0 : (avail >= 840.0 ? 2 : 1);
+    BOOL needsAllRelayout = NO;
+    BOOL needsAiRelayout = NO;
+
+    if (targetTwoColMode != self.metaResponsiveTwoColMode) {
+        const BOOL wasExpanded = (self.metaResponsiveTwoColMode > 0);
+        self.metaResponsiveTwoColMode = targetTwoColMode;
+        const BOOL expanded = (targetTwoColMode > 0);
+        const BOOL twoCol = (targetTwoColMode == 2);
+
+        self.metaAdvWidthConstraint.active = expanded;
+        self.metaTwoColWidthConstraint.active = expanded;
+        self.metaSearchWidthConstraint.active = expanded;
+        for (NSLayoutConstraint *c in self.metaVerticalCardWidthConstraints) {
+            c.active = (expanded && !twoCol);
+        }
+        if (twoCol) {
+            self.metaTwoColStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+            self.metaTwoColStack.distribution = NSStackViewDistributionFillEqually;
+            self.metaTwoColStack.alignment = NSLayoutAttributeTop;
+            self.metaTwoColStack.spacing = 16;
+        } else {
+            self.metaTwoColStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+            self.metaTwoColStack.distribution = NSStackViewDistributionFill;
+            self.metaTwoColStack.alignment = NSLayoutAttributeLeading;
+            self.metaTwoColStack.spacing = 22;
+        }
+        if (expanded || wasExpanded) needsAllRelayout = YES;
+    }
+
+    const CGFloat aiCardW = (targetTwoColMode == 2) ? MAX(0.0, (avail - 16.0) * 0.5) : avail;
+    const CGFloat aiBodyW = MAX(0.0, aiCardW - 32.0);
+    if ([self updateMetaAiBtnRowLayoutForBodyWidth:aiBodyW]) needsAiRelayout = YES;
+    if ([self updateMetaModelRowLayoutForBodyWidth:aiBodyW]) needsAiRelayout = YES;
+
+    if (needsAllRelayout) {
+        [self.metaDataGroup contentDidChange];
+        [self.metaAiGroup contentDidChange];
+        [self.metaSearchGroup contentDidChange];
+        [self.metaTwoColStack setNeedsUpdateConstraints:YES];
+        [self.metaTwoColStack setNeedsLayout:YES];
+        [self.metaAdvancedStack setNeedsLayout:YES];
+        [self.metaHostStack setNeedsLayout:YES];
+    } else if (needsAiRelayout) {
+        [self.metaAiGroup contentDidChange];
+        [self.metaTwoColStack setNeedsLayout:YES];
+        [self.metaAdvancedStack setNeedsLayout:YES];
+        [self.metaHostStack setNeedsLayout:YES];
+    }
+    self.metaResponsiveUpdating = NO;
+}
+
 - (void)fillMeta:(NSStackView *)stack t:(RLPTheme *)t {
+    [self resetMetaResponsiveState];
+    self.metaHostStack = stack;
+
     // ── 基础选项（对齐 web：默认只显示三个开关 + 「高级选项 ▾」）──
-    [stack addArrangedSubview:RLPSGroup(RLPTr(@"元数据补全"),
-        RLPTr(@"播放时后台补全标签 / 封面 / 歌词，结果落在本地库"), t)];
+    RLPSettingsGroup *topGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"元数据补全"),
+        RLPTr(@"播放时后台补全标签 / 封面 / 歌词，结果落在本地库"), t);
+    RLPTuneMetaGroup(topGroup);
+    self.metaTopGroup = topGroup;
+    [stack addArrangedSubview:topGroup];
     self.metaOnSwitch = [self switchWithAction:@selector(onSwitch:) key:@"sp_metaon"];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"自动补全（不用 AI）"), self.metaOnSwitch,
         RLPTr(@"只用公开数据源（QQ音乐 / 网易云 / iTunes / dizzylab / lrclib）补全标签、封面、歌词；全程不调用 AI，不产生费用"), t)];
@@ -2685,7 +3247,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.metaMoreBtn = moreBtn;
     if (gCurrentGroup) [gCurrentGroup addButtonRow:@[moreBtn]];
 
-    // 高级内容容器：默认 hidden（NSStackView 对隐藏的 arrangedSubview 不占高度）。
+    // 高级内容容器：默认 hidden（折叠态与 stack 等宽链保持断开，避免 fitting 撑大主窗）。
     NSStackView *adv = [[NSStackView alloc] init];
     adv.orientation = NSUserInterfaceLayoutOrientationVertical;
     adv.alignment = NSLayoutAttributeLeading;
@@ -2703,25 +3265,30 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     // 数据源卡片（web 高级区左列 .meta-card）：逐源开关 + 优先级
     RLPSettingsGroup *dataGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"数据源"),
         RLPTr(@"越靠上优先级越高；拖动把手或点 ▲▼ 调整顺序，关掉的源完全不参与补全"), t);
+    RLPTuneMetaGroup(dataGroup);
+    if (gLastGroupWidthConstraint) {
+        gLastGroupWidthConstraint.active = NO;
+        gLastGroupWidthConstraint = nil;
+    }
+    self.metaDataGroup = dataGroup;
     [adv addArrangedSubview:dataGroup];
-    NSLayoutConstraint *dataWidthConstraint = gLastGroupWidthConstraint;
-    // 高级区默认 hidden，但 NSStackView 的 fittingSize 仍计入隐藏项；卡片宽若与 adv 等宽，
-    // 内部固定宽控件（320pt 输入框等）会把 adv 拟合宽顶到 1253，窗口再被撑到 1304。
-    dataWidthConstraint.priority = NSLayoutPriorityDefaultHigh;
-    self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 620, 200)];
+    self.metaSourcesView = [[RLPMetaSourcesView alloc] initWithFrame:NSMakeRect(0, 0, 580, 200)];
     self.metaSourcesView.translatesAutoresizingMaskIntoConstraints = NO;
+    RLPTuneMetaDescendantLabel(self.metaSourcesView, @"metasrc.msg");
     [dataGroup addFullRow:self.metaSourcesView];
     [[self.metaSourcesView heightAnchor] constraintGreaterThanOrEqualToConstant:200].active = YES;
     [self.metaSourcesView reload];
 
     // AI 接入卡片（web 高级区右列 .meta-card）：密钥红线 —— GET 只回掩码，输入框留空 = 不改已存的 key
-    // 用户截图三：模型下拉 / 刷新 / 「已拉到 9 个模型」/ 保存端点 / 测试连通 / 清除密钥
-    // 原本全是页面并列散块 ⟹ 全部经 addField/addNoteView/addButtonRow 落进这张卡。
     RLPSettingsGroup *aiGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"AI 接入（OpenAI 兼容）"),
         RLPTr(@"任何兼容 OpenAI 的服务都能用。密钥只在本机保存，界面永不回显明文；留空表示不修改。"), t);
+    RLPTuneMetaGroup(aiGroup);
+    if (gLastGroupWidthConstraint) {
+        gLastGroupWidthConstraint.active = NO;
+        gLastGroupWidthConstraint = nil;
+    }
+    self.metaAiGroup = aiGroup;
     [adv addArrangedSubview:aiGroup];
-    NSLayoutConstraint *aiWidthConstraint = gLastGroupWidthConstraint;
-    aiWidthConstraint.priority = NSLayoutPriorityDefaultHigh;
 
     // ① 接口预设（对齐 web LLM_PROVIDERS / sp_llmprovider）——只负责「填地址」，不做连通性判断。
     self.llmProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -2731,30 +3298,32 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.llmProviderPopup.identifier = @"llm.provider";
     self.llmProviderPopup.target = self;
     self.llmProviderPopup.action = @selector(onLlmProviderPicked:);
-    [self.llmProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    RLPTuneMetaPopup(self.llmProviderPopup);
     [aiGroup addField:RLPTr(@"接口预设") control:self.llmProviderPopup hint:nil];
 
     // ② 接口地址
     self.llmBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmBase.placeholderString = @"https://api.deepseek.com";
     self.llmBase.identifier = @"llm.base";
-    [[self.llmBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.llmBase);
     [aiGroup addField:RLPTr(@"接口地址") control:self.llmBase hint:nil];
 
     // ③ 密钥（web 顺序：Key 在保存/测试/清除之前）
     self.llmKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.llmKey.placeholderString = RLPTr(@"留空 = 保持已保存的密钥");
     self.llmKey.identifier = @"llm.key";
-    [[self.llmKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.llmKey);
     [aiGroup addField:RLPTr(@"API Key") control:self.llmKey hint:nil];
 
     self.llmStatus = RLPLabel(@"", t.small, t.mut);
     self.llmStatus.maximumNumberOfLines = 2;
     self.llmStatus.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmStatus.identifier = @"llm.status";
+    [self.llmStatus setContentCompressionResistancePriority:1.0f
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.llmStatus];
 
-    // ④ 动作按钮（web 顺序：保存并连接 / 测试连接 / 清除 Key）
+    // ④ 动作按钮（web 顺序：保存并连接 / 测试连接 / 清除 Key；窄卡自动折两行）
     NSButton *save = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onLlmSave:)];
     save.bezelStyle = NSBezelStyleRounded;
     save.identifier = @"llm.save";
@@ -2764,39 +3333,97 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     NSButton *clearKey = [NSButton buttonWithTitle:RLPTr(@"清除密钥") target:self action:@selector(onLlmClearKey:)];
     clearKey.bezelStyle = NSBezelStyleRounded;
     clearKey.identifier = @"llm.clear";
-    [aiGroup addButtonRow:@[ save, test, clearKey ]];
+    for (NSButton *b in @[ save, test, clearKey ]) {
+        [b setContentHuggingPriority:NSLayoutPriorityDefaultHigh
+                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [b setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
+    self.llmSaveBtn = save;
+    self.llmTestBtn = test;
+    self.llmClearBtn = clearKey;
 
-    // ⑤ 模型：手填 + 下拉 + 刷新列表（web 同一行）
+    NSView *btnBox = [[NSView alloc] initWithFrame:NSZeroRect];
+    btnBox.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView *btnRow1 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    btnRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    btnRow1.alignment = NSLayoutAttributeCenterY;
+    btnRow1.spacing = 8;
+    btnRow1.translatesAutoresizingMaskIntoConstraints = NO;
+    [btnBox addSubview:btnRow1];
+    [NSLayoutConstraint activateConstraints:@[
+        [btnRow1.leadingAnchor constraintEqualToAnchor:btnBox.leadingAnchor],
+        [btnRow1.trailingAnchor constraintLessThanOrEqualToAnchor:btnBox.trailingAnchor],
+        [btnRow1.topAnchor constraintEqualToAnchor:btnBox.topAnchor],
+    ]];
+    NSStackView *btnRow2 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    btnRow2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    btnRow2.alignment = NSLayoutAttributeCenterY;
+    btnRow2.spacing = 8;
+    btnRow2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.metaAiBtnContainer = btnBox;
+    self.metaAiBtnRow1 = btnRow1;
+    self.metaAiBtnRow2 = btnRow2;
+    [aiGroup addFullRow:btnBox];
+
+    // ⑤ 模型：手填 + 下拉 + 刷新列表（窄卡或下拉显示时自动折行，隐藏下拉零占位但保留视图归卡）
     self.llmModel = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.llmModel.placeholderString = @"deepseek-chat";
     self.llmModel.identifier = @"llm.modeltext";
     self.llmModel.target = self;
     self.llmModel.action = @selector(onLlmModelTyped:);
-    [[self.llmModel.widthAnchor constraintEqualToConstant:220] setActive:YES];
+    RLPTuneMetaTextField(self.llmModel);
     self.llmModelPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.llmModelPopup.target = self;
     self.llmModelPopup.action = @selector(onLlmModelPicked:);
     self.llmModelPopup.identifier = @"llm.modelpopup";
     self.llmModelPopup.hidden = YES;
-    [self.llmModelPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    RLPTuneMetaPopup(self.llmModelPopup);
     self.llmModelRefresh = [NSButton buttonWithTitle:RLPTr(@"刷新模型列表")
         target:self action:@selector(onLlmModelRefresh:)];
     self.llmModelRefresh.bezelStyle = NSBezelStyleRounded;
     self.llmModelRefresh.identifier = @"llm.modelrefresh";
-    NSStackView *modelRow = [[NSStackView alloc] init];
-    modelRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    modelRow.alignment = NSLayoutAttributeCenterY;
-    modelRow.spacing = 8;
-    [modelRow addArrangedSubview:self.llmModelPopup];
-    [modelRow addArrangedSubview:self.llmModel];
-    [modelRow addArrangedSubview:self.llmModelRefresh];
-    [aiGroup addWideField:RLPTr(@"LLM 模型") control:modelRow
+
+    NSView *modelBox = [[NSView alloc] initWithFrame:NSZeroRect];
+    modelBox.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *modelDock = [[NSView alloc] initWithFrame:NSZeroRect];
+    modelDock.translatesAutoresizingMaskIntoConstraints = NO;
+    modelDock.hidden = YES;
+    [modelBox addSubview:modelDock];
+    NSStackView *modelRow1 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    modelRow1.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    modelRow1.alignment = NSLayoutAttributeCenterY;
+    modelRow1.spacing = 8;
+    modelRow1.translatesAutoresizingMaskIntoConstraints = NO;
+    [modelBox addSubview:modelRow1];
+    [NSLayoutConstraint activateConstraints:@[
+        [modelDock.leadingAnchor constraintEqualToAnchor:modelBox.leadingAnchor],
+        [modelDock.topAnchor constraintEqualToAnchor:modelBox.topAnchor],
+        [modelDock.widthAnchor constraintEqualToConstant:0],
+        [modelDock.heightAnchor constraintEqualToConstant:0],
+        [modelRow1.leadingAnchor constraintEqualToAnchor:modelBox.leadingAnchor],
+        [modelRow1.trailingAnchor constraintEqualToAnchor:modelBox.trailingAnchor],
+        [modelRow1.topAnchor constraintEqualToAnchor:modelBox.topAnchor],
+    ]];
+    NSStackView *modelRow2 = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    modelRow2.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    modelRow2.alignment = NSLayoutAttributeCenterY;
+    modelRow2.spacing = 8;
+    modelRow2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.metaModelContainer = modelBox;
+    self.metaModelPrimaryRow = modelRow1;
+    self.metaModelSecondaryRow = modelRow2;
+    self.metaModelHiddenDock = modelDock;
+    [aiGroup addWideField:RLPTr(@"LLM 模型") control:modelBox
                      hint:RLPTr(@"选择用于资料补全与增强的模型；读不到列表也可以直接手填")];
 
     self.llmModelMsg = RLPLabel(RLPTr(@"模型列表读取中"), t.small, t.mut);
+    self.llmModelMsgIsWarn = NO;
     self.llmModelMsg.maximumNumberOfLines = 2;
     self.llmModelMsg.lineBreakMode = NSLineBreakByWordWrapping;
     self.llmModelMsg.identifier = @"llm.modelmsg";
+    [self.llmModelMsg setContentCompressionResistancePriority:1.0f
+                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.llmModelMsg];
 
     // ---- 标签写回（web sp_wbdesc / sp_wbdry / sp_wbapply / sp_wbmsg）----
@@ -2808,6 +3435,8 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.wbDesc.maximumNumberOfLines = 4;
     self.wbDesc.lineBreakMode = NSLineBreakByWordWrapping;
     self.wbDesc.stringValue = RLPTr(@"补全到的标签 / 封面写回音频文件本身；写前校验音频数据逐位不变，原文件备份到备份目录");
+    [self.wbDesc setContentCompressionResistancePriority:1.0f
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.wbDesc];
 
     self.wbDryBtn = [NSButton buttonWithTitle:RLPTr(@"预览写回") target:self
@@ -2824,12 +3453,19 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.writebackStatus.identifier = @"sp_wbmsg";
     self.writebackStatus.maximumNumberOfLines = 3;
     self.writebackStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.writebackStatus setContentCompressionResistancePriority:1.0f
+                                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     [aiGroup addNoteView:self.writebackStatus];
 
     // ── 联网检索端点（search / fetch 一起切换，对齐 web SEARCH 区块）──
-    // 用户截图三：保存端点 / 清除检索 Key / AnySearch · Key as_****e834 散在卡片外 ⟹ 全部归卡。
     RLPSettingsGroup *searchGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"联网检索端点"),
         RLPTr(@"「AI 增强」整理资料时用的 search / fetch 端点。DeepSeek 为默认；切到 AnySearch / Tavily 后，非 DeepSeek 的 AI 接口也能联网检索。"), t);
+    RLPTuneMetaGroup(searchGroup);
+    if (gLastGroupWidthConstraint) {
+        gLastGroupWidthConstraint.active = NO;
+        gLastGroupWidthConstraint = nil;
+    }
+    self.metaSearchGroup = searchGroup;
     [adv addArrangedSubview:searchGroup];
 
     self.searchProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -2839,25 +3475,27 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.searchProviderPopup.identifier = @"search.provider";
     self.searchProviderPopup.target = self;
     self.searchProviderPopup.action = @selector(onSearchProviderChanged:);
-    [self.searchProviderPopup.widthAnchor constraintEqualToConstant:240].active = YES;
+    RLPTuneMetaPopup(self.searchProviderPopup);
     [searchGroup addField:RLPTr(@"检索端点") control:self.searchProviderPopup hint:nil];
 
     self.searchBase = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.searchBase.placeholderString = RLPTr(@"留空 = 用该厂商默认地址");
     self.searchBase.identifier = @"search.base";
-    [[self.searchBase.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.searchBase);
     [searchGroup addField:RLPTr(@"检索地址") control:self.searchBase hint:nil];
 
     self.searchKey = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
     self.searchKey.placeholderString = RLPTr(@"留空 = 保持已保存的检索 Key");
     self.searchKey.identifier = @"search.key";
-    [[self.searchKey.widthAnchor constraintEqualToConstant:320] setActive:YES];
+    RLPTuneMetaTextField(self.searchKey);
     [searchGroup addField:RLPTr(@"检索 Key") control:self.searchKey hint:nil];
 
     self.searchStatus = RLPLabel(@"", t.small, t.mut);
     self.searchStatus.maximumNumberOfLines = 2;
     self.searchStatus.lineBreakMode = NSLineBreakByWordWrapping;
     self.searchStatus.identifier = @"search.status";
+    [self.searchStatus setContentCompressionResistancePriority:1.0f
+                                                forOrientation:NSLayoutConstraintOrientationHorizontal];
     [searchGroup addNoteView:self.searchStatus];
 
     NSButton *sSave = [NSButton buttonWithTitle:RLPTr(@"保存端点") target:self action:@selector(onSearchSave:)];
@@ -2868,33 +3506,39 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     sClear.identifier = @"search.clear";
     [searchGroup addButtonRow:@[ sSave, sClear ]];
 
-    // web `.meta-adv-grid`：数据源 / AI 接入 **左右两列**（>=1100px 时两列，窄屏回落单列）。
-    // 收起时**不做两列合并**：NSStackView 的 fittingSize 仍计入隐藏项，两列会把固有宽
-    // 顶到 1253，窗口于是被 AppKit 从 940 撑到 1304（实测 324pt 全来自这里）。
-    if (self.metaAdvancedVisible && dataGroup && aiGroup && dataWidthConstraint && aiWidthConstraint) {
-        dataWidthConstraint.active = NO;
-        aiWidthConstraint.active = NO;
-        NSStackView *twoCol = [[NSStackView alloc] init];
-        twoCol.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-        twoCol.distribution = NSStackViewDistributionFillEqually;
-        twoCol.alignment = NSLayoutAttributeTop;
-        twoCol.spacing = 16;
-        twoCol.translatesAutoresizingMaskIntoConstraints = NO;
-        [adv removeArrangedSubview:dataGroup];
-        [adv removeArrangedSubview:aiGroup];
-        [twoCol addArrangedSubview:dataGroup];
-        [twoCol addArrangedSubview:aiGroup];
-        [adv insertArrangedSubview:twoCol atIndex:0];
-        // 只许「不大于」：隐藏的 adv 仍会被算进 fittingSize，等宽会把内部两列的
-        // 固有宽度刚性传回外层 stack，AppKit 挂载时按 fittingSize 把主窗从 940 撑到 1304。
-        [twoCol.widthAnchor constraintLessThanOrEqualToAnchor:adv.widthAnchor].active = YES;
-    }
+    // web `.meta-adv-grid`：始终装进 twoCol 容器，宽窗横向两列，窄窗/折叠态纵向单列。
+    NSStackView *twoCol = [[NSStackView alloc] init];
+    twoCol.orientation = NSUserInterfaceLayoutOrientationVertical;
+    twoCol.distribution = NSStackViewDistributionFill;
+    twoCol.alignment = NSLayoutAttributeLeading;
+    twoCol.spacing = 22;
+    twoCol.translatesAutoresizingMaskIntoConstraints = NO;
+    twoCol.identifier = @"sp_metatwocol";
+    [adv removeArrangedSubview:dataGroup];
+    [adv removeArrangedSubview:aiGroup];
+    [twoCol addArrangedSubview:dataGroup];
+    [twoCol addArrangedSubview:aiGroup];
+    [adv insertArrangedSubview:twoCol atIndex:0];
+    self.metaTwoColStack = twoCol;
 
     gCurrentStack = savedStack;
     gCurrentGroup = savedGroup;
     [stack addArrangedSubview:adv];
-    // 同上：高级区收起时不得决定 pane/窗口宽度（实测这一条就是 +324pt 的来源）。
-    [adv.widthAnchor constraintLessThanOrEqualToAnchor:stack.widthAnchor].active = YES;
+
+    self.metaAdvWidthConstraint =
+        [adv.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48];
+    self.metaTwoColWidthConstraint =
+        [twoCol.widthAnchor constraintEqualToAnchor:adv.widthAnchor];
+    self.metaSearchWidthConstraint =
+        [searchGroup.widthAnchor constraintEqualToAnchor:adv.widthAnchor];
+    self.metaVerticalCardWidthConstraints = @[
+        [dataGroup.widthAnchor constraintEqualToAnchor:twoCol.widthAnchor],
+        [aiGroup.widthAnchor constraintEqualToAnchor:twoCol.widthAnchor],
+    ];
+
+    [self restoreLlmModelStateIfNeeded];
+    const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
+    [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
 }
 
 #pragma mark - 均衡 / 输入（已迁移的子界面）
@@ -3235,10 +3879,13 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         // 用户看到的就是「还是原来那一串」（2026-11-13 反馈的另一半）。
         [self.llmModelPopup removeAllItems];
         self.llmModelPopup.hidden = YES;
+        [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:(self.paneHost && self.paneHost.bounds.size.width > 1.0)]];
         self.llmModelMsg.stringValue = RLPTr(@"正在重新拉取模型列表…");
         self.llmModelMsg.textColor = [RLPTheme current].mut;
+        self.llmModelMsgIsWarn = NO;
     }
     NSString *url = force ? @"/api/llm/models?refresh=1" : @"/api/llm/models";
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3248,8 +3895,12 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         NSString *cur = [json[@"current"] isKindOfClass:[NSString class]] ? json[@"current"]
                         : (self_.llmModel.stringValue ?: @"");
         if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm/models",
+                         json ? 400 : 500, durMs, @"models_failed");
             // 降级：隐藏下拉、保留手填（值填当前 model，用户可改可留空）。
             self_.llmModelPopup.hidden = YES;
+            [self_ updateMetaResponsiveLayoutForHostWidth:[self_ metaTargetHostWidthPreferringViewBounds:(self_.paneHost && self_.paneHost.bounds.size.width > 1.0)]];
             if (!self_.llmModel.stringValue.length && ![self_ isControlDirty:self_.llmModel]) {
                 self_.llmModel.stringValue = cur;
             }
@@ -3258,6 +3909,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
                 ? [RLPTr(@"拉取模型列表失败") stringByAppendingFormat:@"：%@", err]
                 : RLPTr(@"服务端没有返回任何模型，可直接手填模型 id");
             self_.llmModelMsg.textColor = [RLPTheme current].warn;
+            self_.llmModelMsgIsWarn = YES;
             return;
         }
         // 动态列表：按 id 建项；当前 model 不在列表里时额外插一条（不改配置，提示重选）。
@@ -3285,15 +3937,18 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             self_.lastLoadedValues[@"llm.modeltext"] = cur;
         }
         self_.llmModelPopup.hidden = NO;
+        [self_ updateMetaResponsiveLayoutForHostWidth:[self_ metaTargetHostWidthPreferringViewBounds:(self_.paneHost && self_.paneHost.bounds.size.width > 1.0)]];
         const NSInteger n = (NSInteger)ids.count;
         if (cur.length && !hasCurrent) {
             self_.llmModelMsg.stringValue = [NSString stringWithFormat:
                 RLPTr(@"已拉到 %ld 个模型，但当前模型不在列表里，建议重新选择（不会自动改配置）"), (long)n];
             self_.llmModelMsg.textColor = [RLPTheme current].warn;
+            self_.llmModelMsgIsWarn = YES;
         } else {
             self_.llmModelMsg.stringValue = [NSString stringWithFormat:
                 RLPTr(@"已拉到 %ld 个模型"), (long)n];
             self_.llmModelMsg.textColor = [RLPTheme current].mut;
+            self_.llmModelMsgIsWarn = NO;
         }
     }];
 }
@@ -3321,6 +3976,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     if (!m.length || ![RLPCoreClient shared].started) return;
     ++self.llmSeq;
     NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(m)];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3328,6 +3984,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             [self_ clearDirtyControlId:@"llm.modeltext" expectedValue:m];
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"model_save_failed");
         }
         self_.llmStatus.stringValue = ok
             ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已保存"), m]
@@ -3347,6 +4007,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     [self.dirtyControlIds addObject:@"llm.modeltext"];
     ++self.llmSeq;
     NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(title)];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3354,6 +4015,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             [self_ clearDirtyControlId:@"llm.modeltext" expectedValue:title];
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"model_pick_failed");
         }
         self_.llmStatus.stringValue = ok
             ? RLPTr(@"已保存") : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败")));
@@ -3381,6 +4046,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     }
     ++self.llmSeq;
     self.llmStatus.stringValue = RLPTr(@"保存中…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3404,6 +4070,9 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             [self_ loadLlmModels:YES];
             [self_ runLlmTestSilently];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"llm_save_failed");
             self_.llmStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
                 ? json[@"error"] : RLPTr(@"保存失败");
         }
@@ -3417,6 +4086,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     NSString *submittedKey = [self.llmKey.stringValue stringByTrimmingCharactersInSet:
                               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     ++self.llmSeq;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"clear=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3428,6 +4098,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
                 [self_.dirtyControlIds removeObject:@"llm.key"];
                 if (!curKey.length) self_.lastLoadedValues[@"llm.key"] = @"";
             }
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"llm_clear_failed");
         }
         self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
             ? RLPTr(@"已清除 API Key（可随时重新填入）")
@@ -3559,6 +4233,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     if (key.length) [body appendFormat:@"&search_key=%@", RLPEnc(key)];
     ++self.llmSeq;
     self.searchStatus.stringValue = RLPTr(@"保存中…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3575,6 +4250,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             self_.searchStatus.stringValue = RLPTr(@"检索端点已保存");
             [self_ loadLlmConfig];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"search_save_failed");
             self_.searchStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
                 ? json[@"error"] : RLPTr(@"保存失败");
         }
@@ -3588,6 +4266,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     NSString *submittedKey = [self.searchKey.stringValue stringByTrimmingCharactersInSet:
                               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     ++self.llmSeq;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"search_key_clear=1"
                           completion:^(NSDictionary * _Nullable json) {
@@ -3600,6 +4279,10 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
                 [self_.dirtyControlIds removeObject:@"search.key"];
                 if (!curKey.length) self_.lastLoadedValues[@"search.key"] = @"";
             }
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"search_clear_failed");
         }
         self_.searchStatus.stringValue = (json && [json[@"ok"] boolValue])
             ? RLPTr(@"已清除检索 Key")
@@ -3620,6 +4303,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 /// 真正发测试请求并把结果写进状态行。保存端点成功后也会调它（web llmSave 顺手测一次）。
 - (void)runLlmTestSilently {
     if (![RLPCoreClient shared].started) return;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/llm/test" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3631,6 +4315,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             self_.llmStatus.stringValue = [NSString stringWithFormat:
                 RLPTr(@"连接成功：模型 %@，耗时 %ld ms（key 有效）"), model, (long)ms];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm/test",
+                         json ? 400 : 500, durMs, @"llm_test_failed");
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.llmStatus.stringValue = [RLPTr(@"连接失败：") stringByAppendingString:err];
         }
@@ -3683,7 +4370,14 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             ? [NSString stringWithFormat:@"%@ · Key %@", provName, sMasked]
             : provName;
         // 进页顺带拉一次模型列表（web llmModelsLoad(false) 同口径）。
-        [self_ loadLlmModels:NO];
+        // 主题切换重建设置页后保留已捕获的下拉快照，并在 meta 进页自动拉取前消费一次抑制标志。
+        if (self_.tab == RLPSTabMeta || self_.paneCache[@(RLPSTabMeta)] != nil) {
+            if (self_.suppressNextLlmAutoLoad) {
+                self_.suppressNextLlmAutoLoad = NO;
+            } else {
+                [self_ loadLlmModels:NO];
+            }
+        }
     }];
 }
 
@@ -3790,12 +4484,16 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     if (![RLPCoreClient shared].started || self.wbBusy) return;
     [self wbSetBusy:YES];
     self.writebackStatus.stringValue = RLPTr(@"正在扫描 MetaBase…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/writeback?dry=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         [self_ wbSetBusy:NO];
         if (!json || ![json[@"ok"] boolValue]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/writeback",
+                         json ? 400 : 500, durMs, @"writeback_dry_failed");
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.writebackStatus.stringValue = @"";
             RLPToast([RLPTr(@"预览失败：") stringByAppendingString:err]);
@@ -3820,6 +4518,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     if ([a runModal] != NSAlertFirstButtonReturn) return;
     [self wbSetBusy:YES];
     self.writebackStatus.stringValue = RLPTr(@"写回批次已启动…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/writeback" body:@"{\"apply\":true}"
                           completion:^(NSDictionary * _Nullable json) {
@@ -3827,6 +4526,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
         if (!self_) return;
         const BOOL started = json && [json[@"ok"] boolValue] && [json[@"started"] boolValue];
         if (!started) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/writeback",
+                         json ? 400 : 500, durMs, @"writeback_apply_failed");
             [self_ wbSetBusy:NO];
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.writebackStatus.stringValue = @"";
@@ -3838,6 +4540,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 }
 
 - (void)onCheckUpdate:(id)sender {
+    RLPDiagEvent(@"action", @"update_check", @"settings:diag", nil, 0, -1, @"manual");
     [[RLPUpdateWindowController shared] checkManually:YES];
 }
 
@@ -3847,47 +4550,72 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 - (void)exportDiagAsZip:(BOOL)zip {
     // /api/diagzip 回的是 ZIP 原始字节（不是 JSON）⟹ 必须走 getData。
     // 不假装成功：取字节失败、用户取消、写盘失败三种情况分别如实说明。
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     if (!zip) {
+        RLPDiagEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag", 0, -1, @"start");
         __weak __typeof__(self) weakSelf2 = self;
         [[RLPCoreClient shared] getJSON:@"/api/diag" completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self2 = weakSelf2;
             if (!self2) return;
-            if (!json) { RLPToast(RLPTr(@"诊断 JSON 导出失败")); return; }
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            if (!json) {
+                RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/diag", 500, durMs, @"empty_response");
+                RLPToast(RLPTr(@"诊断 JSON 导出失败"));
+                return;
+            }
             NSData *d = [NSJSONSerialization dataWithJSONObject:json
                 options:NSJSONWritingPrettyPrinted error:nil];
             NSSavePanel *panel = [NSSavePanel savePanel];
             panel.nameFieldStringValue = @"rlplayer-diag.json";
-            if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+            if ([panel runModal] != NSModalResponseOK || !panel.URL) {
+                RLPDiagEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag", 0, durMs, @"cancelled");
+                return;
+            }
             if (![d writeToURL:panel.URL options:NSDataWritingAtomic error:nil]) {
+                RLPDiagEvent(@"error", @"diag_json", @"settings:diag", @"/api/diag", 0, durMs, @"write_failed");
                 RLPToast(RLPTr(@"写入失败"));
                 return;
             }
+            RLPDiagEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag", 200, durMs, @"ok");
             RLPToast([NSString stringWithFormat:RLPTr(@"已导出 %@"), panel.URL.lastPathComponent]);
         }];
         return;
     }
+    RLPDiagEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip", 0, -1, @"start");
     [[RLPCoreClient shared] getData:@"/api/diagzip" completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (!data.length) { RLPToast(RLPTr(@"诊断包导出失败")); return; }
+        const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+        if (!data.length) {
+            RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/diagzip", 500, durMs, @"empty_response");
+            RLPToast(RLPTr(@"诊断包导出失败"));
+            return;
+        }
         // 服务端超预算时回的是 JSON 错误报文（不是 ZIP）。不能把它存成 .zip 假装成功；
         // 也顺手兜住 8 MiB 上限（与反馈通道同一闸门，P0-2）。
         const NSUInteger nbytes = data.length;
         const unsigned char *pb = (const unsigned char *)data.bytes;
         const bool isZip = nbytes >= 4 && pb[0] == 'P' && pb[1] == 'K' && pb[2] == 3 && pb[3] == 4;
         if (!isZip || nbytes > 8u * 1024u * 1024u) {
+            RLPDiagEvent(@"error", @"diag_export", @"settings:diag", @"/api/diagzip",
+                         422, durMs, !isZip ? @"invalid_zip" : @"too_large");
             RLPToast(RLPTr(@"诊断包导出失败"));
             return;
         }
         NSSavePanel *panel = [NSSavePanel savePanel];
         panel.nameFieldStringValue = @"rlplayer-diag.zip";
-        if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+        if ([panel runModal] != NSModalResponseOK || !panel.URL) {
+            RLPDiagEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip", 0, durMs, @"cancelled");
+            return;
+        }
         NSError *err = nil;
         if (![data writeToURL:panel.URL options:NSDataWritingAtomic error:&err]) {
+            RLPDiagEvent(@"error", @"diag_export", @"settings:diag", @"/api/diagzip", 0, durMs, @"write_failed");
             RLPToast(err.localizedDescription ?: RLPTr(@"写入失败"));
             return;
         }
+        RLPDiagEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip", 200, durMs, @"ok");
         // 提示里写**真实字节数**（UI 文案必须与落盘大小一致；MB 只是人类可读换算）。
         NSString *name = panel.URL.lastPathComponent;
         RLPToast([NSString stringWithFormat:@"%@  %.2f MB",
@@ -3931,12 +4659,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     if (self.fbSending) return;
     NSString *text = self.fbText.string ?: @"";
     if (RLPFeedbackTextBlank(text)) {
+        RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, @"blank");
         [self fbResultText:RLPTr(@"请先写下反馈内容再发送") kind:2];
         [self.fbText.window makeFirstResponder:self.fbText];
         return;
     }
     const NSUInteger bytes = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
     if (bytes > rta::feedback::kFeedbackMaxTextBytes) {
+        RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, @"too_large");
         NSString *line = [NSString stringWithFormat:@"%@%llu%@%lu%@",
                           RLPTr(@"内容超过 "), (unsigned long long)rta::feedback::kFeedbackMaxTextBytes,
                           RLPTr(@" 字节（当前 "), (unsigned long)bytes, RLPTr(@"），请精简后再发")];
@@ -3945,15 +4675,18 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     }
     // web 同一道闸门：只有**探活成功**（==1）才发，null/失败一律拒。
     if (self.fbServerOK != 1) {
+        RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, @"channel_unavailable");
         [self fbResultText:RLPTr(@"反馈后台当前不可用，请稍后再试") kind:2];
         return;
     }
     const BOOL wantDiag = (self.fbDiagSwitch.state == NSControlStateValueOn);
+    RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, wantDiag ? @"start_diag" : @"start");
     self.fbSending = YES;
     [self fbResultText:(wantDiag ? RLPTr(@"正在打包诊断包并上传…") : RLPTr(@"正在上传…")) kind:0];
     [self fbUpdateSendEnabled];
 
     if (!wantDiag) { [self fbUploadText:text diagJson:@"" attach:NO]; return; }
+    const NSTimeInterval diagT0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     // 诊断包走 /api/diagjson（与「导出诊断包」同一份组装 + 脱敏），不自己拼现场。
     [[RLPCoreClient shared] getData:@"/api/diagjson" completion:^(NSData * _Nullable data) {
@@ -3961,8 +4694,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (!self_) return;
         NSString *diag = data.length
             ? ([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        if (!diag.length)
+        if (!diag.length) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - diagT0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/diagjson", 500, durMs, @"empty_response");
             [self_ fbResultText:RLPTr(@"诊断包读取失败，将只提交正文") kind:0];
+        }
         [self_ fbUploadText:text diagJson:diag attach:(diag.length > 0)];
     }];
 }
@@ -3972,6 +4708,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 - (void)fbUploadText:(NSString *)text diagJson:(NSString *)diag attach:(BOOL)attach {
     NSString *client = [self feedbackInstallId];
     if (!client.length) {
+        RLPDiagEvent(@"error", @"fb_send", @"settings:diag", nil, 0, -1, @"install_id_invalid");
         self.fbSending = NO;
         [self fbResultText:RLPTr(@"安装 ID 无效：本机安装标识缺失或格式不对，请重新启动应用后再试。") kind:2];
         [self fbUpdateSendEnabled];
@@ -3993,6 +4730,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
     const auto built = rta::feedback::build_feedback_upload(in);
     if (!built.ok) {
+        RLPDiagEvent(@"error", @"fb_send", @"settings:diag", nil, 0, -1, @"build_failed");
         self.fbSending = NO;
         NSString *err = [NSString stringWithUTF8String:built.error.c_str()] ?: RLPTr(@"反馈内容不合法");
         [self fbResultText:err kind:2];
@@ -4003,18 +4741,22 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     const std::string bodyCpp = built.json;
     NSString *bodyStr = [NSString stringWithUTF8String:bodyCpp.c_str()] ?: @"";
     NSString *url = [NSString stringWithUTF8String:rta::feedback::kFeedbackUploadUrl] ?: @"";
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
 
     __weak __typeof__(self) weakSelf = self;
     void (^reply)(NSInteger, NSData *) = ^(NSInteger status, NSData *body) {
         dispatch_async(dispatch_get_main_queue(), ^{
             __typeof__(self) self_ = weakSelf;
             if (!self_) return;
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
             NSString *rawStr = body.length
                 ? ([[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"") : @"";
             const std::string raw = rawStr.UTF8String ?: "";
             const auto r = rta::feedback::parse_feedback_upload_reply((int)status, raw);
             self_.fbSending = NO;
             if (r.ok) {
+                RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil,
+                             status > 0 ? status : 200, durMs, @"ok");
                 NSString *ticket = [NSString stringWithUTF8String:r.id.c_str()] ?: @"";
                 NSString *line = [NSString stringWithFormat:@"%@%@%@",
                                   RLPTr(@"已收到，工单号 "),
@@ -4026,6 +4768,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
                 self_.fbText.string = @"";
                 [self_ updateFbCount];
             } else {
+                NSString *errCode = !r.code.empty()
+                    ? ([NSString stringWithUTF8String:r.code.c_str()] ?: @"upload_failed")
+                    : [NSString stringWithFormat:@"http_%ld", (long)status];
+                RLPDiagEvent(@"error", @"fb_send", @"settings:diag", nil, status, durMs, errCode);
                 NSString *m = [NSString stringWithUTF8String:r.error.c_str()] ?: @"";
                 if (!m.length) m = [NSString stringWithFormat:RLPTr(@"提交失败（HTTP %d）"), (int)status];
                 NSString *hint = @"";
@@ -4063,7 +4809,13 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [self reloadData];
 }
 
-- (void)activate { [self reloadData]; [self wbSyncBusy]; }
+- (void)activate {
+    NSString *paneKey = [self currentPaneKey] ?: @"adv";
+    RLPDiagEvent(@"action", @"settings_open",
+                 [NSString stringWithFormat:@"settings:%@", paneKey], nil, 0, -1, nil);
+    [self reloadData];
+    [self wbSyncBusy];
+}
 
 - (void)reloadData {
     [self reloadDataIncludingEqualizer:YES];
@@ -4074,13 +4826,20 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         self.statusLine.stringValue = RLPTr(@"核心未启动");
         return;
     }
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
 
     [[RLPCoreClient shared] getJSON:@"/api/devices" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         id devs = json[@"devices"];
-        if (![devs isKindOfClass:[NSArray class]]) return;
+        if (![devs isKindOfClass:[NSArray class]]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/devices", json ? 400 : 500, durMs, @"devices_failed");
+            return;
+        }
         [self_.devicePopup removeAllItems];
         [self_.inDevicePopup removeAllItems];
         // web #sp_device：首项 value="" 的「默认设备」，设备项 value = 稳定 id
@@ -4107,6 +4866,13 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [[RLPCoreClient shared] getJSON:@"/api/filters" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (!json) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/filters", 500, durMs, @"filters_failed");
+            return;
+        }
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : nil;
         if (!items.count) return;
         [self_.filt1xPopup removeAllItems];
@@ -4173,7 +4939,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         std::fprintf(stderr, "[DIAG] GET completion seq=%lu cur=%lu\n", (unsigned long)seq, (unsigned long)self_.settingsGetSeq);
         if (!self_ || seq != self_.settingsGetSeq) return;
         NSDictionary *rawKV = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
-        if (!rawKV) { self_.statusLine.stringValue = RLPTr(@"设置读取失败"); return; }
+        if (!rawKV) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - getIssueAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", json ? 400 : 500, durMs, @"settings_read_failed");
+            self_.statusLine.stringValue = RLPTr(@"设置读取失败");
+            return;
+        }
         // 只跳过「本次读回发出之后又被保存过」的键（那些值由保存本身负责刷新），
         // 而不是因为期间有过保存就把整包丢掉（2026-11-18 夜间评审 A2）。
         NSMutableDictionary *kvFiltered = [rawKV mutableCopy];
@@ -4575,12 +5348,18 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     self.inStartBtn.enabled = NO;
     self.inStopBtn.enabled = NO;
     self.inMsg.stringValue = RLPTr(@"正在启动采集…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/input/start" body:body
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         const BOOL ok = json && [json[@"ok"] boolValue];
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:in", @"/api/input/start",
+                         json ? 400 : 500, durMs, @"input_start_failed");
+        }
         self_.inStartBtn.enabled = !ok;
         self_.inStopBtn.enabled = ok;
         self_.inMsg.stringValue = ok
@@ -4592,12 +5371,18 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
 
 - (void)onInputStop:(id)sender {
     if (![RLPCoreClient shared].started) return;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/input/stop" body:nil
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         const BOOL ok = json && [json[@"ok"] boolValue];
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:in", @"/api/input/stop",
+                         json ? 400 : 500, durMs, @"input_stop_failed");
+        }
         self_.inStartBtn.enabled = YES;
         self_.inStopBtn.enabled = NO;
         self_.inMsg.stringValue = ok ? RLPTr(@"已停止")
@@ -4640,6 +5425,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     const NSInteger i = s.indexOfSelectedItem;
     NSString *modeVal = (i >= 0 && i < 3) ? vals[i] : @"1";
     NSString *url = [NSString stringWithFormat:@"/api/playmode?mode=%@", modeVal];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -4647,6 +5433,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
         if (json && [json[@"ok"] boolValue]) {
             self_.statusLine.stringValue = RLPTr(@"已保存");
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:adv", @"/api/playmode",
+                         json ? 400 : 500, durMs, @"playmode_set_failed");
             NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
                           ? json[@"error"] : RLPTr(@"保存失败");
             self_.statusLine.stringValue = err;
@@ -4660,6 +5449,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     // 不另造一种写法，否则两端行为会悄悄分叉。
     NSString *url = [NSString stringWithFormat:@"/api/shuffle?on=%@",
                      s.state == NSControlStateValueOn ? @"1" : @"0"];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -4667,6 +5457,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
         if (json && [json[@"ok"] boolValue]) {
             self_.statusLine.stringValue = RLPTr(@"已保存");
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:adv", @"/api/shuffle",
+                         json ? 400 : 500, durMs, @"shuffle_set_failed");
             // 旧实现 completion:nil：开关已经勾上、后端却没写成（ok:false 或服务没响应）时，
             // 状态行一个字都不变、也没有提示 —— 保存失败被完全吞掉，用户以为已经开了随机。
             NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
@@ -4682,6 +5475,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
 - (void)onAddRoot:(id)sender {
     NSString *p = [self.rootField.stringValue copy] ?: @"";
     if (!p.length) { RLPToast(RLPTr(@"请先填目录或点「浏览…」")); return; }
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
                                 body:[NSString stringWithFormat:@"add=%@", RLPEnc(p)]
@@ -4700,6 +5494,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
             [self_ reloadRoots];
             RLPToast(RLPTr(@"目录已加入"));
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:adv", @"/api/lib/roots",
+                         json ? 400 : 500, durMs, @"root_add_failed");
             RLPToast(([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil)
                      ?: RLPTr(@"添加目录失败"));
         }
@@ -4747,11 +5544,17 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     // 「查看 / 复制诊断摘要」按用户 2026-11-13 的要求：**只做复制 + 就地提示**。
     // 不显示 JSON 面板、不弹窗、不出现第二个容器（旧实现把摘要渲染进 sp_diagsummarytext 面板，
     // 用户截图六看到的整块 JSON 就是它）。摘要是空的就不假装「已复制」。
-    if (![RLPCoreClient shared].started) { self.diagMsg.stringValue = RLPTr(@"核心未启动"); return; }
+    if (![RLPCoreClient shared].started) {
+        RLPDiagEvent(@"error", @"diag_summary", @"settings:diag", @"/api/diag", 503, -1, @"core_not_started");
+        self.diagMsg.stringValue = RLPTr(@"核心未启动");
+        return;
+    }
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     void (^done)(NSDictionary * _Nullable) = ^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
         NSString *text = json ? [[NSString alloc] initWithData:
             [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:nil]
             encoding:NSUTF8StringEncoding] : nil;
@@ -4759,12 +5562,105 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
             [[NSPasteboard generalPasteboard] clearContents];
             [[NSPasteboard generalPasteboard] setString:text forType:NSPasteboardTypeString];
             self_.diagMsg.stringValue = RLPTr(@"摘要已复制");
+            RLPDiagEvent(@"action", @"diag_summary", @"settings:diag", @"/api/diag", 200, durMs, @"ok");
         } else {
             self_.diagMsg.stringValue = RLPTr(@"诊断摘要读取失败");
+            RLPDiagEvent(@"error", @"diag_summary", @"settings:diag", @"/api/diag",
+                         json ? 422 : 500, durMs, json ? @"empty_summary" : @"empty_response");
         }
     };
     if (self.diagSummaryTransport) { self.diagSummaryTransport(done); return; }
     [[RLPCoreClient shared] getJSON:@"/api/diag" completion:done];
+}
+
+static NSString *RLPFormatSingleDiagChannel(NSString *label, id _Nullable rawCh, BOOL *outOk) {
+    if (![rawCh isKindOfClass:[NSDictionary class]]) {
+        if (outOk) *outOk = NO;
+        return [NSString stringWithFormat:@"%@：%@", label, RLPTr(@"无结果")];
+    }
+    NSDictionary *ch = (NSDictionary *)rawCh;
+    const BOOL ok = [ch[@"ok"] respondsToSelector:@selector(boolValue)] && [ch[@"ok"] boolValue];
+    const NSInteger http = [ch[@"http"] respondsToSelector:@selector(integerValue)] ? [ch[@"http"] integerValue] : 0;
+    const NSInteger latency = [ch[@"latency"] respondsToSelector:@selector(integerValue)] ? [ch[@"latency"] integerValue] : 0;
+    const BOOL timedOut = [ch[@"timedOut"] respondsToSelector:@selector(boolValue)] && [ch[@"timedOut"] boolValue];
+    NSString *err = [ch[@"error"] isKindOfClass:[NSString class]] ? ch[@"error"] : @"";
+    err = [err stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    if (ok) {
+        if (outOk) *outOk = YES;
+        return [NSString stringWithFormat:@"%@：HTTP %ld %ldms", label, (long)http, (long)latency];
+    }
+    if (outOk) *outOk = NO;
+    if (timedOut) {
+        if (err.length > 0 && ![err isEqualToString:@"timeout"]) {
+            return [NSString stringWithFormat:@"%@：超时（%@，%ldms）", label, err, (long)latency];
+        }
+        return [NSString stringWithFormat:@"%@：超时（%ldms）", label, (long)latency];
+    }
+    if (http > 0) {
+        NSString *httpTag = [NSString stringWithFormat:@"HTTP %ld", (long)http];
+        if (err.length > 0 && ![err isEqualToString:httpTag]) {
+            return [NSString stringWithFormat:@"%@：失败 %@（%@）%ldms", label, httpTag, err, (long)latency];
+        }
+        return [NSString stringWithFormat:@"%@：失败 %@（%ldms）", label, httpTag, (long)latency];
+    }
+    NSString *reason = err.length ? err : RLPTr(@"连接失败");
+    return [NSString stringWithFormat:@"%@：失败（%@）%ldms", label, reason, (long)latency];
+}
+
+- (void)onCheckDiagChannels:(id)sender {
+    (void)sender;
+    if (self.diagChannelsChecking) return;
+    if (!self.diagChannelsTransport && ![RLPCoreClient shared].started) {
+        self.diagChannelsLabel.stringValue = RLPTr(@"核心未启动");
+        self.diagChannelsLabel.textColor = [RLPTheme current].danger;
+        [self.diagGroup contentDidChange];
+        return;
+    }
+    self.diagChannelsChecking = YES;
+    self.diagChannelsBtn.enabled = NO;
+    self.diagChannelsLabel.textColor = [RLPTheme current].mut2;
+    self.diagChannelsLabel.stringValue = RLPTr(@"正在检查更新与反馈通道…");
+    [self.diagGroup contentDidChange];
+
+    __weak __typeof__(self) weakSelf = self;
+    void (^done)(NSDictionary * _Nullable) = ^(NSDictionary * _Nullable json) {
+        dispatch_block_t applyOnMain = ^{
+            __typeof__(self) self_ = weakSelf;
+            if (!self_) return;
+            self_.diagChannelsChecking = NO;
+            self_.diagChannelsBtn.enabled = YES;
+            RLPTheme *t = [RLPTheme current];
+            if (![json isKindOfClass:[NSDictionary class]]) {
+                self_.diagChannelsLabel.stringValue = RLPTr(@"通道检查失败：核心未响应");
+                self_.diagChannelsLabel.textColor = t.danger;
+                [self_.diagGroup contentDidChange];
+                return;
+            }
+            if (json[@"ok"] && ![json[@"ok"] boolValue]) {
+                NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
+                self_.diagChannelsLabel.stringValue = [NSString stringWithFormat:@"%@：%@", RLPTr(@"通道检查失败"), err];
+                self_.diagChannelsLabel.textColor = t.danger;
+                [self_.diagGroup contentDidChange];
+                return;
+            }
+            BOOL updOk = NO;
+            BOOL fbOk = NO;
+            NSString *updStr = RLPFormatSingleDiagChannel(RLPTr(@"更新"), json[@"update"], &updOk);
+            NSString *fbStr = RLPFormatSingleDiagChannel(RLPTr(@"反馈"), json[@"feedback"], &fbOk);
+            self_.diagChannelsLabel.stringValue = [NSString stringWithFormat:@"%@ / %@", updStr, fbStr];
+            self_.diagChannelsLabel.textColor = (updOk && fbOk) ? t.okText : t.danger;
+            [self_.diagGroup contentDidChange];
+        };
+        if ([NSThread isMainThread]) applyOnMain();
+        else dispatch_async(dispatch_get_main_queue(), applyOnMain);
+    };
+
+    if (self.diagChannelsTransport) {
+        self.diagChannelsTransport(done);
+        return;
+    }
+    [[RLPCoreClient shared] getJSON:@"/api/diag/channels" completion:done];
 }
 
 /// web #bNet 同语义：**点击才查询** /api/net，结果写进 sp_netmsg。
@@ -4774,11 +5670,14 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     [self.netGroup contentDidChange];
     if (![RLPCoreClient shared].started) { self.netMsg.stringValue = RLPTr(@"核心未启动"); return; }
     self.netMsg.stringValue = RLPTr(@"读取中…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/net" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (![json isKindOfClass:[NSDictionary class]]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/net", 500, durMs, @"net_info_failed");
             self_.netMsg.stringValue = RLPTr(@"网络信息读取失败，稍后重试");
             return;
         }
@@ -4801,6 +5700,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     const std::string want = s.indexOfSelectedItem == 1 ? "cn" : "global";
     std::string err;
     const bool ok = rta::update::set_update_channel(want, err);
+    NSString *chanStr = [NSString stringWithUTF8String:want.c_str()] ?: @"global";
+    RLPDiagEvent(ok ? @"action" : @"error", @"update_channel_switch", @"settings:diag", nil,
+                 ok ? 200 : 500, -1, ok ? chanStr : @"save_failed");
     if (!ok) {
         [self showStatus:[NSString stringWithFormat:@"%@：%s", RLPTr(@"切换更新通道失败"),
                                                    err.empty() ? "unknown" : err.c_str()]];
@@ -4976,6 +5878,57 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 }
 
+- (void)captureLlmModelStateIfNeeded {
+    NSPopUpButton *pop = self.llmModelPopup;
+    const NSInteger count = pop ? pop.numberOfItems : 0;
+    if (!pop || (self.tab != RLPSTabMeta && count <= 0)) return;
+    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:(NSUInteger)MAX(0, count)];
+    for (NSMenuItem *item in pop.itemArray) {
+        [titles addObject:(item.title ?: @"")];
+    }
+    self.capturedLlmModelTitles = titles;
+    self.capturedLlmModelSelectedIndex = pop.indexOfSelectedItem;
+    self.capturedLlmModelHidden = pop.hidden;
+    self.capturedLlmModelMsg = self.llmModelMsg ? (self.llmModelMsg.stringValue ?: @"") : @"";
+    self.capturedLlmModelMsgIsWarn = self.llmModelMsgIsWarn;
+    self.hasCapturedLlmModelState = YES;
+    if ([RLPCoreClient shared].started) {
+        self.suppressNextLlmAutoLoad = YES;
+    }
+}
+
+- (void)restoreLlmModelStateIfNeeded {
+    if (!self.hasCapturedLlmModelState || !self.llmModelPopup) return;
+    NSArray<NSString *> *titles = self.capturedLlmModelTitles ?: @[];
+    const NSInteger capturedIndex = self.capturedLlmModelSelectedIndex;
+    const BOOL capturedHidden = self.capturedLlmModelHidden;
+    NSString *capturedMsg = self.capturedLlmModelMsg ?: @"";
+    const BOOL capturedWarn = self.capturedLlmModelMsgIsWarn;
+
+    [self.llmModelPopup removeAllItems];
+    for (NSString *title in titles) {
+        [self.llmModelPopup addItemWithTitle:title ?: @""];
+    }
+    const NSInteger count = self.llmModelPopup.numberOfItems;
+    if (count > 0) {
+        NSInteger idx = capturedIndex;
+        if (idx < 0 || idx >= count) idx = count - 1;
+        [self.llmModelPopup selectItemAtIndex:idx];
+    }
+    self.llmModelPopup.hidden = capturedHidden;
+
+    if (self.llmModelMsg) {
+        RLPTheme *t = [RLPTheme current];
+        self.llmModelMsg.stringValue = capturedMsg;
+        self.llmModelMsgIsWarn = capturedWarn;
+        self.llmModelMsg.textColor = capturedWarn ? t.warn : t.mut;
+    }
+
+    self.hasCapturedLlmModelState = NO;
+    self.capturedLlmModelTitles = nil;
+    self.capturedLlmModelMsg = nil;
+}
+
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
@@ -4986,7 +5939,13 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     // 也不能让 paneCache 清空前的那份用户态随页面对象一起消失。已有快照时保持不动
     //（那份可能含 field editor 文本，比现在再读一次更完整）。
     if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
+    [self captureLlmModelStateIfNeeded];
     [self.paneCache removeAllObjects];
+    self.diagGroup = nil;
+    self.srvGroup = nil;
+    self.castGroup = nil;
+    self.serversView = nil;
+    [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];
     if (self.themePopup) {
@@ -5004,8 +5963,13 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
         self.fbSendBtn.layer.backgroundColor = t.accent.CGColor;
         self.fbSendBtn.contentTintColor = NSColor.whiteColor;
     }
-    for (NSButton *b in @[self.diagJsonBtn, self.diagSummaryBtn, self.fbRetryBtn]) {
-        if (!b) continue;
+    // 先收集非 nil 按钮再遍历，避免未打开过 diag 页时 @[nil...] 构造字面量数组直接抛 NSInvalidArgumentException。
+    NSMutableArray<NSButton *> *diagSecondaryBtns = [NSMutableArray array];
+    if (self.diagJsonBtn) [diagSecondaryBtns addObject:self.diagJsonBtn];
+    if (self.diagSummaryBtn) [diagSecondaryBtns addObject:self.diagSummaryBtn];
+    if (self.diagChannelsBtn) [diagSecondaryBtns addObject:self.diagChannelsBtn];
+    if (self.fbRetryBtn) [diagSecondaryBtns addObject:self.fbRetryBtn];
+    for (NSButton *b in diagSecondaryBtns) {
         b.layer.backgroundColor = t.hov.CGColor;
         b.layer.borderColor = t.line.CGColor;
         b.contentTintColor = t.text;
@@ -5044,6 +6008,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     [self.groupTabs setLabel:RLPTr(@"通用") forSegment:0];
     [self.groupTabs setLabel:RLPTr(@"音频处理") forSegment:1];
     self.modeHintLabel.stringValue = RLPTr(@"音频处理主控位于专业模式「数字音乐台」，此处保留完整参数与深链入口");
+    self.modeHintLabel.toolTip = self.modeHintLabel.stringValue;
     self.workbenchBtn.title = RLPTr(@"打开专业工作台");
 
     if (self.eqView) {
@@ -5051,6 +6016,11 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     }
 
     [self.paneCache removeAllObjects];
+    self.diagGroup = nil;
+    self.srvGroup = nil;
+    self.castGroup = nil;
+    self.serversView = nil;
+    [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];
 

@@ -33,7 +33,7 @@ int main() {
     std::printf("-- 1. 曲号 + 艺术家 + 曲名 --\n");
     {
         const TrackIdentity r = resolve_track_identity("", "", "",
-            "/Users/august/Music/01 - Aimer - 六等星の夜.flac");
+            "<user>/Music/01 - Aimer - 六等星の夜.flac");
         ck(r.sufficient, "典型文件名 sufficient=true");
         ck(r.artist == "Aimer", "解析出 artist=Aimer", "artist='" + r.artist + "'");
         ck(r.title == "六等星の夜", "解析出 title=六等星の夜", "title='" + r.title + "'");

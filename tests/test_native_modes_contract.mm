@@ -162,6 +162,14 @@ static NSView *FindById(NSView *root, NSString *ident) {
     return nil;
 }
 
+static NSArray<NSNumber *> *SidebarStationRows(RLPSidebarViewController *sb) {
+    NSMutableArray<NSNumber *> *rows = [NSMutableArray array];
+    for (NSInteger r = 0; r < sb.rowCount; ++r) {
+        if ([[sb keyForRow:r] isEqualToString:@"station"]) [rows addObject:@(r)];
+    }
+    return rows;
+}
+
 static BOOL SidebarHasTitle(RLPSidebarViewController *sb, NSString *title) {
     NSTableView *tv = nil;
     for (NSView *v in sb.view.subviews) {
@@ -348,8 +356,12 @@ int main() {
         Ck(modeCtrl && modeCtrl.selectedSegment == 0 && [wc.uiMode isEqualToString:@"listen"],
            "C1b 默认模式为 listen (segment 0)",
            [NSString stringWithFormat:@"uiMode=%@ seg=%ld", wc.uiMode, (long)modeCtrl.selectedSegment]);
-        Ck(SidebarHasTitle(wc.sidebar, RLPTr(@"聆听室")),
-           "C1c listen 模式下侧栏 station 标签为「聆听室」", @"未找到聆听室");
+        NSArray<NSNumber *> *stationRowsListen = SidebarStationRows(wc.sidebar);
+        Ck(stationRowsListen.count == 1 && [stationRowsListen.firstObject integerValue] == 0 &&
+           SidebarHasTitle(wc.sidebar, RLPTr(@"聆听室")) &&
+           !SidebarHasTitle(wc.sidebar, RLPTr(@"数字音乐台")),
+           "C1c listen 模式下侧栏仅有 1 个 station 入口 (row 0) 且标签为「聆听室」",
+           [NSString stringWithFormat:@"stationRows=%@", stationRowsListen]);
 
         g_spy.holdSettingsGet = YES;
         [wc reloadUiModePreference];
@@ -392,10 +404,16 @@ int main() {
         Ck([wc.uiMode isEqualToString:@"pro"] && modeCtrl.selectedSegment == 1,
            "C2a 切换到 pro 模式并同步顶栏分段",
            [NSString stringWithFormat:@"uiMode=%@ seg=%ld", wc.uiMode, (long)modeCtrl.selectedSegment]);
-        Ck(SidebarHasTitle(wc.sidebar, RLPTr(@"数字音乐台")),
-           "C2b pro 模式下侧栏 station 标签为「数字音乐台」", @"未找到数字音乐台");
-        Ck([wc.sidebar.selectedKey isEqualToString:@"station"],
-           "C2c 切换后侧栏仍选中 station", wc.sidebar.selectedKey ?: @"(nil)");
+        NSArray<NSNumber *> *stationRowsPro = SidebarStationRows(wc.sidebar);
+        Ck(stationRowsPro.count == 1 && [stationRowsPro.firstObject integerValue] == 0 &&
+           SidebarHasTitle(wc.sidebar, RLPTr(@"数字音乐台")) &&
+           !SidebarHasTitle(wc.sidebar, RLPTr(@"聆听室")),
+           "C2b pro 模式下侧栏仅有 1 个 station 入口 (row 0) 且标签为「数字音乐台」",
+           [NSString stringWithFormat:@"stationRows=%@", stationRowsPro]);
+        Ck(wc.sidebar.selectedRow == 0 && [wc.sidebar.selectedKey isEqualToString:@"station"],
+           "C2c 切换后侧栏仍选中 row 0 (station)",
+           [NSString stringWithFormat:@"row=%ld key=%@",
+            (long)wc.sidebar.selectedRow, wc.sidebar.selectedKey ?: @"(nil)"]);
         Ck([wc.currentContent isKindOfClass:[RLPWorkbenchViewController class]] &&
            [wc.currentContent.view.identifier isEqualToString:@"page.station"],
            "C2d pro 模式下 station 原子切换到 RLPWorkbenchViewController (page.station)",
@@ -439,9 +457,17 @@ int main() {
         }
         Pump(0.1);
         CheckStationReturn(firstListen, TraceGeometry(wc, "listen station after mode switch", &beforeReturn));
-        Ck(wc.currentContent == listenHome && [topTitle.stringValue isEqualToString:RLPTr(@"聆听室")],
-           "C2i 切回 listen 模式回到 RLPQuickStartViewController 且标题为「聆听室」",
-           NSStringFromClass(wc.currentContent.class));
+        NSArray<NSNumber *> *stationRowsBack = SidebarStationRows(wc.sidebar);
+        Ck(wc.currentContent == listenHome &&
+           wc.sidebar.selectedRow == 0 &&
+           [wc.sidebar.selectedKey isEqualToString:@"station"] &&
+           stationRowsBack.count == 1 &&
+           SidebarHasTitle(wc.sidebar, RLPTr(@"聆听室")) &&
+           !SidebarHasTitle(wc.sidebar, RLPTr(@"数字音乐台")) &&
+           [topTitle.stringValue isEqualToString:RLPTr(@"聆听室")],
+           "C2i 切回 listen 模式回到 RLPQuickStartViewController，row 0 保持选中且无重复入口",
+           [NSString stringWithFormat:@"vc=%@ row=%ld rows=%@",
+            NSStringFromClass(wc.currentContent.class), (long)wc.sidebar.selectedRow, stationRowsBack]);
 
         [wc.sidebar selectKey:@"albums"];
         const auto albums = TraceGeometry(wc, "albums before sidebar return to listen station");

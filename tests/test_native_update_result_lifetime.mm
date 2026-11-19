@@ -43,6 +43,24 @@
 - (void)onPrimary:(id)sender;
 - (void)onIgnore:(id)sender;
 - (void)onCancel:(id)sender;
+- (void)onRelaunch:(id)sender;
+- (void)onQuit:(id)sender;
+- (BOOL)windowShouldClose:(NSWindow *)sender;
+- (BOOL)installing;
+- (BOOL)cancelling;
+- (BOOL)installStageLocked;
+- (BOOL)installed;
+- (BOOL)autoRestartScheduled;
+- (void)clearTestHooks;
+- (void)resetForTesting;
+- (void)setTestInstallRunner:(void (^)(const rta::update::CheckResult &plan,
+                                       rta::update::ProgressFn progress,
+                                       rta::update::InstallOutcomeFn done,
+                                       rta::update::CancelToken cancel))runner;
+- (void)setTestAlertHandler:(void (^)(NSString *title, NSString *message))handler;
+- (void)setTestConfirmHandler:(BOOL (^)(NSString *title, NSString *message))handler;
+- (void)setTestToastHandler:(void (^)(NSString *message))handler;
+- (void)setTestTerminateHandler:(void (^)(void))handler;
 @end
 
 static int gFail = 0, gPass = 0;
@@ -278,7 +296,272 @@ int main() {
                @"invalidatePlan 立即清除安装计划并禁用更新/忽略按钮", @"");
             [ctrl onPrimary:primaryBtn];
             Ck(cancelBtn.hidden, @"计划失效后调用 onPrimary: 不会启动安装", @"");
+
+            // =========================================================================
+            // 6) 【U1 / U3 / U4 / U5】更新窗口取消语义、稳定重启码、关窗/退出确认回归
+            // =========================================================================
+            __block NSMutableArray<NSString *> *toastLog = [NSMutableArray array];
+            __block NSMutableArray<NSString *> *alertLog = [NSMutableArray array];
+            __block NSMutableArray<NSString *> *confirmMsgs = [NSMutableArray array];
+            __block BOOL confirmNextAnswer = NO;
+            __block NSInteger terminateCount = 0;
+
+            __block rta::update::ProgressFn capturedProgress = nil;
+            __block rta::update::InstallOutcomeFn capturedDone = nil;
+            __block rta::update::CancelToken capturedCancel;
+
+            auto installHooks = ^{
+                [toastLog removeAllObjects];
+                [alertLog removeAllObjects];
+                [confirmMsgs removeAllObjects];
+                terminateCount = 0;
+                [ctrl setTestToastHandler:^(NSString *m) {
+                    if (m) [toastLog addObject:m];
+                }];
+                [ctrl setTestAlertHandler:^(NSString *t, NSString *m) {
+                    [alertLog addObject:[NSString stringWithFormat:@"%@:%@", t ?: @"", m ?: @""]];
+                }];
+                [ctrl setTestConfirmHandler:^BOOL(NSString *t, NSString *m) {
+                    [confirmMsgs addObject:[NSString stringWithFormat:@"%@:%@", t ?: @"", m ?: @""]];
+                    return confirmNextAnswer;
+                }];
+                [ctrl setTestTerminateHandler:^{
+                    ++terminateCount;
+                }];
+                [ctrl setTestInstallRunner:^(const rta::update::CheckResult &plan,
+                                             rta::update::ProgressFn progress,
+                                             rta::update::InstallOutcomeFn done,
+                                             rta::update::CancelToken cancel) {
+                    (void)plan;
+                    capturedProgress = progress;
+                    capturedDone = done;
+                    capturedCancel = cancel;
+                }];
+            };
+
+            auto startInstall = ^(const char *ver) {
+                [ctrl resetForTesting];
+                [ctrl postCheckResult:makeAvail(ver, "notes") manually:NO];
+                Pump(0.15);
+                [ctrl onPrimary:primaryBtn];
+                Pump(0.05);
+            };
+
+            installHooks();
+
+            // --- U1-a: 下载中请求取消 → 后端越界进入 installing → 随后失败：绝不能报「已取消下载」吞掉错误 ---
+            startInstall("9.9.13");
+            Ck([ctrl installing] && !cancelBtn.hidden && cancelBtn.enabled,
+               @"【U1-a】点击立即更新后进入下载态且取消按钮可用", @"");
+            {
+                rta::update::NativeProgress p;
+                p.stage = "downloading"; p.detail = "正在下载 9.9.13"; p.percent = 20;
+                capturedProgress(p);
+            }
+            Pump(0.05);
+            [ctrl onCancel:cancelBtn];
+            Ck([ctrl cancelling] && !cancelBtn.enabled && capturedCancel.cancelled() &&
+               HasLabelText(ctrl.window, @"已请求取消"),
+               @"【U1-a】下载中点取消置 cancelling 并提示已请求取消", @"");
+            {
+                rta::update::NativeProgress p;
+                p.stage = "installing"; p.detail = "正在安装…"; p.percent = 60;
+                capturedProgress(p);
+            }
+            Pump(0.05);
+            Ck([ctrl installStageLocked] && ![ctrl cancelling] && !cancelBtn.enabled &&
+               HasLabelText(ctrl.window, @"安装已开始，无法取消") &&
+               !HasLabelText(ctrl.window, @"已请求取消"),
+               @"【U1-a】进入 installing 阶段后取消失效，文案改为\"安装已开始，无法取消\"", @"");
+            {
+                rta::update::InstallOutcome out;
+                out.ok = false;
+                out.code = rta::update::InstallResultCode::Failed;
+                out.cancelled = false;
+                out.message = "安装后版本校验失败：1.0.5 vs 9.9.13";
+                capturedDone(out);
+            }
+            Pump(0.1);
+            Ck(![ctrl installing] && ![ctrl installed] && alertLog.count == 1 &&
+               [alertLog.firstObject containsString:@"1.0.5 vs 9.9.13"] &&
+               ![toastLog containsObject:@"已取消下载"],
+               @"【U1-a】安装阶段真实失败时必须弹错，绝不因曾点取消而误报已取消下载",
+               [NSString stringWithFormat:@"alerts=%@ toasts=%@", alertLog, toastLog]);
+
+            // --- U1-b: 进入 installing 后再点 onCancel: 不得宣称已取消、不得置 token ---
+            installHooks();
+            startInstall("9.9.14");
+            {
+                rta::update::NativeProgress p;
+                p.stage = "installing"; p.detail = "正在安装…"; p.percent = 60;
+                capturedProgress(p);
+            }
+            Pump(0.05);
+            Ck([ctrl installStageLocked] && !cancelBtn.enabled,
+               @"【U1-b】installing 开始即禁用取消按钮", @"");
+            [ctrl onCancel:cancelBtn];
+            Ck(!capturedCancel.cancelled() && ![ctrl cancelling] &&
+               HasLabelText(ctrl.window, @"安装已开始，无法取消"),
+               @"【U1-b】安装阶段触发 onCancel: 不置 cancel token 也不宣称已请求取消", @"");
+            {
+                rta::update::InstallOutcome out;
+                out.ok = false;
+                out.code = rta::update::InstallResultCode::Failed;
+                out.cancelled = false;
+                out.message = "ditto 复制失败";
+                capturedDone(out);
+            }
+            Pump(0.1);
+            Ck(alertLog.count == 1 && [alertLog.firstObject containsString:@"ditto"] &&
+               ![toastLog containsObject:@"已取消下载"],
+               @"【U1-b】安装阶段后续失败按真实失败弹窗", @"");
+
+            // --- U1-c: 下载阶段取消且后端明确返回 Cancelled ⟹ 报已取消下载且未安装 ---
+            installHooks();
+            startInstall("9.9.15");
+            [ctrl onCancel:cancelBtn];
+            {
+                rta::update::InstallOutcome out;
+                out.ok = false;
+                out.code = rta::update::InstallResultCode::Cancelled;
+                out.cancelled = true;
+                out.message = "更新已取消（未做任何改动）";
+                capturedDone(out);
+            }
+            Pump(0.1);
+            Ck(![ctrl installed] && alertLog.count == 0 &&
+               [toastLog containsObject:@"已取消下载"],
+               @"【U1-c】只有后端明确返回 Cancelled 才走已取消提示且不弹失败框", @"");
+
+            // --- U1-d: 下载阶段点过取消但后端返回校验/网络真实失败 ⟹ 同样不吞错 ---
+            installHooks();
+            startInstall("9.9.16");
+            [ctrl onCancel:cancelBtn];
+            {
+                rta::update::InstallOutcome out;
+                out.ok = false;
+                out.code = rta::update::InstallResultCode::Failed;
+                out.cancelled = false;
+                out.message = "校验失败，已丢弃：sha256 不匹配";
+                capturedDone(out);
+            }
+            Pump(0.1);
+            Ck(![ctrl installed] && alertLog.count == 1 &&
+               [alertLog.firstObject containsString:@"校验失败"] &&
+               ![toastLog containsObject:@"已取消下载"],
+               @"【U1-d】即使在下载阶段点过取消，后端回报 Failed 仍如实弹错", @"");
+
+            // --- U3-a: 稳定重启码 InstalledAutoRestart（英文/本地化文案不含中文\"正在自动重启\"）---
+            installHooks();
+            startInstall("9.9.17");
+            {
+                rta::update::InstallOutcome out;
+                out.ok = true;
+                out.code = rta::update::InstallResultCode::InstalledAutoRestart;
+                out.autoRestartScheduled = true;
+                out.message = "Updated and restarting automatically"; // ← 无中文子串
+                capturedDone(out);
+            }
+            Pump(0.1);
+            Ck([ctrl installed] && [ctrl autoRestartScheduled] &&
+               [primaryBtn.title isEqualToString:@"重启"] &&
+               primaryBtn.action == @selector(onRelaunch:),
+               @"【U3-a】稳定码 InstalledAutoRestart 不依赖中文文案即可识别自动重启",
+               [NSString stringWithFormat:@"auto=%d title=%@", [ctrl autoRestartScheduled], primaryBtn.title]);
+            [ctrl onRelaunch:primaryBtn];
+            Ck(terminateCount == 1 && alertLog.count == 0,
+               @"【U3-a】onRelaunch: 在 autoRestartScheduled=YES 时直接退出以完成重启", @"");
+
+            // --- U3-b: 对照反证 — InstalledManualRestart 哪怕文案里混入\"正在自动重启\"也不许误判 ---
+            installHooks();
+            startInstall("9.9.18");
+            {
+                rta::update::InstallOutcome out;
+                out.ok = true;
+                out.code = rta::update::InstallResultCode::InstalledManualRestart;
+                out.autoRestartScheduled = false;
+                out.message = "正在自动重启脚本失败，请手动重启"; // ← 故意包含中文子串
+                capturedDone(out);
+            }
+            Pump(0.1);
+            Ck([ctrl installed] && ![ctrl autoRestartScheduled] &&
+               [primaryBtn.title isEqualToString:@"退出 RLPlayer"] &&
+               primaryBtn.action == @selector(onQuit:),
+               @"【U3-b】反证：稳定码 InstalledManualRestart 压倒文案子串，正确切到手动退出",
+               [NSString stringWithFormat:@"auto=%d title=%@", [ctrl autoRestartScheduled], primaryBtn.title]);
+            [ctrl onRelaunch:nil];
+            Ck(terminateCount == 0 && alertLog.count == 1,
+               @"【U3-b】手调 onRelaunch: 时不静默退出而提示手动重启", @"");
+
+            // --- U4-a/b: 安装中 onQuit: 先确认，拒绝继续安装，确认才终止且不伪装成功 ---
+            installHooks();
+            startInstall("9.9.19");
+            confirmNextAnswer = NO;
+            [ctrl onQuit:nil];
+            Ck(confirmMsgs.count == 1 &&
+               [confirmMsgs.firstObject containsString:@"正在安装"] &&
+               [confirmMsgs.firstObject containsString:@"退出可能留下未完成更新"] &&
+               terminateCount == 0 && [ctrl installing] && ![ctrl installed],
+               @"【U4-a】安装中 onQuit: 先弹出风险提示，用户取消则不退出且保持安装中",
+               [NSString stringWithFormat:@"confirms=%@ term=%ld", confirmMsgs, (long)terminateCount]);
+
+            confirmNextAnswer = YES;
+            [ctrl onQuit:nil];
+            Ck(confirmMsgs.count == 2 && terminateCount == 1 &&
+               ![ctrl installing] && ![ctrl installed],
+               @"【U4-b】安装中 onQuit: 用户确认后才终止，且绝不伪装成已安装",
+               [NSString stringWithFormat:@"term=%ld installed=%d", (long)terminateCount, [ctrl installed]]);
+
+            // --- U4-c/d/e: 窗口关闭代理 windowShouldClose: 安装中先确认；拒绝不关不取消；确认不伪装成功 ---
+            installHooks();
+            startInstall("9.9.20");
+            {
+                rta::update::NativeProgress p;
+                p.stage = "installing"; p.detail = "正在安装…"; p.percent = 65;
+                capturedProgress(p);
+            }
+            Pump(0.05);
+            confirmNextAnswer = NO;
+            const BOOL shouldCloseDenied = [ctrl windowShouldClose:ctrl.window];
+            Ck(!shouldCloseDenied && confirmMsgs.count == 1 &&
+               [confirmMsgs.firstObject containsString:@"正在安装"] &&
+               [ctrl installing] && ![ctrl cancelling] && !capturedCancel.cancelled() && ![ctrl installed],
+               @"【U4-c】安装中点关窗用户拒绝 ⟹ windowShouldClose=NO、不静默取消、不终止", @"");
+
+            confirmNextAnswer = YES;
+            const BOOL shouldCloseInstallConfirmed = [ctrl windowShouldClose:ctrl.window];
+            Ck(shouldCloseInstallConfirmed && confirmMsgs.count == 2 &&
+               ![ctrl installed] && ![ctrl cancelling] && !capturedCancel.cancelled() &&
+               ![toastLog containsObject:@"已取消下载"],
+               @"【U4-d】installing 阶段确认关窗 ⟹ 允许关闭但不触发假取消也不伪装成功", @"");
+
+            // 下载阶段确认关窗：停止下载 token，但不伪装成 installed=YES
+            installHooks();
+            startInstall("9.9.21");
+            confirmNextAnswer = YES;
+            const BOOL shouldCloseDlConfirmed = [ctrl windowShouldClose:ctrl.window];
+            Ck(shouldCloseDlConfirmed && confirmMsgs.count == 1 &&
+               capturedCancel.cancelled() && ![ctrl installed],
+               @"【U4-e】下载阶段确认关窗 ⟹ 取消下载令牌且绝不伪装为成功", @"");
+
+            // --- U4-f: 已安装完成后（非安装中）onQuit: 直接退出，不再弹正在安装确认 ---
+            installHooks();
+            startInstall("9.9.22");
+            {
+                rta::update::InstallOutcome out;
+                out.ok = true;
+                out.code = rta::update::InstallResultCode::InstalledManualRestart;
+                out.autoRestartScheduled = false;
+                out.message = "done";
+                capturedDone(out);
+            }
+            Pump(0.1);
+            [ctrl onQuit:nil];
+            Ck(confirmMsgs.count == 0 && terminateCount == 1,
+               @"【U4-f】安装完成（非安装中）onQuit: 无需提示直接退出", @"");
         } @finally {
+            [ctrl clearTestHooks];
+            [ctrl resetForTesting];
             if (prevIgnored) [ud setObject:prevIgnored forKey:kIgnoredKey];
             else [ud removeObjectForKey:kIgnoredKey];
             [ctrl invalidatePlan];

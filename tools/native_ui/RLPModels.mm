@@ -167,7 +167,11 @@ NSArray<NSString *> *RLPSplitArtistNames(NSString *raw) {
     RLPPlaybackStatus *s = [[RLPPlaybackStatus alloc] init];
     s.playing = Bool(json, @"playing");
     s.paused = Bool(json, @"paused");
-    s.currentPath = Str(json, @"current");
+    NSString *cur = Str(json, @"current");
+    if (!cur.length) cur = Str(json, @"currentPath");
+    if (!cur.length) cur = Str(json, @"path");
+    if (!cur.length) cur = Str(json, @"file");
+    s.currentPath = cur;
     s.position = Num(json, @"pos");
     s.duration = Num(json, @"dur");
     s.volumeDb = VolumeDb(json);

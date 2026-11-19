@@ -19,6 +19,16 @@
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 
+@interface RLPKnowledgeView (NPDetails)
+- (void)renderMetaFixture:(NSDictionary *)fixture;
+- (void)loadDrawerContext:(NSDictionary *)context;
+- (void)updateDrawerContext:(NSDictionary *)context;
+- (void)setCloseHandler:(void (^)(void))handler;
+- (void)setSelectKindHandler:(void (^)(NSString *kind))handler;
+- (void)setRefreshKindHandler:(void (^)(NSString *kind))handler;
+- (CGFloat)renderedContentHeight;
+@end
+
 /// 分析一行：空标题的无边框按钮 intrinsic 宽为 0，离屏渲染时约束不重算，
 /// 所以每次 layout 后按文本 sizeToFit 重放宽度（保证任何渲染路径都画得出来）。
 @interface RLPAnlRowView : NSView
@@ -99,6 +109,41 @@
 - (BOOL)acceptsFirstResponder { return YES; }
 - (void)keyDown:(NSEvent *)event { if(event.keyCode==53)[self.owner onClosePlayback:nil];else [super keyDown:event]; }
 - (NSMenu *)menuForEvent:(NSEvent *)event { return [self.owner playbackContextMenu]; }
+- (void)setFrameSize:(NSSize)newSize {
+    const NSSize oldSize = self.bounds.size;
+    [super setFrameSize:newSize];
+    const NSSize curSize = self.bounds.size;
+    if (fabs(oldSize.width - curSize.width) > 0.5 || fabs(oldSize.height - curSize.height) > 0.5) {
+        self.needsLayout = YES;
+        if (!self.autoresizesSubviews && curSize.width > 0.0 && curSize.height > 0.0) {
+            [self.owner layoutWebPlayback];
+        }
+    }
+}
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    if (self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+        [self.owner layoutWebPlayback];
+    }
+}
+- (void)viewDidMoveToSuperview {
+    [super viewDidMoveToSuperview];
+    if (self.superview) {
+        self.needsLayout = YES;
+        if (self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+            [self.owner layoutWebPlayback];
+        }
+    }
+}
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (self.window) {
+        self.needsLayout = YES;
+        if (self.bounds.size.width > 0.0 && self.bounds.size.height > 0.0) {
+            [self.owner layoutWebPlayback];
+        }
+    }
+}
 - (void)layout { [super layout]; [self.owner layoutWebPlayback]; }
 - (void)drawRect:(NSRect)dirty {
     RLPTheme *t=[RLPTheme current]; [t.bg setFill]; NSRectFill(self.bounds);
@@ -215,6 +260,115 @@
     if (self.hoverApplier) self.hoverApplier(self, hovered);
     self.needsDisplay = YES;
 }
+@end
+
+/// `.chip` / 封面悬浮胶囊共用 cell：图标与文字严格按同一垂直中心线（NSMidY）居中，
+/// 不受 AppKit NSBezelStyleSmallSquare 与 SF Symbol 基线偏置导致的错位影响。
+@interface RLPMetaChipCell : NSButtonCell
+@end
+
+@implementation RLPMetaChipCell
+
+- (NSAttributedString *)effectiveAttributedTitle {
+    if (self.attributedTitle.length > 0) return self.attributedTitle;
+    NSString *text = self.title ?: @"";
+    if (!text.length) return [[NSAttributedString alloc] initWithString:@""];
+    NSFont *font = self.font ?: [NSFont systemFontOfSize:11.0];
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    return [[NSAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: [RLPTheme current].text2,
+        NSParagraphStyleAttributeName: ps
+    }];
+}
+
+- (void)computeImageRect:(NSRect *)outImgRect titleRect:(NSRect *)outTitleRect forBounds:(NSRect)bounds {
+    NSAttributedString *attr = [self effectiveAttributedTitle];
+    NSImage *img = self.image;
+    const BOOL hasImg = (img != nil && self.imagePosition != NSNoImage);
+    const BOOL hasText = (attr.length > 0);
+
+    CGFloat iconW = 0.0, iconH = 0.0;
+    if (hasImg) {
+        NSSize isz = img.size;
+        if (isz.width <= 0.0 || isz.height <= 0.0) isz = NSMakeSize(11.0, 11.0);
+        const CGFloat maxSide = MIN(11.5, MAX(8.0, NSHeight(bounds) - 8.0));
+        const CGFloat scale = MIN(maxSide / isz.width, maxSide / isz.height);
+        iconW = MAX(1.0, isz.width * scale);
+        iconH = MAX(1.0, isz.height * scale);
+    }
+
+    const CGFloat sidePad = 8.0;
+    const CGFloat gap = (hasImg && hasText) ? 4.5 : 0.0;
+    const CGFloat availTextW = MAX(8.0, NSWidth(bounds) - sidePad * 2.0 - iconW - gap);
+
+    CGFloat textW = 0.0, textH = 0.0;
+    if (hasText) {
+        const NSRect rawR = [attr boundingRectWithSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)
+                                               options:(NSStringDrawingUsesLineFragmentOrigin |
+                                                        NSStringDrawingTruncatesLastVisibleLine)
+                                               context:nil];
+        textW = MIN(ceil(rawR.size.width), availTextW);
+        textH = ceil(rawR.size.height);
+    }
+
+    const CGFloat contentW = iconW + gap + textW;
+    const CGFloat startX = MAX(sidePad, floor((NSWidth(bounds) - contentW) * 0.5));
+    const CGFloat midY = NSMidY(bounds);
+
+    if (outImgRect) {
+        *outImgRect = hasImg
+            ? NSMakeRect(startX, midY - iconH * 0.5, iconW, iconH)
+            : NSZeroRect;
+    }
+    if (outTitleRect) {
+        const CGFloat tx = hasImg ? (startX + iconW + gap) : startX;
+        *outTitleRect = hasText
+            ? NSMakeRect(tx, midY - textH * 0.5, textW, textH)
+            : NSZeroRect;
+    }
+}
+
+- (NSRect)imageRectForBounds:(NSRect)rect {
+    NSRect ir = NSZeroRect;
+    [self computeImageRect:&ir titleRect:NULL forBounds:rect];
+    return ir;
+}
+
+- (NSRect)titleRectForBounds:(NSRect)rect {
+    NSRect tr = NSZeroRect;
+    [self computeImageRect:NULL titleRect:&tr forBounds:rect];
+    return tr;
+}
+
+- (void)drawInteriorWithFrame:(NSRect)cellFrame inView:(NSView *)controlView {
+    NSRect ir = NSZeroRect, tr = NSZeroRect;
+    [self computeImageRect:&ir titleRect:&tr forBounds:cellFrame];
+    [NSGraphicsContext saveGraphicsState];
+    if (!self.isEnabled) {
+        CGContextSetAlpha(NSGraphicsContext.currentContext.CGContext, 0.45);
+    }
+    if (self.image && !NSIsEmptyRect(ir)) {
+        [self drawImage:self.image withFrame:ir inView:controlView];
+    }
+    NSAttributedString *attr = [self effectiveAttributedTitle];
+    if (attr.length > 0 && !NSIsEmptyRect(tr)) {
+        [attr drawWithRect:tr
+                   options:(NSStringDrawingUsesLineFragmentOrigin |
+                            NSStringDrawingTruncatesLastVisibleLine)
+                   context:nil];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
+@end
+
+@interface RLPMetaChipButton : RLPHoverButton
+@end
+
+@implementation RLPMetaChipButton
++ (Class)cellClass { return [RLPMetaChipCell class]; }
 @end
 
 /// `.k` 键（32×32 / radius 9；play 是 `.k.big` 34×34 圆）：图标 + 圆角，圆角由 web 值给。
@@ -1275,10 +1429,13 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     NSTextField *_statusLabel;
     NSTextField *_p1Label;
     NSTextField *_p2Label;
+    NSView *_detailDivider;
+    NSMutableArray<NSDictionary<NSString *, NSTextField *> *> *_detailRowViews;
+    NSArray<NSDictionary<NSString *, NSString *> *> *_detailItems;
 }
 @property (nonatomic, assign) NSInteger chipIndex;
 /// 详细档：p1 最多 5 行、p2 最多 2 行（web `.npchipwrap[data-detail=1]` 的 line-clamp），
-/// 简介不再按 40 字截断；高度由文本实测撑开。默认（简略）保持既有的单行几何。
+/// 并追加全部结构化字段行（不截断、不补 …）；高度由文本实测撑开。默认（简略）保持既有的单行几何。
 @property (nonatomic, assign) BOOL detailMode;
 @property (nonatomic, copy, nullable) void (^onTap)(RLPRailChipView *chip);
 /// web `.npchip:hover`：底 rgba(255,255,255,.09)/浅色 rgba(15,23,42,.06)、
@@ -1287,6 +1444,9 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
 - (void)setHovered:(BOOL)hovered;
 - (void)setNameText:(NSString *)name status:(NSString *)status
                   p1:(NSString *)p1 p2:(NSString *)p2;
+- (void)setNameText:(NSString *)name status:(NSString *)status
+                  p1:(NSString *)p1 p2:(NSString *)p2
+         detailItems:(nullable NSArray<NSDictionary<NSString *, NSString *> *> *)detailItems;
 - (CGFloat)preferredHeight;
 /// 详细档要按真实卡宽量文本；layout 里先知道宽度再定卡片高度。
 - (CGFloat)preferredHeightForWidth:(CGFloat)width;
@@ -1338,17 +1498,74 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
     _statusLabel.alignment = NSTextAlignmentRight;
     _p1Label = [self labelWithFont:[NSFont systemFontOfSize:11.5] color:t.text2 ident:@"npChip.p1"];
     _p2Label = [self labelWithFont:[NSFont systemFontOfSize:10.5] color:t.mut2 ident:@"npChip.p2"];
+    _detailDivider = [[NSView alloc] initWithFrame:NSZeroRect];
+    _detailDivider.identifier = @"npChipKV.line";
+    _detailDivider.wantsLayer = YES;
+    _detailDivider.hidden = YES;
+    _detailRowViews = [NSMutableArray array];
+    _detailItems = @[];
     [self applyTheme];
     return self;
 }
 
 - (BOOL)isFlipped { return NO; }
 
+- (void)rebuildDetailRowViews {
+    for (NSDictionary<NSString *, NSTextField *> *row in _detailRowViews) {
+        [row[@"k"] removeFromSuperview];
+        [row[@"v"] removeFromSuperview];
+    }
+    [_detailRowViews removeAllObjects];
+    if (_detailDivider.superview == self) [_detailDivider removeFromSuperview];
+    _detailDivider.hidden = YES;
+    if (!_detailMode || !_detailItems.count) return;
+    RLPTheme *t = [RLPTheme current];
+    _detailDivider.layer.backgroundColor = t.line.CGColor;
+    _detailDivider.hidden = NO;
+    [self addSubview:_detailDivider];
+    for (NSDictionary<NSString *, NSString *> *item in _detailItems) {
+        NSString *ks = item[@"k"] ?: @"";
+        NSString *vs = item[@"v"] ?: @"";
+        if (!ks.length || !vs.length) continue;
+        // 标识符不用 npChip.*，避免影响 AllRailChips 收集顶层芯片。
+        NSTextField *kf = [NSTextField labelWithString:ks];
+        kf.font = [NSFont systemFontOfSize:10.0 weight:NSFontWeightMedium];
+        kf.textColor = t.mut;
+        kf.identifier = @"npChipKV.key";
+        kf.alignment = NSTextAlignmentLeft;
+        kf.lineBreakMode = NSLineBreakByWordWrapping;
+        kf.usesSingleLineMode = NO;
+        kf.maximumNumberOfLines = 0;
+        kf.translatesAutoresizingMaskIntoConstraints = YES;
+        [self addSubview:kf];
+
+        NSTextField *vf = [NSTextField labelWithString:vs];
+        vf.font = [NSFont systemFontOfSize:10.5];
+        vf.textColor = t.text2;
+        vf.identifier = @"npChipKV.val";
+        vf.alignment = NSTextAlignmentLeft;
+        vf.lineBreakMode = NSLineBreakByWordWrapping;
+        vf.usesSingleLineMode = NO;
+        vf.maximumNumberOfLines = 0;
+        vf.translatesAutoresizingMaskIntoConstraints = YES;
+        [self addSubview:vf];
+
+        [_detailRowViews addObject:@{ @"k": kf, @"v": vf }];
+    }
+}
+
 - (void)setNameText:(NSString *)name status:(NSString *)status p1:(NSString *)p1 p2:(NSString *)p2 {
+    [self setNameText:name status:status p1:p1 p2:p2 detailItems:nil];
+}
+
+- (void)setNameText:(NSString *)name status:(NSString *)status
+                 p1:(NSString *)p1 p2:(NSString *)p2
+        detailItems:(nullable NSArray<NSDictionary<NSString *, NSString *> *> *)detailItems {
     _nameLabel.stringValue = name ?: @"";
     _statusLabel.stringValue = status ?: @"";
     _p1Label.stringValue = p1 ?: @"";
     _p2Label.stringValue = p2 ?: @"";
+    _detailItems = [detailItems isKindOfClass:[NSArray class]] ? [detailItems copy] : @[];
     // 空 p2 = web 不渲染 `<span class=npchip-p2>`，卡片高度也不留那 15px 空行。
     // 从视图树里摘掉而不是只 hidden：离屏几何判据按 identifier 找子视图，
     // hidden 的 p2 会让它继续按「有第二行」量（旧的单行卡就靠这一点区分）。
@@ -1359,6 +1576,7 @@ static const CGFloat kRailP2H        = 15.0;   // 10.5 × 1.45 ≈ 15.2
         if (_p2Label.superview == self) [_p2Label removeFromSuperview];
         _p2Label.hidden = YES;
     }
+    [self rebuildDetailRowViews];
     [self relayout];
 }
 
@@ -1378,7 +1596,23 @@ static const CGFloat kRailDetailLineHeight = 1.35;
                                options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                             attributes:attrs];
     const CGFloat h = ceil(r.size.height);
+    if (cap <= 0) return MAX(lh, h);
     return MAX(lh, MIN(h, lh * (CGFloat)cap));
+}
+
+- (CGFloat)detailRowsHeightForWidth:(CGFloat)contentW {
+    if (!_detailMode || !_detailRowViews.count || contentW < 20.0) return 0.0;
+    const CGFloat keyW = MIN(68.0, MAX(44.0, contentW * 0.34));
+    const CGFloat valW = MAX(20.0, contentW - keyW - 6.0);
+    CGFloat total = 6.0 + 1.0 + 5.0; // 上间隔 + 1pt 分隔线 + 下间隔
+    for (NSUInteger i = 0; i < _detailRowViews.count; ++i) {
+        NSDictionary<NSString *, NSTextField *> *row = _detailRowViews[i];
+        const CGFloat kh = [self measuredTextHeight:row[@"k"] cap:0 width:keyW];
+        const CGFloat vh = [self measuredTextHeight:row[@"v"] cap:0 width:valW];
+        total += MAX(kh, vh);
+        if (i + 1 < _detailRowViews.count) total += 4.0;
+    }
+    return total;
 }
 
 - (CGFloat)preferredHeight { return [self preferredHeightForWidth:self.bounds.size.width]; }
@@ -1392,6 +1626,7 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     }
     CGFloat h = kRailChipPadTop + kRailRow1H + kRailRowGap + p1H;
     if (_p2Label.stringValue.length) h += kRailRowGap + p2H;
+    h += [self detailRowsHeightForWidth:contentW];
     return h + kRailChipPadBottom;
 }
 
@@ -1418,9 +1653,30 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     _statusLabel.frame = NSMakeRect(statusX, row1Y, statusW, kRailRow1H);
     const CGFloat p1Y = row1Y - kRailRowGap - p1H;
     _p1Label.frame = NSMakeRect(kRailChipPadX, p1Y, contentW, p1H);
+    CGFloat bottomAnchorY = p1Y;
     if (_p2Label.superview == self) {
         const CGFloat p2Y = p1Y - kRailRowGap - p2H;
         _p2Label.frame = NSMakeRect(kRailChipPadX, p2Y, contentW, p2H);
+        bottomAnchorY = p2Y;
+    }
+    if (_detailMode && _detailRowViews.count > 0) {
+        CGFloat cy = bottomAnchorY - 6.0 - 1.0;
+        _detailDivider.frame = NSMakeRect(kRailChipPadX, cy, contentW, 1.0);
+        cy -= 5.0;
+        const CGFloat keyW = MIN(68.0, MAX(44.0, contentW * 0.34));
+        const CGFloat valW = MAX(20.0, contentW - keyW - 6.0);
+        for (NSUInteger i = 0; i < _detailRowViews.count; ++i) {
+            NSDictionary<NSString *, NSTextField *> *row = _detailRowViews[i];
+            NSTextField *kf = row[@"k"];
+            NSTextField *vf = row[@"v"];
+            const CGFloat kh = [self measuredTextHeight:kf cap:0 width:keyW];
+            const CGFloat vh = [self measuredTextHeight:vf cap:0 width:valW];
+            const CGFloat rh = MAX(kh, vh);
+            cy -= rh;
+            kf.frame = NSMakeRect(kRailChipPadX, cy + (rh - kh), keyW, kh);
+            vf.frame = NSMakeRect(kRailChipPadX + keyW + 6.0, cy + (rh - vh), valW, vh);
+            if (i + 1 < _detailRowViews.count) cy -= 4.0;
+        }
     }
 }
 
@@ -1436,6 +1692,7 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     _p2Label.usesSingleLineMode = !detail;
     _p1Label.lineBreakMode = detail ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
     _p2Label.lineBreakMode = detail ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+    [self rebuildDetailRowViews];
     [self relayout];
 }
 
@@ -1458,6 +1715,11 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     _statusLabel.textColor = t.mut2;
     _p1Label.textColor = t.text2;
     _p2Label.textColor = t.mut2;
+    _detailDivider.layer.backgroundColor = t.line.CGColor;
+    for (NSDictionary<NSString *, NSTextField *> *row in _detailRowViews) {
+        row[@"k"].textColor = t.mut;
+        row[@"v"].textColor = t.text2;
+    }
     [self relayout];
 }
 
@@ -1703,6 +1965,46 @@ static NSString *RLPRailPick(NSDictionary *fields, NSArray<NSString *> *keys, NS
     return [out componentsJoinedByString:@" · "];
 }
 
+/// 详细档专用：不按 24 字截断、不补 …。
+static NSString *RLPRailPickFull(NSDictionary *fields, NSArray<NSString *> *keys) {
+    if (![fields isKindOfClass:[NSDictionary class]] || !keys.count) return @"";
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *k in keys) {
+        NSString *v = RLPRailCollapse(fields[k]);
+        if (v.length) [out addObject:[NSString stringWithFormat:@"%@ %@", RLPTr(k), v]];
+    }
+    return [out componentsJoinedByString:@" · "];
+}
+
+static void RLPRailAddDetail(NSMutableArray<NSDictionary<NSString *, NSString *> *> *items,
+                             NSMutableSet<NSString *> *seen,
+                             NSString *label,
+                             id rawVal) {
+    NSString *k = [label isKindOfClass:[NSString class]] ? label : @"";
+    NSString *v = RLPRailCollapse(rawVal);
+    if (!k.length || !v.length) return;
+    NSString *sig = [NSString stringWithFormat:@"%@|%@", k, v];
+    if ([seen containsObject:sig]) return;
+    [seen addObject:sig];
+    [items addObject:@{ @"k": k, @"v": v }];
+}
+
+static NSString *RLPRailFmtTime(id raw) {
+    if (!raw || [raw isKindOfClass:[NSNull class]]) return @"";
+    if ([raw isKindOfClass:[NSString class]]) return RLPRailCollapse(raw);
+    if ([raw respondsToSelector:@selector(doubleValue)]) {
+        double ts = [raw doubleValue];
+        if (ts > 1e12) ts /= 1000.0;
+        if (ts > 1e8) {
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"yyyy-MM-dd HH:mm";
+            return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
+        }
+        if (ts > 0) return [(NSNumber *)raw stringValue];
+    }
+    return @"";
+}
+
 /// web `String(x || '')` 的只取字符串版：非字符串一律当空（元数据字段类型不信任）。
 static NSString *RLPRailStr(id v) {
     return [v isKindOfClass:[NSString class]] ? (NSString *)v : @"";
@@ -1755,11 +2057,11 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,assign) NSUInteger lyricAiSeq;
 @property(nonatomic,strong,nullable) NSMenu *lyricAiMenu;
 @property(nonatomic,strong) NSTextField *kindLabel;
-@property(nonatomic,strong) NSTextField *analysisStatus;
-/// web #npAnalHide / #npRailHide：面板头部右上的 22px 圆形收起键（与顶栏开关同源状态）。
-@property(nonatomic,strong) NSButton *anlHide;
+@property(nonatomic,strong,nullable) NSTextField *analysisStatus;
+/// web #npRailHide：面板头部右上的 22px 圆形收起键（与顶栏开关同源状态）。
+@property(nonatomic,strong,nullable) NSButton *anlHide;
 @property(nonatomic,strong) NSButton *railHide;
-@property(nonatomic,strong) NSTextField *anlLab;       // web .anllab（独立 9.5/700/kern1.5）
+@property(nonatomic,strong,nullable) NSTextField *anlLab;
 @property(nonatomic,strong) NSView *anlSeg;            // web .npseg（一个外框 + 发丝分隔）
 @property(nonatomic,strong) NSView *anlSep1, *anlSep2;
 @property(nonatomic,strong) RLPNPAnalBody *anlBody;    // web #npAnlBody（卡片区）
@@ -1795,6 +2097,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,strong) RLPOverlayBackdrop *dataBackdrop;
 @property(nonatomic,strong) NSView *dataDrawer;
 @property(nonatomic) BOOL dataDrawerOpen;
+@property(nonatomic,copy,nullable) NSString *activeDrawerKind;
 // ---- AI 整理栏（web NP_DATA / SUMC / NPLIB 的原生落点）----
 // railStates[kind] = {state:idle|loading|ok|error|insufficient, data:摘要JSON, fp:实体指纹}
 @property(nonatomic,strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *railStates;
@@ -1870,6 +2173,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, copy, nullable) NSString *anlPendingPath; // 等待 cancel 落地后再发的新分析路径
 @property (nonatomic, assign) BOOL anlPendingForce;
 @property (nonatomic, assign) NSUInteger anlPendingSeq;
+@property (nonatomic, assign) BOOL anlDisappeared;           // 已离开单曲页：晚到异步设置不得再自动分析
+@property (nonatomic, copy, nullable) NSString *anlPendingTickPath;
+@property (nonatomic, assign) BOOL anlPendingTickPlaying;
+@property (nonatomic, assign) BOOL anlPendingTickPaused;
 @property (nonatomic, strong) NSLayoutConstraint *anlDetailHeight;
 /// 封面请求序号：快速切歌时用它丢弃过期回调（慢请求回来不能盖掉新封面）。
 @property (nonatomic, assign) NSUInteger coverSeq;
@@ -1884,6 +2191,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSTextView *compareOut;
 @property (nonatomic, strong) NSMutableArray<NSString *> *comparePaths;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *compareChecks;
+@property (nonatomic, assign) BOOL layingOutWebPlayback;
 @end
 
 @implementation RLPNowPlayingViewController
@@ -1910,6 +2218,15 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     RLPHoverButton *b=[[RLPHoverButton alloc] initWithFrame:NSZeroRect];
     b.title=RLPTr(title); b.target=self; b.action=action;
     b.identifier=ident; b.font=[NSFont systemFontOfSize:10.5]; b.bezelStyle=NSBezelStyleRounded;
+    b.keyEquivalent=@""; b.refusesFirstResponder=YES;
+    [parent addSubview:b]; return b;
+}
+
+- (RLPHoverButton *)chipButton:(NSString *)title identifier:(NSString *)ident action:(SEL)action parent:(NSView *)parent {
+    RLPMetaChipButton *b=[[RLPMetaChipButton alloc] initWithFrame:NSZeroRect];
+    b.title=RLPTr(title); b.target=self; b.action=action;
+    b.identifier=ident; b.font=[NSFont systemFontOfSize:11]; b.bordered=NO;
+    b.bezelStyle=NSBezelStyleSmallSquare;
     [parent addSubview:b]; return b;
 }
 
@@ -1923,11 +2240,16 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     if (hovered) {
         RLPTheme *t = [RLPTheme current];
         NSString *text = button.title.length ? button.title : (button.attributedTitle.string ?: @"");
+        NSFontWeight weight = (button == self.castButton && self.castRunningState) ? NSFontWeightSemibold : NSFontWeightRegular;
+        NSFont *font = [NSFont systemFontOfSize:11 weight:weight];
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.lineBreakMode = NSLineBreakByTruncatingTail;
         button.title = text;
         button.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
-            NSFontAttributeName: [NSFont systemFontOfSize:11],
-            NSForegroundColorAttributeName: t.text}];
-        button.font = [NSFont systemFontOfSize:11];
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: t.text,
+            NSParagraphStyleAttributeName: ps}];
+        button.font = font;
         button.layer.backgroundColor = t.hov.CGColor;
         button.layer.borderColor = t.accent.CGColor;
         button.contentTintColor = t.text;
@@ -1959,10 +2281,13 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     RLPTheme *t=[RLPTheme current];
     NSString *text=b.title.length?b.title:b.attributedTitle.string;
     if (!text) text=@"";
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
     b.title=text;
     b.attributedTitle=[[NSAttributedString alloc] initWithString:text attributes:@{
         NSFontAttributeName:[NSFont systemFontOfSize:11],
-        NSForegroundColorAttributeName:t.text2}];
+        NSForegroundColorAttributeName:t.text2,
+        NSParagraphStyleAttributeName:ps}];
     b.font=[NSFont systemFontOfSize:11];
     b.bordered=NO;
     b.bezelStyle=NSBezelStyleSmallSquare;
@@ -1980,9 +2305,10 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     else if ([b.identifier isEqualToString:@"npCastBtn"]) sym = @"airplayaudio";
     else if ([b.identifier isEqualToString:@"npAddSq"]) sym = @"plus";
     if (sym) {
-        NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
-        if (img) {
-            img.size = NSMakeSize(11, 11);
+        NSImage *rawImg = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        if (rawImg) {
+            NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:10.5 weight:NSFontWeightMedium];
+            NSImage *img = [rawImg imageWithSymbolConfiguration:cfg] ?: rawImg;
             b.image = img;
             b.imagePosition = NSImageLeft;
             b.imageScaling = NSImageScaleProportionallyDown;
@@ -2007,28 +2333,20 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.cover=[[NSImageView alloc] initWithFrame:NSZeroRect]; self.cover.identifier=@"npCover";
     self.cover.imageScaling=NSImageScaleAxesIndependently; self.cover.wantsLayer=YES;
     self.cover.layer.cornerRadius=14;self.cover.layer.borderWidth=1;self.cover.layer.masksToBounds=YES; [host addSubview:self.cover];
-    // v3.3.11 `npSetCover` / `npResetCover`（web 在封面下方居中成组小胶囊按钮，随 cover 居中、hover 反馈）。
+    // 封面右下角悬浮胶囊按钮（不另占一行、不压分析卡片）。
     {
-        RLPHoverButton *setBtn = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
-        setBtn.title = RLPTr(@"设置歌曲封面");
-        setBtn.target = self;
-        setBtn.action = @selector(onSetCover:);
-        setBtn.identifier = @"npSetCover";
+        RLPHoverButton *setBtn = [self chipButton:@"设置歌曲封面" identifier:@"npSetCover" action:@selector(onSetCover:) parent:host];
         setBtn.toolTip = RLPTr(@"仅设置当前歌曲封面，不修改专辑和音乐文件");
         self.coverSetBtn = setBtn;
         [self styleCoverActionButton:setBtn];
-        [host addSubview:setBtn];
+        setBtn.layer.zPosition = 2.0;
 
-        RLPHoverButton *rstBtn = [[RLPHoverButton alloc] initWithFrame:NSZeroRect];
-        rstBtn.title = RLPTr(@"自动");
-        rstBtn.target = self;
-        rstBtn.action = @selector(onResetCover:);
+        RLPHoverButton *rstBtn = [self chipButton:@"自动" identifier:@"npResetCover" action:@selector(onResetCover:) parent:host];
         rstBtn.hidden = YES;
-        rstBtn.identifier = @"npResetCover";
         rstBtn.toolTip = RLPTr(@"恢复自动封面");
         self.coverResetBtn = rstBtn;
         [self styleCoverActionButton:rstBtn];
-        [host addSubview:rstBtn];
+        rstBtn.layer.zPosition = 2.0;
 
         __weak __typeof__(self) wsCover = self;
         for (RLPHoverButton *cb in @[setBtn, rstBtn]) {
@@ -2059,12 +2377,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.metaChips=mc;
     self.favoriteButton=[self webButton:@"♡" identifier:@"npFavBtn" action:@selector(onFav:) parent:host]; self.favoriteButton.bordered=NO;self.favoriteButton.font=[NSFont systemFontOfSize:22];
     // 261024-02 #5：投放 / 加歌单在 web 里也是 #npMeta 里的 .chip（不是下面独立按钮行）。
-    self.castButton=[self webButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:self.metaChipsRow];
-    self.saveButton=[self webButton:@"添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:self.metaChipsRow];
+    self.castButton=[self chipButton:@"推送到设备" identifier:@"npCastBtn" action:@selector(onCastCurrent:) parent:self.metaChipsRow];
+    self.saveButton=[self chipButton:@"添加到歌单" identifier:@"npAddSq" action:@selector(onSaveCurrent:) parent:self.metaChipsRow];
     self.castButton.toolTip=RLPTr(@"把当前曲目推送到 UPnP / DLNA 设备");
     self.saveButton.toolTip=RLPTr(@"把当前曲目添加到指定歌单");
-    self.eqChip=[self webButton:@"EQ" identifier:@"npEqChip" action:@selector(onEqChip:) parent:self.metaChipsRow];
-    self.irChip=[self webButton:@"IR" identifier:@"npIrChip" action:@selector(onIrChip:) parent:self.metaChipsRow];
+    self.eqChip=[self chipButton:@"EQ" identifier:@"npEqChip" action:@selector(onEqChip:) parent:self.metaChipsRow];
+    self.irChip=[self chipButton:@"IR" identifier:@"npIrChip" action:@selector(onIrChip:) parent:self.metaChipsRow];
     for(NSButton *b in @[self.eqChip,self.irChip,self.castButton,self.saveButton]) {
         b.hidden=YES; [self styleMetaChip:b];
     }
@@ -2092,26 +2410,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.railToggle=[self webButton:@"▤" identifier:@"npRailToggle" action:@selector(onToggleRail:) parent:host];self.railToggle.toolTip=RLPTr(@"显示 / 隐藏 AI 资料面板");
     self.analysisPanel=[[NSView alloc] initWithFrame:NSZeroRect];self.analysisPanel.identifier=@"npAnal";[host addSubview:self.analysisPanel];
     self.railPanel=[[NSView alloc] initWithFrame:NSZeroRect];self.railPanel.identifier=@"npRail";[host addSubview:self.railPanel];
-    // 头部：独立的 9.5/700/kern1.5 标题（web .anllab）+ 右端状态（web #npAnlStat）
-    self.anlLab=RLPLabel(RLPTr(@"音频分析"),[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],t.mut2);
-    self.anlLab.identifier=@"npAnlLab";[self.analysisPanel addSubview:self.anlLab];
-    self.analysisStatus=RLPLabel(RLPTr(@"未播放"),[NSFont systemFontOfSize:10],t.mut2);
-    self.analysisStatus.identifier=@"npAnlStat";self.analysisStatus.alignment=NSTextAlignmentRight;
-    [self.analysisPanel addSubview:self.analysisStatus];
-    // web #npAnalHide（.anlhide{position:absolute;top:7;right:8;22x22;圆形;收起箭头}）：
-    // 面板头部自己的收起键，和右上角 #npAnalToggle 是**同一份**隐藏状态（web 两个入口写同一 localStorage）。
-    self.anlHide=[self webButton:@"" identifier:@"npAnalHide" action:@selector(onHideAnalysis:) parent:self.analysisPanel];
-    self.anlHide.title=@"";self.anlHide.bordered=NO;self.anlHide.imagePosition=NSImageOnly;
-    self.anlHide.image=[NSImage imageWithSystemSymbolName:@"chevron.left"
-                                  accessibilityDescription:RLPTr(@"隐藏音频分析面板")];
-    self.anlHide.contentTintColor=t.mut2;self.anlHide.wantsLayer=YES;self.anlHide.layer.cornerRadius=11;
-    self.anlHide.toolTip=RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
-    ((RLPHoverButton *)self.anlHide).hoverApplier = ^(RLPHoverButton *btn, BOOL hovered) {
-        RLPTheme *t2=[RLPTheme current];
-        btn.layer.backgroundColor = (hovered ? t2.hov2 : NSColor.clearColor).CGColor;
-        btn.contentTintColor = hovered ? t2.text : t2.mut2;
-    };
-    // 三个动作装进**一个**带外框的分段控件（web .npseg：radius 9、10.5/600、padding 3 11、发丝分隔）
+    // 无头两段式布局：分段动作栏 + 三张摘要卡（不再显示独立标题/状态/折叠行）。
     self.anlSeg=[[NSView alloc] initWithFrame:NSZeroRect];self.anlSeg.identifier=@"npAnlSeg";
     self.anlSeg.wantsLayer=YES;self.anlSeg.layer.cornerRadius=9;self.anlSeg.layer.borderWidth=1;
     self.anlSeg.layer.masksToBounds=YES;[self.analysisPanel addSubview:self.anlSeg];
@@ -2139,6 +2438,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     self.lyricScroll.contentView.postsBoundsChangedNotifications=YES;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLyricScrolled:) name:NSViewBoundsDidChangeNotification object:self.lyricScroll.contentView];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalFavoritesChanged:) name:RLPFavoritesChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalSettingsChanged:) name:RLPSettingsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onNowPlayingEscape:)
                                                  name:@"RLPNowPlayingEscapeNotification" object:nil];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
@@ -2399,11 +2699,11 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     const BOOL badge = [b.identifier hasPrefix:@"npMeta."];
     NSAttributedString *as = b.attributedTitle;
     CGFloat tw = as.length ? as.size.width : [b.title sizeWithAttributes:@{ NSFontAttributeName: b.font }].width;
-    const CGFloat iconExtra = b.image ? 15.0 : 0.0;   // 11px 图标 + 4px 间距（web chip 的内联 SVG 同构）
+    const CGFloat iconExtra = b.image ? 17.0 : 0.0;   // 11.5px 图标 + 4.5px 间距 + 1px 余量
     return ceil(tw) + (badge ? 16.0 : 20.0) + iconExtra;   // padding 2×7 或 2×9 + 边框 2×1
 }
 
-/// 封面下方小胶囊按钮统一样式：低存在感次级描边与柔和底，hover 时提亮文字与强调边。
+/// 封面右下角悬浮小胶囊按钮：半透明深底 + 柔和白边/亮字，叠在封面图上依然清晰可读。
 - (void)styleCoverActionButton:(NSButton *)button {
     if (!button) return;
     RLPTheme *t = [RLPTheme current];
@@ -2422,11 +2722,11 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     button.wantsLayer = YES;
     button.layer.cornerRadius = 11.0;
     button.layer.borderWidth = 1.0;
-    NSColor *fg = hovered ? t.text : t.mut;
-    NSColor *bg = hovered ? t.hov2
-        : (t.isLight ? [NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.045]
-                     : [NSColor colorWithWhite:1 alpha:.06]);
-    NSColor *bd = hovered ? t.accent : t.line;
+    NSColor *fg = hovered ? NSColor.whiteColor : [NSColor colorWithWhite:1 alpha:.94];
+    NSColor *bg = hovered
+        ? [NSColor colorWithSRGBRed:16/255. green:18/255. blue:24/255. alpha:.88]
+        : [NSColor colorWithSRGBRed:16/255. green:18/255. blue:24/255. alpha:.72];
+    NSColor *bd = hovered ? t.accent : [NSColor colorWithWhite:1 alpha:.24];
     button.layer.backgroundColor = bg.CGColor;
     button.layer.borderColor = bd.CGColor;
     button.contentTintColor = fg;
@@ -2439,9 +2739,10 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     if ([button.identifier isEqualToString:@"npSetCover"]) sym = @"photo";
     else if ([button.identifier isEqualToString:@"npResetCover"]) sym = @"arrow.uturn.backward";
     if (sym) {
-        NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
-        if (img) {
-            img.size = NSMakeSize(10, 10);
+        NSImage *rawImg = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        if (rawImg) {
+            NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:10.0 weight:NSFontWeightMedium];
+            NSImage *img = [rawImg imageWithSymbolConfiguration:cfg] ?: rawImg;
             button.image = img;
             button.imagePosition = NSImageLeft;
             button.imageScaling = NSImageScaleProportionallyDown;
@@ -2456,7 +2757,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     NSFont *font = button.font ?: [NSFont systemFontOfSize:10.5 weight:NSFontWeightMedium];
     NSString *text = button.attributedTitle.string.length ? button.attributedTitle.string : (button.title ?: @"");
     const CGFloat tw = ceil([text sizeWithAttributes:@{ NSFontAttributeName: font }].width);
-    const CGFloat iconExtra = button.image ? 14.0 : 0.0;
+    const CGFloat iconExtra = button.image ? 15.0 : 0.0;
     return tw + iconExtra + 18.0;
 }
 
@@ -2566,6 +2867,10 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 
 - (void)layoutWebPlayback {
     const CGFloat w = self.webCanvas.bounds.size.width, h = self.webCanvas.bounds.size.height;
+    if (w <= 0.0 || h <= 0.0) return;
+    if (self.layingOutWebPlayback) return;
+    self.layingOutWebPlayback = YES;
+    @try {
     // 顶部操作托盘先定位，供英雄区文字右缘让位（避免窄屏贴边压到开关按钮）。
     const CGFloat trayW = 144.0, trayH = 44.0, trayY = 12.0;
     const CGFloat trayX = MAX(16.0, w - 16.0 - trayW);
@@ -2583,40 +2888,41 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     const CGFloat ctlW = MIN(1160.0, MAX(280.0, w - 32.0));
     const CGFloat ctlX = MAX(16.0, (w - ctlW) / 2.0);
     const CGFloat ctlH = (ctlW < 540.0) ? 98.0 : ((h <= 640.0) ? 64.0 : 68.0);
-    const CGFloat ctlY = h - bottomMargin - ctlH;
-    const CGFloat waveformY = ctlY - waveformGap - waveformH;
+    const CGFloat computedCtlY = h - bottomMargin - ctlH;
+    const CGFloat ctlY = MAX(12.0, MIN(computedCtlY, h - ctlH - 12.0));
+    const CGFloat waveformY = MAX(0.0, ctlY - waveformGap - waveformH);
 
-    // 封面图与下方胶囊操作成组（居中在封面正下方，不再与三栏顶边重叠）。
+    // 封面图与浮于右下角的轻量化设置封面胶囊（不另占独立一行、不压分析栏）。
     const CGFloat c = MIN(236.0, MAX(132.0, h * 0.24));
     const CGFloat gutter = 16.0, top = 44.0;
     self.cover.frame = NSMakeRect(gutter, top, c, c);
     self.coverShadow.frame = self.cover.frame;
     {
-        const CGFloat btnGap = 6.0, btnH = 22.0, btnY = top + c + 8.0;
+        const CGFloat edgePad = 8.0, btnGap = 6.0, btnH = 22.0;
         const BOOL showReset = !self.coverResetBtn.hidden;
         CGFloat bw1 = [self coverButtonIdealWidth:self.coverSetBtn];
         CGFloat bw2 = showReset ? [self coverButtonIdealWidth:self.coverResetBtn] : 0.0;
-        const CGFloat maxRowW = MAX(60.0, c);
-        CGFloat total = showReset ? (bw1 + btnGap + bw2) : bw1;
-        if (total > maxRowW) {
-            if (showReset) {
+        const CGFloat maxRowW = MAX(60.0, c - edgePad * 2.0);
+        if (showReset) {
+            if (bw1 + btnGap + bw2 > maxRowW) {
                 const CGFloat avail = MAX(40.0, maxRowW - btnGap);
                 const CGFloat sumW = MAX(1.0, bw1 + bw2);
                 bw1 = floor(avail * (bw1 / sumW));
                 bw2 = MAX(24.0, avail - bw1);
-                total = bw1 + btnGap + bw2;
-            } else {
-                bw1 = maxRowW;
-                total = bw1;
             }
+        } else {
+            bw1 = MIN(bw1, maxRowW);
         }
-        const CGFloat bx = gutter + MAX(0.0, (c - total) / 2.0);
-        self.coverSetBtn.frame = NSMakeRect(bx, btnY, bw1, btnH);
-        self.coverResetBtn.frame = showReset ? NSMakeRect(bx + bw1 + btnGap, btnY, bw2, btnH) : NSZeroRect;
+        const CGFloat rightEdge = NSMaxX(self.cover.frame) - edgePad;
+        const CGFloat btnY = NSMaxY(self.cover.frame) - edgePad - btnH;
+        self.coverSetBtn.frame = NSMakeRect(rightEdge - bw1, btnY, bw1, btnH);
+        self.coverResetBtn.frame = showReset
+            ? NSMakeRect(NSMinX(self.coverSetBtn.frame) - btnGap - bw2, btnY, bw2, btnH)
+            : NSZeroRect;
         self.coverSetBtn.enabled = self.currentPath.length > 0;
         self.coverResetBtn.enabled = self.currentPath.length > 0;
     }
-    const CGFloat coverGroupBottom = top + c + 30.0;
+    const CGFloat coverGroupBottom = top + c;
 
     // 英雄区文字 + 芯片组垂直居于封面高度范围，若顶部几行落入顶栏托盘 Y 区间则右缘让位。
     const CGFloat x = gutter + c + 26.0;
@@ -2667,12 +2973,12 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         ? NSMaxY(self.metaChipsRow.frame)
         : (infoY + contentRelBottom);
     const CGFloat by = MAX(coverGroupBottom, infoBottom) + (h <= 640.0 ? 12.0 : 16.0);
-    const CGFloat bottom = MAX(by + 60.0, waveformY - waveformBodyGap);
+    const CGFloat bottom = MAX(by, waveformY - waveformBodyGap);
 
     const CGFloat colGap = (w < 740.0) ? 12.0 : 18.0;
     const CGFloat col = (w - 2.0 * gutter - colGap * 2.0) / 4.0;
     const CGFloat side = MIN(340.0, col);
-    const CGFloat bodyH = MAX(60.0, bottom - by);
+    const CGFloat bodyH = MAX(0.0, bottom - by);
     self.analysisPanel.frame = NSMakeRect(gutter, by, side, bodyH);
     self.railPanel.frame = NSMakeRect(w - gutter - side, by, side, bodyH);
     if (self.analysisPanel.hidden && self.railPanel.hidden) {
@@ -2685,47 +2991,33 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         const CGFloat lw = MAX(80.0, (w - gutter) - lx);
         self.lyricScroll.frame = NSMakeRect(lx, by, lw, bodyH);
     } else {
-        self.lyricScroll.frame = NSMakeRect(gutter + col + colGap, by, col * 2.0, bodyH);
+        const CGFloat lx = NSMaxX(self.analysisPanel.frame) + colGap;
+        const CGFloat lw = MAX(80.0, NSMinX(self.railPanel.frame) - colGap - lx);
+        self.lyricScroll.frame = NSMakeRect(lx, by, lw, bodyH);
     }
     [self updateLyricFadeMask];   // 视口高度变了要重算 26pt 渐隐位置
-    // ---- 音频分析面板：web #npAnal（padding:8px 11px 9px、.anlhead gap:8、面板 gap:6）----
+    // ---- 音频分析面板：无头两段式排版（顶部动作分段条 + 三张摘要卡）----
     {
-        const CGFloat anlPadX = 12.0, anlPadTop = 8.0, anlPadBottom = 9.0;
-        const CGFloat anlLabelH = 13.0, anlSegH = 21.0, anlHeadGap = 8.0, anlBodyGap = 6.0;
-        NSFont *labFont = self.anlLab.font;
-        const CGFloat idealLabW = ceil(self.anlLab.attributedStringValue.length
-                                       ? self.anlLab.attributedStringValue.size.width
-                                       : [self.anlLab.stringValue sizeWithAttributes:
-                                          @{ NSFontAttributeName: labFont }].width) + 4.0;
-        const CGFloat headY = bodyH - anlPadTop - anlLabelH;
-        const CGFloat statRight = side - (anlPadX + 26.0);
-        const CGFloat statIdealW = ceil([self.analysisStatus.stringValue sizeWithAttributes:
-                                         @{ NSFontAttributeName: self.analysisStatus.font }].width) + 4.0;
-        const CGFloat minStatReserve = MIN(statIdealW, 42.0);
-        CGFloat labW = idealLabW;
-        if (anlPadX + labW + 6.0 + minStatReserve > statRight) {
-            labW = MAX(20.0, statRight - anlPadX - 6.0 - minStatReserve);
+        const CGFloat anlPadX = 12.0, anlPadTop = 11.0, anlPadBottom = 11.0;
+        const CGFloat anlSegH = 24.0, anlBodyGap = 8.0;
+        const CGFloat segY = MAX(anlPadBottom, bodyH - anlPadTop - anlSegH);
+        const BOOL wantReanalyze = (self.anlLevel != RLPAnlLevelCollapsed);
+        const CGFloat reanalyzeW = 62.0;
+        const BOOL splitTopRow = wantReanalyze && (side - anlPadX * 2.0 - reanalyzeW - 8.0 >= [self anlSegmentWidth]);
+        if (splitTopRow) {
+            self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, reanalyzeW, anlSegH);
+            self.anlReanalyze.hidden = NO;
+            [self anlLayoutSegmentAtY:segY left:(anlPadX + reanalyzeW + 8.0) right:(side - anlPadX) fill:NO];
+        } else {
+            self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, reanalyzeW, anlSegH);
+            self.anlReanalyze.hidden = YES;
+            [self anlLayoutSegmentAtY:segY left:anlPadX right:(side - anlPadX) fill:YES];
         }
-        self.anlLab.frame = NSMakeRect(anlPadX, headY,
-                                       MIN(MAX(20.0, labW), MAX(20.0, side - anlPadX * 2.0)),
-                                       anlLabelH);
-        {
-            const CGFloat statAvail = MAX(20.0, statRight - (anlPadX + labW + 8.0));
-            const CGFloat statW = MIN(statAvail, statIdealW);
-            self.analysisStatus.frame = NSMakeRect(statRight - statW, headY, statW, anlLabelH);
-        }
-        const CGFloat segTop = anlPadTop + anlLabelH + anlHeadGap;
-        const CGFloat segY = bodyH - segTop - anlSegH;
-        [self anlLayoutSegmentAtY:segY right:side - anlPadX];
-        const CGFloat cardsTop = segTop + anlSegH + anlBodyGap;
-        const CGFloat cardsH = MAX(1.0, bodyH - cardsTop - anlPadBottom);
+        const CGFloat cardsTop = anlPadTop + anlSegH + anlBodyGap;
+        const CGFloat cardsH = MAX(0.0, bodyH - cardsTop - anlPadBottom);
         const CGFloat cardsW = MAX(20.0, side - anlPadX);
         self.anlBody.frame = NSMakeRect(anlPadX, anlPadBottom, cardsW, cardsH);
-        self.anlDetailScroll.frame = self.anlBody.frame;
-        self.anlReanalyze.frame = NSMakeRect(anlPadX, segY, 62.0, anlSegH);
-        self.anlReanalyze.hidden = (self.anlLevel == RLPAnlLevelCollapsed)
-                                || (NSMinX(self.anlSeg.frame) < NSMaxX(self.anlReanalyze.frame) + 8.0);
-        self.anlHide.frame = NSMakeRect(side - 9.0 - 22.0, bodyH - 8.0 - 22.0, 22.0, 22.0);
+        self.anlDetailScroll.frame = NSMakeRect(anlPadX, anlPadBottom, MAX(20.0, side - anlPadX * 2.0), cardsH);
         [self anlLayoutCards];
     }
     // ---- AI 整理栏几何（web .nprailcard padding:10 / gap:8，.npchipwrap gap:6）----
@@ -2774,7 +3066,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         const CGFloat wrapTop = headBottom - kRailHeadGap;
         self.railChipWrap.frame = NSMakeRect(kRailHeadPadX, wrapBottom,
                                              MAX(20.0, side - kRailHeadPadX * 2.0),
-                                             MAX(20.0, wrapTop - wrapBottom));
+                                             MAX(0.0, wrapTop - wrapBottom));
         self.railChipWrap.hidden = (self.railEmptyLabel && !self.railEmptyLabel.hidden);
         [self railLayoutChips];
         (void)ry;
@@ -2786,12 +3078,17 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     [self.webControls layout];
     self.waveformView.frame = NSMakeRect(ctlX, waveformY, ctlW, waveformH);
     [self layoutLyricRows];
-    // web #npDrawerBg inset 0 / #npDrawer top/right/bottom 14、width:min(430,44vw)
+    // web npDrawerFit：#npDrawer 顶距 14pt、右距 14pt、宽 min(430,44vw)，底边让出底栏控制区（ctlY - 8）
     {
         const CGFloat dw = MIN(430.0, 0.44 * w);
+        const CGFloat drTop = 14.0;
+        const CGFloat drBottom = (ctlY > drTop + 68.0) ? (ctlY - 8.0) : MAX(drTop + 60.0, h - 14.0);
         self.dataBackdrop.frame = NSMakeRect(0, 0, w, h);
-        self.dataDrawer.frame = NSMakeRect(w - 14.0 - dw, 14.0, dw, MAX(60.0, h - 28.0));
+        self.dataDrawer.frame = NSMakeRect(w - 14.0 - dw, drTop, dw, MAX(60.0, drBottom - drTop));
         self.knowledge.frame = self.dataDrawer.bounds;
+    }
+    } @finally {
+        self.layingOutWebPlayback = NO;
     }
 }
 
@@ -2826,6 +3123,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 - (void)closeDataDrawer {
     if (!self.dataDrawerOpen) return;
     self.dataDrawerOpen=NO;
+    self.activeDrawerKind=nil;
     self.dataDrawer.hidden=YES;
     self.dataBackdrop.hidden=YES;
     [self.dataDrawer.layer removeAnimationForKey:@"npDrawerSlide"];
@@ -3372,9 +3670,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     RLPTheme *t = [RLPTheme current];
     if (self.castRunningState) {
         NSString *title = [NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), self.castDeviceName ?: RLPTr(@"设备")];
+        NSFont *font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.lineBreakMode = NSLineBreakByTruncatingTail;
+        self.castButton.font = font;
         self.castButton.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
-            NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
+            NSFontAttributeName: font,
             NSForegroundColorAttributeName: t.okText,
+            NSParagraphStyleAttributeName: ps,
         }];
         self.castButton.title = title;
         self.castButton.layer.backgroundColor = t.okBg.CGColor;
@@ -3700,6 +4003,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self railLoadAlbumForTarget:self.railTargets[kind] fp:fp gen:gen];
     [self renderRailMetadata];
     [self layoutWebPlayback];
+    [self syncOpenDrawerIfNeeded];
 }
 
 /// web npLocalAlbum：/api/lib/albums?q= 找一个同名（优先同艺术家）的专辑，再取详情
@@ -3764,6 +4068,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.railStates[kind] = mst;
     [self renderRailMetadata];
     [self layoutWebPlayback];
+    [self syncOpenDrawerIfNeeded];
 }
 
 /// web npRailLocalTrack：本地曲目事实只兜底，绝不覆盖 AI 字段。
@@ -3816,7 +4121,156 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     return who2;
 }
 
-/// web npRailPreview(kind, st) 的逐分支同构。返回 {p1,p2,st}。
+/// web npRailPreview(kind, st) 的逐分支同构。返回 {p1,p2,st,items}。
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)railDetailItemsForKind:(NSString *)kind
+                                                                     state:(NSDictionary *)st
+                                                                      meta:(NSDictionary *)m {
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *items = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    NSDictionary *d = [st[@"data"] isKindOfClass:[NSDictionary class]] ? st[@"data"] : nil;
+    NSDictionary *fields = [d[@"fields"] isKindOfClass:[NSDictionary class]] ? d[@"fields"] : nil;
+
+    static NSDictionary<NSString *, NSString *> *kMetaLabels = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        kMetaLabels = @{
+            @"title": @"曲名", @"artist": @"艺术家", @"albumArtist": @"专辑艺术家",
+            @"album": @"专辑", @"track": @"曲号", @"disc": @"碟片",
+            @"year": @"年份", @"date": @"日期", @"genre": @"流派",
+            @"label": @"厂牌", @"catalog": @"目录号", @"catno": @"目录号",
+            @"composer": @"作曲", @"lyricist": @"作词", @"arranger": @"编曲",
+            @"performer": @"演奏", @"producer": @"制作人", @"conductor": @"指挥",
+            @"recording": @"录音", @"mastering": @"母带", @"mixing": @"混音",
+            @"studio": @"录音室", @"language": @"语种", @"country": @"发行国家",
+            @"confidence": @"置信度"
+        };
+    });
+
+    if ([kind isEqualToString:@"track"]) {
+        for (NSString *k in @[@"演唱", @"作词", @"作曲", @"编曲", @"制作人", @"演奏", @"乐团", @"指挥",
+                               @"录音", @"混音", @"母带", @"歌曲风格", @"流派", @"发行时间", @"所属专辑",
+                               @"厂牌", @"出版方", @"目录号", @"专辑编号", @"时长", @"语种", @"衍生作品", @"简介"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        // 未出现在常用顺序中的剩余 summary.fields 键全部补齐，不遗漏不截断。
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+        // /api/meta 中的完整本地与补全字段
+        for (NSString *mk in @[@"year", @"date", @"genre", @"label", @"catalog", @"track",
+                               @"albumArtist", @"composer", @"lyricist", @"arranger",
+                               @"performer", @"recording", @"mastering", @"confidence"]) {
+            RLPRailAddDetail(items, seen, RLPTr(kMetaLabels[mk] ?: mk), m[mk]);
+        }
+        NSDictionary *credits = [m[@"credits"] isKindOfClass:[NSDictionary class]] ? m[@"credits"] : nil;
+        if (credits) {
+            for (NSString *ck in [credits.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, RLPTr(kMetaLabels[ck] ?: ck), credits[ck]);
+            }
+        }
+        NSMutableArray *fmt = [NSMutableArray array];
+        NSString *codec = RLPRailStr(m[@"codec"]);
+        if (codec.length) [fmt addObject:[codec uppercaseString]];
+        NSString *sr = RLPRailSampleRateText(m[@"sampleRate"]);
+        if (sr.length) [fmt addObject:sr];
+        if ([m[@"bits"] respondsToSelector:@selector(integerValue)] && [m[@"bits"] integerValue] > 0)
+            [fmt addObject:[NSString stringWithFormat:@"%ld bit", (long)[m[@"bits"] integerValue]]];
+        if ([m[@"channels"] respondsToSelector:@selector(integerValue)] && [m[@"channels"] integerValue] > 0)
+            [fmt addObject:[NSString stringWithFormat:@"%ldch", (long)[m[@"channels"] integerValue]]];
+        if (fmt.count) RLPRailAddDetail(items, seen, RLPTr(@"格式"), [fmt componentsJoinedByString:@" · "]);
+        const double dur = self.webStatus.duration > 0 ? self.webStatus.duration
+            : ([m[@"duration"] respondsToSelector:@selector(doubleValue)] ? [m[@"duration"] doubleValue] : 0.0);
+        if (dur > 0) RLPRailAddDetail(items, seen, RLPTr(@"时长"), RLPFmtDuration(dur));
+    } else if ([kind isEqualToString:@"release"]) {
+        NSDictionary *alb = [d[@"__album"] isKindOfClass:[NSDictionary class]] ? d[@"__album"] : nil;
+        for (NSString *k in @[@"出版方", @"厂牌", @"目录号", @"专辑编号", @"专辑类型", @"发行时间",
+                               @"语种", @"发行国家", @"制作人", @"录音", @"母带", @"专辑介绍", @"曲目列表"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+        if ([alb[@"year"] respondsToSelector:@selector(integerValue)] && [alb[@"year"] integerValue] > 0)
+            RLPRailAddDetail(items, seen, RLPTr(@"年份"), alb[@"year"]);
+        else RLPRailAddDetail(items, seen, RLPTr(@"年份"), m[@"year"]);
+        RLPRailAddDetail(items, seen, RLPTr(@"流派"), m[@"genre"]);
+        RLPRailAddDetail(items, seen, RLPTr(@"厂牌"), m[@"label"]);
+        RLPRailAddDetail(items, seen, RLPTr(@"目录号"), m[@"catalog"]);
+        NSString *tag = RLPRailTagText(alb[@"sr"], alb[@"bits"]);
+        if (tag.length) RLPRailAddDetail(items, seen, RLPTr(@"规格"), tag);
+    } else if ([kind isEqualToString:@"person"]) {
+        for (NSString *k in @[@"活跃年代", @"风格", @"代表作品", @"地区", @"厂牌", @"成员"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                if ([fk isEqualToString:@"简介"]) continue; // 简介已完整呈现在 p1
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+    } else if ([kind isEqualToString:@"work"]) {
+        for (NSString *k in @[@"作曲家", @"创作年代", @"体裁", @"调性", @"作品号"]) {
+            RLPRailAddDetail(items, seen, RLPTr(k), fields[k]);
+        }
+        if (fields) {
+            for (NSString *fk in [fields.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+                RLPRailAddDetail(items, seen, kMetaLabels[fk] ? RLPTr(kMetaLabels[fk]) : fk, fields[fk]);
+            }
+        }
+        if ([d[@"distinctCount"] respondsToSelector:@selector(integerValue)])
+            RLPRailAddDetail(items, seen, RLPTr(@"不同演绎"), d[@"distinctCount"]);
+        if ([d[@"releaseCount"] respondsToSelector:@selector(integerValue)])
+            RLPRailAddDetail(items, seen, RLPTr(@"发行版本"), d[@"releaseCount"]);
+    }
+
+    // 段落补充（若某小节未在 fields 里出现）
+    NSArray *secs = [d[@"sections"] isKindOfClass:[NSArray class]] ? d[@"sections"] : nil;
+    for (id secObj in secs) {
+        if (![secObj isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *sec = (NSDictionary *)secObj;
+        NSString *hd = RLPRailCollapse(sec[@"heading"]);
+        NSArray *paras = [sec[@"paragraphs"] isKindOfClass:[NSArray class]] ? sec[@"paragraphs"] : @[];
+        NSMutableArray<NSString *> *pt = [NSMutableArray array];
+        for (id p in paras) {
+            NSString *ps = [p isKindOfClass:[NSDictionary class]] ? RLPRailCollapse(p[@"text"]) : RLPRailCollapse(p);
+            if (ps.length) [pt addObject:ps];
+        }
+        if (pt.count) {
+            RLPRailAddDetail(items, seen, hd.length ? hd : RLPTr(@"详细说明"), [pt componentsJoinedByString:@" "]);
+        }
+    }
+
+    // 来源、置信度、缓存时间
+    NSDictionary *metaBlock = [m[@"meta"] isKindOfClass:[NSDictionary class]] ? m[@"meta"] : nil;
+    if ([kind isEqualToString:@"track"]) {
+        if ([metaBlock[@"sources"] isKindOfClass:[NSDictionary class]]) {
+            RLPRailAddDetail(items, seen, RLPTr(@"来源"), metaBlock[@"sources"]);
+        } else if (m[@"sources"]) {
+            RLPRailAddDetail(items, seen, RLPTr(@"来源"), m[@"sources"]);
+        }
+    }
+    if (d[@"citations"] && [d[@"citations"] isKindOfClass:[NSArray class]]) {
+        NSMutableArray<NSString *> *cList = [NSMutableArray array];
+        for (id c in (NSArray *)d[@"citations"]) {
+            if (![c isKindOfClass:[NSDictionary class]]) continue;
+            NSString *cs = RLPRailCollapse(c[@"source"]);
+            NSString *ct = RLPRailCollapse(c[@"title"]);
+            NSString *joined = (cs.length && ct.length) ? [NSString stringWithFormat:@"%@·%@", cs, ct]
+                : (cs.length ? cs : ct);
+            if (joined.length) [cList addObject:joined];
+        }
+        if (cList.count) RLPRailAddDetail(items, seen, RLPTr(@"来源"), [cList componentsJoinedByString:@"；"]);
+    }
+    RLPRailAddDetail(items, seen, RLPTr(@"置信度"), d[@"confidence"] ?: m[@"confidence"]);
+    NSString *ctime = RLPRailFmtTime(d[@"cached_at"] ?: d[@"cachedAt"] ?: d[@"generated_at"] ?: m[@"cached_at"]);
+    if (ctime.length) RLPRailAddDetail(items, seen, RLPTr(@"缓存时间"), ctime);
+    return items;
+}
+
 - (NSDictionary *)railPreviewForKind:(NSString *)kind state:(NSDictionary *)st {
     NSDictionary *m = self.trackMetadata ?: @{};
     NSDictionary *d = [st[@"data"] isKindOfClass:[NSDictionary class]] ? st[@"data"] : nil;
@@ -3827,14 +4281,19 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     if ([state isEqualToString:@"insufficient"]) {
         NSString *msg = RLPRailStr(d[@"error"]);
         if (!msg.length) msg = @"资料不足：缺少艺术家与曲名";
-        return @{ @"p1": msg, @"p2": @"", @"st": RLPTr(@"资料不足") };
+        return @{ @"p1": msg, @"p2": @"", @"st": RLPTr(@"资料不足"), @"items": @[] };
     }
-    const NSInteger pickLimit = self.railDetail ? 4 : 2;
+    const NSInteger pickLimit = 2;
     NSString *p1 = @"", *p2 = @"";
     if ([kind isEqualToString:@"track"]) {
         NSDictionary *loc = [self railLocalTrackPreview];
-        p1 = RLPRailPick(fields, @[@"演唱", @"作曲", @"作词", @"编曲"], pickLimit);
-        p2 = RLPRailPick(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"], pickLimit);
+        if (self.railDetail) {
+            p1 = RLPRailPickFull(fields, @[@"演唱", @"作曲", @"作词", @"编曲"]);
+            p2 = RLPRailPickFull(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"]);
+        } else {
+            p1 = RLPRailPick(fields, @[@"演唱", @"作曲", @"作词", @"编曲"], pickLimit);
+            p2 = RLPRailPick(fields, @[@"歌曲风格", @"发行时间", @"所属专辑", @"衍生作品"], pickLimit);
+        }
         if (!p1.length) p1 = RLPRailStr(loc[@"p1"]).length ? RLPRailStr(loc[@"p1"]) : RLPRailStr(m[@"title"]);
         if (!p2.length) p2 = RLPRailStr(loc[@"p2"]);
     } else if ([kind isEqualToString:@"release"]) {
@@ -3857,21 +4316,25 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             [lp addObject:RLPFmtDuration(self.webStatus.duration)];
         }
         p1 = [lp componentsJoinedByString:@" · "];
-        p2 = RLPRailPick(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"], pickLimit);
+        p2 = self.railDetail
+            ? RLPRailPickFull(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"])
+            : RLPRailPick(fields, @[@"出版方", @"专辑类型", @"语种", @"发行时间"], pickLimit);
         if (!p2.length) p2 = RLPRailTagText(alb[@"sr"], alb[@"bits"]);
     } else if ([kind isEqualToString:@"person"]) {
         NSString *who = RLPRailStr(self.railTargets[@"person"][@"name"]);
         if (!who.length) who = RLPRailStr(m[@"albumArtist"]);
         if (!who.length) who = RLPRailStr(m[@"artist"]);
         p1 = [self railBioFromData:d who:who limit:(self.railDetail ? 0 : 40)];
-        if (!p1.length) p1 = RLPRailPick(fields, @[@"活跃年代"], pickLimit);
-        p2 = RLPRailPick(fields, @[@"风格", @"代表作品"], pickLimit);
+        if (!p1.length) {
+            p1 = self.railDetail ? RLPRailPickFull(fields, @[@"活跃年代"]) : RLPRailPick(fields, @[@"活跃年代"], pickLimit);
+        }
+        p2 = self.railDetail ? RLPRailPickFull(fields, @[@"风格", @"代表作品"]) : RLPRailPick(fields, @[@"风格", @"代表作品"], pickLimit);
         if (!p1.length) p1 = who;
     } else if ([kind isEqualToString:@"work"]) {
         // web：p1 = fields['作曲家','创作年代']，没有就退回猜出的作曲家；p2 = fields['体裁']。
-        p1 = RLPRailPick(fields, @[@"作曲家", @"创作年代"], pickLimit);
+        p1 = self.railDetail ? RLPRailPickFull(fields, @[@"作曲家", @"创作年代"]) : RLPRailPick(fields, @[@"作曲家", @"创作年代"], pickLimit);
         if (!p1.length) p1 = RLPRailStr(RLPNPWorkTarget(m)[@"composer"]);
-        p2 = RLPRailPick(fields, @[@"体裁"], pickLimit);
+        p2 = self.railDetail ? RLPRailPickFull(fields, @[@"体裁"]) : RLPRailPick(fields, @[@"体裁"], pickLimit);
     }
     NSString *stText = @"";
     if ([state isEqualToString:@"loading"]) stText = RLPTr(@"整理中…");
@@ -3879,7 +4342,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     else if ([state isEqualToString:@"ok"])
         stText = ([d[@"from_cache"] respondsToSelector:@selector(boolValue)] && [d[@"from_cache"] boolValue])
                ? RLPTr(@"已缓存") : RLPTr(@"已整理");
-    return @{ @"p1": p1 ?: @"", @"p2": p2 ?: @"", @"st": stText };
+    NSArray *items = self.railDetail ? [self railDetailItemsForKind:kind state:st meta:m] : @[];
+    return @{ @"p1": p1 ?: @"", @"p2": p2 ?: @"", @"st": stText, @"items": items ?: @[] };
 }
 
 /// 只重绘卡片，不取数（轮询/主题/切档都会调）。
@@ -3894,7 +4358,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self.railCards[i] setNameText:labels[i]
                                status:RLPRailStr(pv[@"st"])
                                    p1:RLPRailStr(pv[@"p1"])
-                                   p2:RLPRailStr(pv[@"p2"])];
+                                   p2:RLPRailStr(pv[@"p2"])
+                          detailItems:self.railDetail ? pv[@"items"] : nil];
     }
     // 栏目有无：web 的 tab 列表 = npDataTargets，卡片逐张对应；「作品」只对古典曲目存在。
     NSDictionary *m = self.trackMetadata ?: @{};
@@ -3955,15 +4420,32 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self railEnsureKind:@"track"];
 }
 
-- (void)onRailCard:(RLPRailChipView *)b {
+- (NSDictionary *)drawerContextForKind:(NSString *)kind {
+    NSMutableDictionary *ctx = [NSMutableDictionary dictionary];
+    ctx[@"activeKind"] = kind ?: @"track";
+    ctx[@"trackMetadata"] = self.trackMetadata ?: @{};
+    ctx[@"webStatusDuration"] = @(self.webStatus.duration);
+    ctx[@"currentPath"] = self.currentPath ?: @"";
+    ctx[@"railTargets"] = [self.railTargets copy] ?: @{};
+    ctx[@"railStates"] = [self.railStates copy] ?: @{};
+    return ctx;
+}
+
+- (void)syncOpenDrawerIfNeeded {
+    if (!self.dataDrawerOpen || !self.activeDrawerKind.length) return;
+    if ([self.knowledge respondsToSelector:@selector(updateDrawerContext:)]) {
+        [self.knowledge updateDrawerContext:[self drawerContextForKind:self.activeDrawerKind]];
+    }
+}
+
+- (void)openDrawerForKind:(NSString *)kind {
     NSArray<NSString *> *kinds = @[@"track", @"release", @"person", @"work"];
-    NSInteger idx = b.chipIndex;
-    if (idx < 0 || idx >= (NSInteger)kinds.count) return;
-    NSString *kind = kinds[(NSUInteger)idx];
+    NSUInteger idx = [kinds indexOfObject:kind];
+    if (idx == NSNotFound) return;
+    self.activeDrawerKind = kind;
     NSDictionary *t = self.railTargets[kind];
     NSString *name = RLPRailStr(t[@"name"]);
     if ([kind isEqualToString:@"work"]) {
-        // web npDataActivate('work')：作品实体没有 summary，抽屉正文走 /api/entity/versions。
         NSString *composer = RLPRailStr(t[@"composer"]);
         if (!name.length) {
             NSDictionary *wt = RLPNPWorkTarget(self.trackMetadata ?: @{});
@@ -3971,10 +4453,20 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             if (!composer.length) composer = RLPRailStr(wt[@"composer"]);
         }
         if (!name.length) return;
+        __weak __typeof__(self) ws = self;
+        if ([self.knowledge respondsToSelector:@selector(setCloseHandler:)]) {
+            [self.knowledge setCloseHandler:^{ __typeof__(self) s = ws; if (s) [s closeDataDrawer]; }];
+        }
+        if ([self.knowledge respondsToSelector:@selector(setSelectKindHandler:)]) {
+            [self.knowledge setSelectKindHandler:^(NSString *k) { __typeof__(self) s = ws; if (s) [s openDrawerForKind:k]; }];
+        }
+        if ([self.knowledge respondsToSelector:@selector(loadDrawerContext:)]) {
+            [self.knowledge loadDrawerContext:[self drawerContextForKind:kind]];
+        }
         [self.knowledge loadWorkName:name composer:composer];
         [self.knowledgePopover close];
-        [self closeDataDrawer];
-        [self openDataDrawer];
+        if (!self.dataDrawerOpen) [self openDataDrawer];
+        else [self syncOpenDrawerIfNeeded];
         return;
     }
     if (!name.length) {
@@ -3985,12 +4477,53 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         else { name = RLPRailStr(m[@"albumArtist"]); if (!name.length) name = RLPRailStr(m[@"artist"]); }
     }
     if (!name.length) return;
+    __weak __typeof__(self) ws = self;
+    if ([self.knowledge respondsToSelector:@selector(setCloseHandler:)]) {
+        [self.knowledge setCloseHandler:^{ __typeof__(self) s = ws; if (s) [s closeDataDrawer]; }];
+    }
+    if ([self.knowledge respondsToSelector:@selector(setSelectKindHandler:)]) {
+        [self.knowledge setSelectKindHandler:^(NSString *k) { __typeof__(self) s = ws; if (s) [s openDrawerForKind:k]; }];
+    }
+    if ([self.knowledge respondsToSelector:@selector(setRefreshKindHandler:)]) {
+        [self.knowledge setRefreshKindHandler:^(NSString *k) {
+            __typeof__(self) s = ws;
+            if (!s) return;
+            NSDictionary *tgt = s.railTargets[k];
+            if (tgt) {
+                NSString *url = [s railUrlForTarget:tgt];
+                if (url.length) [s.railSummaryCache removeObjectForKey:url];
+                s.railStates[k] = [@{ @"state": @"idle" } mutableCopy];
+                [s railEnsureKind:k];
+            }
+        }];
+    }
+    if ([self.knowledge respondsToSelector:@selector(loadDrawerContext:)]) {
+        [self.knowledge loadDrawerContext:[self drawerContextForKind:kind]];
+    }
     NSString *artist = RLPRailStr(t[@"artist"]);
     if (idx == 2) artist = @"";   // 艺术家实体不需要 track 的 artist 参数
     [self.knowledge loadKind:kind name:name artist:artist.length ? artist : nil];
-    [self.knowledgePopover close];[self closeDataDrawer];
-    // web #npDrawer：页内浮卡（不是系统弹窗，也不再需要窗口才可打开）。
-    [self openDataDrawer];
+    if ([self.knowledge respondsToSelector:@selector(loadDrawerContext:)]) {
+        [self.knowledge loadDrawerContext:[self drawerContextForKind:kind]];
+    }
+    [self.knowledgePopover close];
+    if (!self.dataDrawerOpen) {
+        [self openDataDrawer];
+    } else {
+        [self syncOpenDrawerIfNeeded];
+    }
+}
+
+- (void)onRailCard:(RLPRailChipView *)b {
+    NSArray<NSString *> *kinds = @[@"track", @"release", @"person", @"work"];
+    NSInteger idx = b.chipIndex;
+    if (idx < 0 || idx >= (NSInteger)kinds.count) return;
+    NSString *kind = kinds[(NSUInteger)idx];
+    // 如果本来就处于关闭态，先关后开以保持既有 #npDrawerSlide 滑入语义
+    if (self.dataDrawerOpen && [self.activeDrawerKind isEqualToString:kind]) {
+        [self closeDataDrawer];
+    }
+    [self openDrawerForKind:kind];
 }
 
 - (NSTextView *)makeTextView {
@@ -4008,8 +4541,39 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self];[self.poll invalidate];[self.castPoll invalidate];[self.lyricRetryTimer invalidate]; }
 
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    if (self.isViewLoaded && self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+        [self layoutWebPlayback];
+    }
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    if (self.isViewLoaded && self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+        [self layoutWebPlayback];
+    }
+}
+
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    if (self.isViewLoaded && self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+        [self layoutWebPlayback];
+    }
+}
+
 - (void)activate {
+    self.anlDisappeared = NO;
+    self.anlAutoSettingAt = 0;
+    if (self.isViewLoaded) {
+        [self.webCanvas setNeedsLayout:YES];
+        if (self.webCanvas.bounds.size.width > 0.0 && self.webCanvas.bounds.size.height > 0.0) {
+            [self layoutWebPlayback];
+        }
+    }
+    const BOOL wasPolling = self.polling;
     [self startPolling];
+    if (wasPolling) [self anlRefreshAutoSettingIfStale];
     // 模式（循环/随机）是**全局**状态：页面重新打开时必须重读一次。
     // refresh 只在「换曲」分支里拉 /api/queue，所以「关掉正在播放页 → 在别处改成单曲循环
     // → 再打开」以前显示的还是旧档位（审计 C 项）。首次进入（还没有 currentPath）由
@@ -4023,6 +4587,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 - (void)viewDidDisappear {
     [self.knowledge cancelLoading];
     [super viewDidDisappear];
+    self.anlDisappeared = YES;
+    self.anlPendingTickPath = nil;
+    self.anlPendingTickPlaying = NO;
+    self.anlPendingTickPaused = NO;
     [self stopPolling];self.lyricSeq++;self.railSeq++;[self.railSummaryInflight removeAllObjects];[self.knowledgePopover close];
     // 离开单曲页：让服务器也停下在跑的分析（与 web 版离开页面时的 anlCancelServer 同语义）。
     // 异步 cancel 完成前即使立刻切回，新请求也必须排队等 cancel 落地后再发出。
@@ -4047,6 +4615,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         return;
     }
+    self.anlDisappeared = NO;
     self.polling = YES;
     // 自动分析开关的真相源是 settings.autoanl（开关本身在设置·高级页签，播放页不再显示）。
     [self anlRefreshAutoSettingIfStale];
@@ -4200,6 +4769,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.lyricManualUntil = 0;
 }
 
+- (void)onExternalSettingsChanged:(NSNotification *)note {
+    if (note.object == self) return;
+    self.anlAutoSettingAt = 0;
+    if (!self.anlDisappeared && self.isViewLoaded && (self.polling || self.currentPath.length)) {
+        [self anlRefreshAutoSettingIfStale];
+    }
+}
+
 /// settings.autoanl / settings.eq / settings.ir 的**同一份**读取节流：
 /// 它不是热路径（用户在设置页偶尔改一次），但读一次就永久缓存会让"刚勾上却要等到切歌才生效"。
 /// 10 s 一次足够，且绝不进 0.8 s 的忙碌路径（EQ/IR 芯片复用这一次响应，不另开轮询）。
@@ -4211,23 +4788,46 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) s = ws;
         if (!s) return;
-        // 值在 kv 子对象里（读顶层会永远读成"关"）。
+        if (![json isKindOfClass:[NSDictionary class]]) {
+            s.anlAutoSettingAt = 0;
+            return;
+        }
+        // 值在 kv 子对象里（读顶层会永远读成"关"），若 mock 只给顶层键也一并兼容。
         NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
-        if (!kv) return;
+        if (!kv && (json[@"autoanl"] != nil || json[@"eq"] != nil || json[@"ir"] != nil)) {
+            kv = json;
+        }
+        if (!kv) {
+            s.anlAutoSettingAt = 0;
+            return;
+        }
         id v = kv[@"autoanl"];
-        if ([v isKindOfClass:[NSString class]]) s.anlAutoEnabled = [(NSString *)v isEqualToString:@"1"];
-        else if ([v isKindOfClass:[NSNumber class]]) s.anlAutoEnabled = [(NSNumber *)v boolValue];
+        if ([v isKindOfClass:[NSString class]]) {
+            NSString *sv = [(NSString *)v lowercaseString];
+            s.anlAutoEnabled = ([sv isEqualToString:@"1"] || [sv isEqualToString:@"true"]);
+        } else if ([v isKindOfClass:[NSNumber class]]) {
+            s.anlAutoEnabled = [(NSNumber *)v boolValue];
+        } else if (v == nil || [v isEqual:NSNull.null]) {
+            s.anlAutoEnabled = NO;
+        }
         // web loadSettings：`if (kv.eq !== undefined) ADV.eq = kv.eq;` 同理 ir。
         // 芯片读的就是这两个值，所以必须在这一刻更新（否则要等到用户进设置页才显示）。
         s.eqPath=[kv[@"eq"] isKindOfClass:[NSString class]]?(NSString *)kv[@"eq"]:@"";
         s.irPath=[kv[@"ir"] isKindOfClass:[NSString class]]?(NSString *)kv[@"ir"]:@"";
         [s applyMetaChipVisibility];
+        if (s.isViewLoaded) [s anlPaint];
+        if (!s.anlDisappeared && s.anlAutoEnabled) {
+            NSString *tickPath = s.anlPendingTickPath.length ? s.anlPendingTickPath : s.currentPath;
+            const BOOL tickPlaying = s.anlPendingTickPath.length ? s.anlPendingTickPlaying : s.webStatus.playing;
+            const BOOL tickPaused = s.anlPendingTickPath.length ? s.anlPendingTickPaused : s.webStatus.paused;
+            if (tickPath.length && [tickPath isEqualToString:s.currentPath ?: @""]) {
+                [s anlEvaluateAutoTickForPath:tickPath playing:tickPlaying paused:tickPaused];
+            }
+        }
     }];
 }
 
-/// 对齐 web 版 anlTick：每曲只自动跑一次；暂停/继续/拖动进度都不重新触发。
-- (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
-    [self anlRefreshAutoSettingIfStale];
+- (void)anlEvaluateAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
     if (![(path ?: @"") isEqualToString:self.currentPath ?: @""]) return;
     const BOOL active = playing && !paused;
     if (RLPAnlShouldAutoAnalyze(path, active, self.anlAutoEnabled,
@@ -4236,6 +4836,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         self.anlAutoDonePath = path;
         [self anlAnalyzePath:path force:NO];
     }
+}
+
+/// 对齐 web 版 anlTick：每曲只自动跑一次；暂停/继续/拖动进度都不重新触发。
+- (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused {
+    if ([(path ?: @"") isEqualToString:self.currentPath ?: @""]) {
+        self.anlPendingTickPath = path;
+        self.anlPendingTickPlaying = playing;
+        self.anlPendingTickPaused = paused;
+    }
+    [self anlRefreshAutoSettingIfStale];
+    [self anlEvaluateAutoTickForPath:path playing:playing paused:paused];
 }
 
 - (void)loadLyricsForPath:(NSString *)path {
@@ -4353,6 +4964,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         // 三张卡的 summary 预览从这里起步（闸门在 railBeginSummariesForMeta 内判定，
         // 关时零请求、只留本地事实）。
         [self_ railBeginSummariesForMeta:json];
+        [self_ syncOpenDrawerIfNeeded];
     }];
 }
 
@@ -4488,7 +5100,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }];
 }
 
-#pragma mark - 音频分析面板（web #npAnal：头部两行 + 三张摘要卡 + 展开档卡内指标）
+#pragma mark - 音频分析面板（无头两段式：顶部动作分段条 + 三张摘要卡 + 展开档卡内指标）
 
 /// 卡片区是 web #npAnlBody：三张摘要卡**始终存在**，展开档只是让每张卡长出指标网格。
 /// 旧实现展开时把三张卡 hidden 掉、换一块纯文本 NSTextView —— 那条路径已删除；
@@ -4553,8 +5165,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     return total;
 }
 
-/// 分段控件右端贴齐面板内容右缘（web .anlacts justify-content:flex-end），窄栏自动压缩段内留白以防左侧溢出。
-- (void)anlLayoutSegmentAtY:(CGFloat)y right:(CGFloat)right {
+/// 分段控件在无头分析栏顶部排版：无「重新分析」按钮时可铺满内容宽，窄栏自动压缩段内留白以防左侧溢出。
+- (void)anlLayoutSegmentAtY:(CGFloat)y left:(CGFloat)left right:(CGFloat)right fill:(BOOL)fill {
     NSFont *f = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
     NSArray<NSButton *> *btns = @[self.anlAuto, self.anlExpand, self.anlRun];
     NSArray<NSView *> *seps = @[self.anlSep1, self.anlSep2];
@@ -4568,19 +5180,25 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     const CGFloat fixedOverhead = 2.0 + (CGFloat)seps.count * 1.0;   // 外框 2px + 1px 发丝×2 = 4pt
     const CGFloat idealTotal = fixedOverhead + textSum + 22.0 * (CGFloat)btns.count;
-    const CGFloat maxW = MAX(60.0, right - 12.0);
-    const CGFloat total = MIN(idealTotal, maxW);
+    const CGFloat maxW = MAX(60.0, right - left);
+    const CGFloat total = fill ? maxW : MIN(idealTotal, maxW);
+    const CGFloat segH = 24.0;
+    const CGFloat itemH = segH - 2.0;
     CGFloat widths[3] = {0, 0, 0};
-    if (idealTotal <= maxW) {
+    if (!fill && idealTotal <= maxW) {
         for (NSUInteger i = 0; i < btns.count; ++i) widths[i] = textWs[i] + 22.0;
     } else {
         const CGFloat inner = MAX(42.0, total - fixedOverhead);
         if (textSum + 4.0 * (CGFloat)btns.count <= inner) {
-            const CGFloat pad = (inner - textSum) / (CGFloat)btns.count;
+            const CGFloat extra = inner - textSum;
             CGFloat used = 0.0;
             for (NSUInteger i = 0; i < btns.count; ++i) {
-                widths[i] = (i + 1 < btns.count) ? floor(textWs[i] + pad) : MAX(14.0, inner - used);
-                used += widths[i];
+                if (i + 1 < btns.count) {
+                    widths[i] = floor(textWs[i] + extra / (CGFloat)btns.count);
+                    used += widths[i];
+                } else {
+                    widths[i] = MAX(14.0, inner - used);
+                }
             }
         } else {
             const CGFloat base = 14.0;
@@ -4597,13 +5215,14 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             }
         }
     }
-    self.anlSeg.frame = NSMakeRect(right - total, y, total, 21.0);
+    const CGFloat segX = fill ? left : (right - total);
+    self.anlSeg.frame = NSMakeRect(segX, y, total, segH);
     CGFloat cx = 1.0;   // 外框 1px
     for (NSUInteger i = 0; i < btns.count; ++i) {
-        btns[i].frame = NSMakeRect(cx, 1.0, widths[i], 19.0);
+        btns[i].frame = NSMakeRect(cx, 1.0, widths[i], itemH);
         cx += widths[i];
         if (i < seps.count) {
-            seps[i].frame = NSMakeRect(cx, 1.0, 1.0, 19.0);
+            seps[i].frame = NSMakeRect(cx, 1.0, 1.0, itemH);
             cx += 1.0;
         }
     }
@@ -4692,18 +5311,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self.anlFake applyRows:fakeRows level:lvl];
     self.anlDyn.toolTip = dyn; self.anlQual.toolTip = qual; self.anlFake.toolTip = fake;
 
-    // 状态：标题已独立成「音频分析」，这里只说状态（web #npAnlStat 的语义）。
-    NSString *stat;
-    if (self.anlBusy) stat = RLPTr(@"分析中…");
-    else if (self.anlError.length) stat = [NSString stringWithFormat:@"%@：%@", RLPTr(@"分析失败"), self.anlError];
-    else if (!self.currentPath.length) stat = RLPTr(@"未播放");
-    else if (!RLPAnlIsLocalPath(self.currentPath)) stat = RLPTr(@"仅本地文件可分析");
-    else if (!h) stat = RLPTr(@"未分析");
-    // U10：后端判「文件可能不完整」时，状态串直接说出来（后端 note 在展开档首行原样展示）。
-    // 不写"分析失败"也不写"已分析"：分析**成功**了，只是结论只覆盖已存在的那一部分。
-    else if (RLPAnlIncomplete(h)) stat = RLPTr(@"文件可能不完整");
-    else stat = self.anlCached ? RLPTr(@"缓存命中") : RLPTr(@"已分析");
-    self.analysisStatus.stringValue = stat;
+    if (self.analysisStatus) {
+        NSString *stat;
+        if (self.anlBusy) stat = RLPTr(@"分析中…");
+        else if (self.anlError.length) stat = [NSString stringWithFormat:@"%@：%@", RLPTr(@"分析失败"), self.anlError];
+        else if (!self.currentPath.length) stat = RLPTr(@"未播放");
+        else if (!RLPAnlIsLocalPath(self.currentPath)) stat = RLPTr(@"仅本地文件可分析");
+        else if (!h) stat = RLPTr(@"未分析");
+        else if (RLPAnlIncomplete(h)) stat = RLPTr(@"文件可能不完整");
+        else stat = self.anlCached ? RLPTr(@"缓存命中") : RLPTr(@"已分析");
+        self.analysisStatus.stringValue = stat;
+    }
     self.anlAuto.state = self.anlAutoEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     [self anlUpdateSegmentTitles];
 
@@ -4850,22 +5468,13 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                          NSKernAttributeName:@1.5,
                          NSParagraphStyleAttributeName:ps}];
     }
-    self.analysisStatus.textColor=t.mut2;self.lyricsEmpty.textColor=t.mut2;
-    self.anlHide.contentTintColor=t.mut2;self.railHide.contentTintColor=t.mut2;
+    self.lyricsEmpty.textColor=t.mut2;
+    self.railHide.contentTintColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}
     self.waveformView.wantsLayer=YES;self.waveformView.layer.cornerRadius=10;self.waveformView.layer.masksToBounds=YES;
     self.waveformView.layer.borderWidth=1;self.waveformView.layer.borderColor=t.line.CGColor;
     self.waveformView.layer.backgroundColor=(t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.02]:[NSColor colorWithWhite:1 alpha:.025]).CGColor;
-    // 头部：独立 9.5/700/kern1.5 标题（web .anllab）；分段控件一个外框 + 内部发丝分隔。
-    {
-        NSMutableParagraphStyle *ps=[[NSMutableParagraphStyle alloc] init];ps.lineBreakMode=NSLineBreakByTruncatingTail;
-        self.anlLab.attributedStringValue=[[NSAttributedString alloc] initWithString:RLPTr(@"音频分析")
-            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],
-                         NSForegroundColorAttributeName:t.mut2,
-                         NSKernAttributeName:@1.5,
-                         NSParagraphStyleAttributeName:ps}];
-    }
-    self.anlLab.font=[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold];
+    // 分段控件一个外框 + 内部发丝分隔（面板头部标题/状态/折叠行已移除）。
     self.anlSeg.layer.backgroundColor=t.hov.CGColor;
     self.anlSeg.layer.borderColor=t.line.CGColor;
     self.anlSep1.layer.backgroundColor=t.line.CGColor;
@@ -4887,6 +5496,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self updatePanelToggleStates];
     }
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
+    self.dataDrawer.layer.backgroundColor=t.bg2.CGColor;
+    self.dataDrawer.layer.borderColor=(t.line2 ?: t.line).CGColor;
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
 }
 
@@ -4911,15 +5522,6 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     if (!self.trackMetadata.count) {
         RLPSetKernedText(self.kindLabel, RLPTr(@"正在播放"), 1.6);
     }
-    {
-        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
-        ps.lineBreakMode = NSLineBreakByTruncatingTail;
-        self.anlLab.attributedStringValue = [[NSAttributedString alloc] initWithString:RLPTr(@"音频分析")
-            attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:9.5 weight:NSFontWeightBold],
-                         NSForegroundColorAttributeName:[RLPTheme current].mut2,
-                         NSKernAttributeName:@1.5,
-                         NSParagraphStyleAttributeName:ps}];
-    }
     [self anlUpdateSegmentTitles];
     [self anlPaint];
     [self applyPlayModeUI];
@@ -4928,7 +5530,6 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.closeButton.toolTip = RLPTr(@"返回（Esc）");
     self.analysisToggle.toolTip = RLPTr(@"显示 / 隐藏音频分析面板");
     self.railToggle.toolTip = RLPTr(@"显示 / 隐藏 AI 资料面板");
-    self.anlHide.toolTip = RLPTr(@"隐藏音频分析面板，可在右上角重新显示");
     self.railHide.toolTip = RLPTr(@"隐藏 AI 资料面板，可在右上角重新显示");
     self.coverSetBtn.title = RLPTr(@"设置歌曲封面");
     self.coverResetBtn.title = RLPTr(@"自动");
@@ -4943,6 +5544,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     [self renderRailMetadata];
     [self.knowledge applyLanguage];
+    [self syncOpenDrawerIfNeeded];
     if (self.webCanvas.bounds.size.width > 0) [self layoutWebPlayback];
 }
 - (void)updateBlurredCover {

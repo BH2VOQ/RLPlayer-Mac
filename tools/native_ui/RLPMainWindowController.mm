@@ -35,31 +35,86 @@
 
 /// 顶栏：标题/计数是纯 frame 子视图，Auto Layout pass 会把它们归零，
 /// 所以每次 layout 后重放一次位置（离屏渲染也走这条路）。
+/// 窄窗口（如 900×600）或英文长标题/详情返回栈下，必须把左侧标题+计数截断在搜索框左缘之前，避免越界或重叠。
 @interface RLPTopbarView : NSView
 @property (nonatomic, weak) NSTextField *title;
 @property (nonatomic, weak) NSTextField *count;
 @property (nonatomic, weak) NSButton *backButton;
+@property (nonatomic, weak) NSView *searchView;
+- (void)layoutLeftCluster;
 @end
 @implementation RLPTopbarView
-- (void)layout {
-    [super layout];
+- (void)layoutLeftCluster {
+    const CGFloat h = self.bounds.size.height;
     if (self.backButton) {
-        self.backButton.frame = NSMakeRect(14, (self.bounds.size.height - 28) / 2.0, 28, 28);
+        self.backButton.frame = NSMakeRect(14, (h - 28) / 2.0, 28, 28);
     }
+    const CGFloat titleX = (self.backButton && !self.backButton.hidden) ? 52.0 : 20.0;
+    const CGFloat gapToSearch = 10.0;
+    CGFloat maxRight = 210.0 - gapToSearch;
+    if (self.searchView && self.searchView.frame.size.width > 0.5) {
+        maxRight = CGRectGetMinX(self.searchView.frame) - gapToSearch;
+    }
+    if (self.bounds.size.width > 0.5) {
+        maxRight = MIN(maxRight, self.bounds.size.width - gapToSearch);
+    }
+    maxRight = MAX(titleX, maxRight);
+    const CGFloat totalAvail = MAX(0.0, maxRight - titleX);
+
+    const BOOL hasTitle = self.title && self.title.stringValue.length > 0;
+    const BOOL hasCount = self.count && self.count.stringValue.length > 0;
+
+    CGFloat countW = 0.0;
     if (self.title) {
         [self.title sizeToFit];
-        CGRect f = self.title.frame;
-        const CGFloat titleX = (self.backButton && !self.backButton.hidden) ? 52 : 20;
-        f.origin = CGPointMake(titleX, (self.bounds.size.height - f.size.height) / 2.0);
-        self.title.frame = f;
+        CGRect tf = self.title.frame;
+        CGFloat titleW = 0.0;
+        if (!hasCount) {
+            titleW = MIN(tf.size.width, totalAvail);
+        } else {
+            [self.count sizeToFit];
+            const CGFloat natCountW = self.count.frame.size.width;
+            if (tf.size.width + 8.0 + natCountW <= totalAvail) {
+                titleW = tf.size.width;
+                countW = natCountW;
+            } else if (hasTitle) {
+                const CGFloat minTitleW = MIN(tf.size.width, 72.0);
+                const CGFloat maxCountBudget = MAX(0.0, totalAvail - minTitleW - 8.0);
+                if (maxCountBudget >= 20.0) {
+                    countW = MIN(natCountW, maxCountBudget);
+                    titleW = MIN(tf.size.width, MAX(0.0, totalAvail - 8.0 - countW));
+                } else {
+                    titleW = MIN(tf.size.width, totalAvail);
+                    countW = 0.0;
+                }
+            } else {
+                countW = MIN(natCountW, totalAvail);
+            }
+        }
+        tf.origin = CGPointMake(titleX, (h - tf.size.height) / 2.0);
+        tf.size.width = titleW;
+        self.title.frame = tf;
     }
     if (self.count) {
-        [self.count sizeToFit];
-        CGRect f = self.count.frame;
-        f.origin = CGPointMake(CGRectGetMaxX(self.title.frame) + 8,
-                               (self.bounds.size.height - f.size.height) / 2.0);
-        self.count.frame = f;
+        if (!hasCount || countW <= 0.5) {
+            CGRect cf = self.count.frame;
+            cf.origin = CGPointMake(self.title ? (CGRectGetMaxX(self.title.frame) + 8.0) : titleX,
+                                    (h - cf.size.height) / 2.0);
+            cf.size.width = 0.0;
+            self.count.frame = cf;
+        } else {
+            [self.count sizeToFit];
+            CGRect cf = self.count.frame;
+            const CGFloat cx = (self.title && hasTitle) ? (CGRectGetMaxX(self.title.frame) + 8.0) : titleX;
+            cf.origin = CGPointMake(cx, (h - cf.size.height) / 2.0);
+            cf.size.width = countW;
+            self.count.frame = cf;
+        }
     }
+}
+- (void)layout {
+    [super layout];
+    [self layoutLeftCluster];
 }
 @end
 
@@ -287,6 +342,20 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     NSView *root = win.contentView;
     root.wantsLayer = YES;
     root.layer.backgroundColor = t.bg.CGColor;
+    // 主窗 contentView 默认 translatesAutoresizingMaskIntoConstraints=YES，AppKit 会把内容视图树的
+    // fitting 宽反推成窗口大小（如聆听室/设置 meta 撑到 980/1085 且无法缩回）。
+    // 关闭它并把左右钉到 contentLayoutGuide、上下钉到 superview，既隔绝内容 fitting 撑窗，
+    // 又在 FullSizeContentView 下保留完整窗口高度（含 32pt 标题栏区域）。
+    root.translatesAutoresizingMaskIntoConstraints = NO;
+    NSLayoutGuide *contentGuide = (NSLayoutGuide *)win.contentLayoutGuide;
+    if (contentGuide && root.superview) {
+        [NSLayoutConstraint activateConstraints:@[
+            [root.leadingAnchor constraintEqualToAnchor:contentGuide.leadingAnchor],
+            [root.trailingAnchor constraintEqualToAnchor:contentGuide.trailingAnchor],
+            [root.topAnchor constraintEqualToAnchor:root.superview.topAnchor],
+            [root.bottomAnchor constraintEqualToAnchor:root.superview.bottomAnchor],
+        ]];
+    }
 
     _pageCache = [NSMutableDictionary dictionary];
     _rowStack = [NSMutableArray array];
@@ -374,10 +443,20 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     _modeControl.identifier = @"top.mode";
     _modeControl.selectedSegment = 0;
     _modeControl.translatesAutoresizingMaskIntoConstraints = NO;
+    [_modeControl setContentHuggingPriority:NSLayoutPriorityDefaultHigh
+                             forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_modeControl setContentCompressionResistancePriority:490
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_topbar addSubview:_modeControl];
 
+    ((RLPTopbarView *)_topbar).searchView = _search;
+    [_search setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+
     NSLayoutConstraint *searchPrefW = [_search.widthAnchor constraintEqualToConstant:300];
-    searchPrefW.priority = NSLayoutPriorityDefaultHigh;
+    searchPrefW.priority = 450;   // 低于 NSLayoutPriorityWindowSizeStayPut(500)：宽屏到 300，窄窗平滑压缩不顶窗
+    NSLayoutConstraint *searchMinW = [_search.widthAnchor constraintGreaterThanOrEqualToConstant:80];
+    searchMinW.priority = 480;
 
     [NSLayoutConstraint activateConstraints:@[
         [_sidebar.view.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
@@ -400,7 +479,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [_search.leadingAnchor constraintEqualToAnchor:_topbar.leadingAnchor constant:210],
         [_search.centerYAnchor constraintEqualToAnchor:_topbar.centerYAnchor],
         searchPrefW,
-        [_search.widthAnchor constraintGreaterThanOrEqualToConstant:140],
+        searchMinW,
+        [_search.widthAnchor constraintGreaterThanOrEqualToConstant:40],
         [_search.widthAnchor constraintLessThanOrEqualToConstant:300],
         [_search.trailingAnchor constraintLessThanOrEqualToAnchor:_modeControl.leadingAnchor constant:-12],
 
@@ -457,7 +537,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [NSLayoutConstraint activateConstraints:@[fill, cap]];
 
     __weak __typeof__(self) weakSelf = self;
-    _sidebar.onSelect = ^(NSInteger row) { [weakSelf showContentForRow:row]; };
+    _sidebar.onSelect = ^(NSInteger row) {
+        [weakSelf showContentForRow:row];
+    };
     _albums.onPlayAlbum = ^(NSString *key) {
         RLPPlayAlbum(key, 0);
     };
@@ -508,8 +590,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWindowDidExitFullScreen:)
                                                  name:NSWindowDidExitFullScreenNotification object:self.window];
 
-    [_sidebar selectRow:0];
-    [self showContentForRow:0];
+    if (![_sidebar selectKey:@"albums"]) {
+        [self showContentForKey:@"albums"];
+    }
     [self syncDrawerButtons];
     return self;
 }
@@ -593,6 +676,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         }
     }
     if (!key.length) key = @"albums";
+    NSString *resolvedRoute = key;
     NSString *cacheKey = [self cacheKeyForRouteKey:key];
     NSViewController *vc = self.pageCache[cacheKey];
     if (!vc) {
@@ -615,8 +699,10 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
             [sv applyUiMode:self.uiMode];
             vc = sv;
         }
-        else vc = self.albums;
+        else { vc = self.albums; resolvedRoute = @"albums"; }
         self.pageCache[cacheKey] = vc;
+    } else if (!RLPPageIdentifier(key)) {
+        resolvedRoute = @"albums";
     }
     if (vc == self.currentContent) {
         // 同页再次点选：清详情返回栈、重设标题并按需重新上报计数
@@ -626,6 +712,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         return;
     }
     [self.rowStack removeAllObjects];
+    const BOOL hadPreviousContent = (self.currentContent != nil);
     if (self.currentContent) [self.currentContent.view removeFromSuperview];
     self.currentContent = vc;
 
@@ -633,7 +720,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     // 页面根视图的 identifier = "page.<web view key>"（字面量表 RLPPageIdentifier）。
     // 这不是装饰：parity 表靠字面量机械抽取原生侧事实，页面没有稳定锚点就没法证明
     // 「web 的某个视图在原生存在」，只能靠人记 —— 那就等于没证据。
-    v.identifier = RLPPageIdentifier(key);
+    v.identifier = RLPPageIdentifier(resolvedRoute);
     v.translatesAutoresizingMaskIntoConstraints = NO;
     [self.pageHost addSubview:v];
     [NSLayoutConstraint activateConstraints:@[
@@ -644,6 +731,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     ]];
     // 顺序重要：先同步标题（会清空计数），再 activate（页面此时上报计数）
     [self syncTopbarTitle];
+    if (hadPreviousContent) {
+        RLPDiagEvent(@"nav", @"page_switch", resolvedRoute, nil, 0, -1, nil);
+    }
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
@@ -678,12 +768,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     // 之前顺序反了（activate 上报 → sync 清空）⟹ 顶栏计数一直是空的。
     self.pageCount.stringValue = @"";
     // 离屏渲染时 intrinsic-size 约束不会及时重算（实测宽度停在旧值），
-    // 直接 sizeToFit 设 frame，保证标题在任何渲染路径下都画得出来。
-    [self.pageTitle sizeToFit];
-    CGRect f = self.pageTitle.frame;
-    f.origin = CGPointMake(self.webBackButton.hidden ? 20 : 52,
-                           (self.topbar.bounds.size.height - f.size.height) / 2.0);
-    self.pageTitle.frame = f;
+    // 直接 sizeToFit + 夹紧设 frame，保证标题与计数不越进搜索框，且在任何渲染路径下都画得出来。
+    [(RLPTopbarView *)self.topbar layoutLeftCluster];
 }
 
 - (void)onTopbarBack:(id)sender { [self popDetail]; }
@@ -692,6 +778,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 /// 后端已在扫时 started=false，提示"扫描已在进行中"，不假装启动。
 - (void)onScanLibrary:(id)sender {
     if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    NSString *route = [self currentViewKey] ?: @"albums";
+    RLPDiagEvent(@"action", @"lib_scan", route, @"/api/lib/scan", 0, -1, nil);
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/lib/scan" body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -699,6 +788,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         // 2026-11-17：请求本身失败时不要报「开始扫描」，更不要开始轮询（否则首轮就会
         // 误报「扫描完成」——119 的边角问题，这里收紧）。
         if (!json || ![json[@"ok"] boolValue]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", route, @"/api/lib/scan", json ? 400 : 500, durMs,
+                         json ? @"scan_failed" : @"empty_response");
             RLPToast(RLPTr(@"扫描请求失败"));
             return;
         }
@@ -731,12 +823,19 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 }
 
 - (void)pollScanStatus {
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/lib/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         const BOOL ok = [json[@"ok"] respondsToSelector:@selector(boolValue)] ? [json[@"ok"] boolValue] : NO;
-        if (!ok) { [self_ stopScanPolling]; return; }
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", [self_ currentViewKey] ?: @"albums",
+                         @"/api/lib/status", json ? 400 : 500, durMs, @"poll_failed");
+            [self_ stopScanPolling];
+            return;
+        }
         const BOOL scanning = [json[@"scanning"] respondsToSelector:@selector(boolValue)] ? [json[@"scanning"] boolValue] : NO;
         if (scanning) {
             NSInteger scanned = [json[@"scanned"] respondsToSelector:@selector(integerValue)] ? [json[@"scanned"] integerValue] : 0;
@@ -766,11 +865,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 - (void)onPageCount:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]]) return;
     self.pageCount.stringValue = (NSString *)note.object;
-    [self.pageCount sizeToFit];
-    CGRect f = self.pageCount.frame;
-    f.origin = CGPointMake(CGRectGetMaxX(self.pageTitle.frame) + 8,
-                           (self.topbar.bounds.size.height - f.size.height) / 2.0);
-    self.pageCount.frame = f;
+    [(RLPTopbarView *)self.topbar layoutLeftCluster];
 }
 
 #pragma mark - 页面导航（详情页压栈；返回回原列表页）
@@ -779,12 +874,14 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     if (![note.object isKindOfClass:[NSString class]] || ![(NSString *)note.object length]) return;
     RLPAlbumDetailViewController *detail = [[RLPAlbumDetailViewController alloc] initWithAlbumKey:(NSString *)note.object];
     [self pushDetail:detail];
+    RLPDiagEvent(@"nav", @"page_switch", @"album", nil, 0, -1, nil);
 }
 
 - (void)onOpenArtist:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]] || ![(NSString *)note.object length]) return;
     RLPArtistDetailViewController *detail = [[RLPArtistDetailViewController alloc] initWithArtistName:(NSString *)note.object];
     [self pushDetail:detail];
+    RLPDiagEvent(@"nav", @"page_switch", @"artist", nil, 0, -1, nil);
 }
 
 - (void)onBack:(NSNotification *)note {
@@ -824,6 +921,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     if (!self.worksPage) self.worksPage = [[RLPWorksViewController alloc] init];
     [self pushDetail:self.worksPage];
     [self.worksPage loadWork:title composer:composer fromNowPlaying:YES];
+    RLPDiagEvent(@"nav", @"page_switch", @"works", nil, 0, -1, nil);
 }
 
 - (void)pushDetail:(NSViewController *)detail {
@@ -866,6 +964,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         return;
     }
     [self swapContentTo:vc];
+    RLPDiagEvent(@"nav", @"nav_back", backKey.length ? backKey : @"albums", nil, 0, -1, nil);
 }
 
 - (NSInteger)currentRow {
@@ -1077,6 +1176,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 /// 打开但停在歌词页签时先切回队列页签，已停在队列页签时再次点击关闭。
 - (void)onQueue:(id)sender {
     (void)sender;
+    RLPDiagEvent(@"action", @"drawer_toggle", [self currentViewKey] ?: @"albums", nil, 0, -1, @"queue");
     const BOOL open = !self.rightDrawer.hidden;
     NSString *tab = self.rightDrawer.tab ?: @"q";
     if (!open) {
@@ -1123,6 +1223,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 /// - 已打开且在队列页签时切到歌词页签，不误关队列抽屉；
 /// - 已打开且停在歌词页签时再次单击关闭抽屉，同步 hidden 与 drawerOpen。
 - (void)toggleLyricDrawer {
+    RLPDiagEvent(@"action", @"drawer_toggle", [self currentViewKey] ?: @"albums", nil, 0, -1, @"lyric");
     const BOOL open = !self.rightDrawer.hidden;
     NSString *tab = self.rightDrawer.tab ?: @"q";
     if (!open) {
@@ -1165,10 +1266,12 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [NSLayoutConstraint activateConstraints:@[[v.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],[v.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],[v.topAnchor constraintEqualToAnchor:root.topAnchor],[v.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]]];
     [self.npPage activate];
     [self.window makeFirstResponder:v];
+    RLPDiagEvent(@"nav", @"page_switch", @"np", nil, 0, -1, nil);
 }
 - (void)onCloseNowPlaying:(NSNotification *)note {
     if(!self.nowPlayingOverlayVisible)return;
     [self.npPage viewDidDisappear];[self.npPage.view removeFromSuperview];self.nowPlayingOverlayVisible=NO;
+    RLPDiagEvent(@"nav", @"page_switch", [self currentViewKey] ?: @"albums", nil, 0, -1, @"np_close");
 }
 
 
@@ -1285,7 +1388,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     }
     if (resolvedTitle.length) {
         self.pageTitle.stringValue = resolvedTitle;
-        [self.pageTitle sizeToFit];
+        [(RLPTopbarView *)self.topbar layoutLeftCluster];
         [(RLPTopbarView *)self.topbar setNeedsLayout:YES];
     }
 }
@@ -1347,7 +1450,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         NSNumber *writeToken = @(writeSeq);
         [self.inFlightModeWrites addObject:writeToken];
         [self applyUiModeDisplay:next navigateToStation:navigate];
+        RLPDiagEvent(@"action", @"mode_switch", @"station", @"/api/settings", 0, -1, next);
         NSString *body = [NSString stringWithFormat:@"uimode=%@", RLPEnc(next)];
+        const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
         __weak __typeof__(self) weakSelf = self;
         [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self_ = weakSelf;
@@ -1373,6 +1478,14 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
                 }
                 return;
             }
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            const NSInteger st = ([json isKindOfClass:[NSDictionary class]] &&
+                                  [json[@"status"] respondsToSelector:@selector(integerValue)])
+                               ? [json[@"status"] integerValue] : (json ? 400 : 500);
+            NSString *code = ([json isKindOfClass:[NSDictionary class]] &&
+                              [json[@"code"] isKindOfClass:[NSString class]])
+                           ? (NSString *)json[@"code"] : (json ? @"uimode_save_failed" : @"empty_response");
+            RLPDiagEvent(@"error", @"api_fail", @"station", @"/api/settings", st, durMs, code);
             if (writeSeq != self_->_modeWriteSequence) return;
             RLPToast(RLPTr(@"保存模式设置失败"));
             NSString *fallback = self_.confirmedUiMode ?: @"listen";
@@ -1392,6 +1505,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     const NSUInteger epoch = self.modeEpoch;
     const NSUInteger sequence = ++self.modeReadSequence;
     const NSUInteger writeSeq = self.modeWriteSequence;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -1404,7 +1518,12 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
                             [json[@"kv"] isKindOfClass:[NSDictionary class]]) ? json[@"kv"] : nil;
         id okVal = kv ? json[@"ok"] : nil;
         const BOOL ok = !okVal || ([okVal respondsToSelector:@selector(boolValue)] && [okVal boolValue]);
-        if (!kv || !ok) return; // 读取失败不能重置用户模式
+        if (!kv || !ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", [self_ currentViewKey] ?: @"albums",
+                         @"/api/settings", json ? 400 : 500, durMs, @"uimode_read_failed");
+            return; // 读取失败不能重置用户模式
+        }
         NSString *raw = [kv[@"uimode"] isKindOfClass:[NSString class]] ? kv[@"uimode"] : nil;
         NSString *resolved = [raw isEqualToString:@"pro"] ? @"pro" : @"listen";
         [self_ applyUiMode:resolved persist:NO navigateToStation:NO];

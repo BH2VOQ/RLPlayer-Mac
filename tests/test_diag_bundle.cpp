@@ -614,7 +614,7 @@ int main() {
                     r.total_bytes, r.budget_bytes, z.size());
         ck(z.size() > 4u * 1024u * 1024u, "ZIP 真的带了大量证据（不是空包）",
            std::to_string(z.size()));
-        ck(z.size() <= 8u * 1024u * 1024u, "真实 ZIP ≤ 8 MiB（反馈通道硬上限）",
+        ck(z.size() < 8'000'000u, "真实 ZIP < 8,000,000 字节（用户硬上限；旧预算 7.5MiB + 元数据会到 8.1MB）",
            std::to_string(z.size()) + " bytes");
         ck(z.size() > 4 && z[0] == 'P' && z[1] == 'K', "ZIP 以 PK 开头");
 
