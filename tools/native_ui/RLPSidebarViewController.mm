@@ -143,6 +143,18 @@ static NSArray<NSDictionary *> *RLPSidebarItems(NSString *uiMode) {
 /// 侧栏「我的歌单」区块的锚点分组标题（web .sqhd 的标题行；含右侧「＋ 新建」）。
 static NSString * const kSQSavedQueueSection = @"我的歌单";
 
+/// 侧栏统一视觉几何常量（对齐 Apple Music 侧栏：一致的 30pt 行高、x=20 左对齐基准、
+/// 4pt 同组行距、7pt 组标题→首行距、13pt 组间呼吸距）。
+static const CGFloat kRLPSidebarNavRowHeight     = 30.0;
+static const CGFloat kRLPSidebarSectionRowHeight = 30.0;
+static const CGFloat kRLPSidebarRowSpacing       = 2.0;
+static const CGFloat kRLPSidebarContentLead      = 20.0;
+static const CGFloat kRLPSidebarLabelTrail       = -12.0;
+static const CGFloat kRLPSidebarPillInsetX       = 8.0;
+static const CGFloat kRLPSidebarPillInsetY       = 1.0;
+static const CGFloat kRLPSidebarSectionBottomPad = 4.0;
+static const CGFloat kRLPSidebarSectionTopMinPad = 8.0;
+
 /// 行是不是分组标题行（不可选中）。
 static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (row < 0 || row >= (NSInteger)items.count) return NO;
@@ -447,8 +459,8 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (@available(macOS 11.0, *)) _tableView.style = NSTableViewStylePlain;
     _tableView.backgroundColor = [NSColor clearColor];
     _tableView.headerView = nil;
-    _tableView.rowHeight = 34;
-    _tableView.intercellSpacing = NSMakeSize(0, 2);
+    _tableView.rowHeight = kRLPSidebarNavRowHeight;
+    _tableView.intercellSpacing = NSMakeSize(0, kRLPSidebarRowSpacing);
     _tableView.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
     _tableView.delegate = self;
     _tableView.dataSource = self;
@@ -508,36 +520,49 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return (NSInteger)_menuItems.count; }
 
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
-    // 「我的歌单」标题行 web .sqhd 是 14px 上边距，比普通 .sec 略高，但仍用同一行高。
-    return RLPRowIsSection(_menuItems, row) ? 26 : 34;
+    (void)tableView;
+    return RLPRowIsSection(_menuItems, row) ? kRLPSidebarSectionRowHeight : kRLPSidebarNavRowHeight;
 }
 
 /// 分组标题行（web .sec；「我的歌单」这一组额外带右侧「＋ 新建」= web .sqnew-btn）。
+/// 统一字号 11pt Semibold、颜色 t.mut、左对齐 20pt、下边距 4pt（标题底→首行胶囊顶 7pt），
+/// 上方留足组间呼吸距（上组末行胶囊底→标题顶 ~12-13pt），避免「资料库」上下过挤或组间不匀。
 - (NSView *)sectionCellForTableView:(NSTableView *)tableView item:(NSDictionary *)item {
+    (void)tableView;
     NSTextField *sec = [NSTextField labelWithString:RLPTr(item[@"sec"])];
+    sec.identifier = @"sec.label";
     sec.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
     sec.textColor = [RLPTheme current].mut;   // web .sec color:var(--mut)
+    sec.lineBreakMode = NSLineBreakByTruncatingTail;
+    sec.maximumNumberOfLines = 1;
+    sec.usesSingleLineMode = YES;
     sec.translatesAutoresizingMaskIntoConstraints = NO;
 
-    NSTableCellView *wrap = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 26)];
+    NSTableCellView *wrap = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, kRLPSidebarSectionRowHeight)];
     wrap.identifier = @"SecWrap";
     [wrap addSubview:sec];
     NSMutableArray *cs = [NSMutableArray arrayWithObjects:
-        [sec.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:20],
-        [sec.centerYAnchor constraintEqualToAnchor:wrap.centerYAnchor constant:3], nil];
+        [sec.leadingAnchor constraintEqualToAnchor:wrap.leadingAnchor constant:kRLPSidebarContentLead],
+        [sec.bottomAnchor constraintEqualToAnchor:wrap.bottomAnchor constant:-kRLPSidebarSectionBottomPad],
+        [sec.topAnchor constraintGreaterThanOrEqualToAnchor:wrap.topAnchor constant:kRLPSidebarSectionTopMinPad],
+        nil];
     if ([item[@"sec"] isEqualToString:kSQSavedQueueSection]) {
         NSButton *plus = [NSButton buttonWithTitle:RLPTr(@"＋ 新建") target:self
                                             action:@selector(onCreateSavedQueue:)];
         plus.bordered = NO;
+        plus.controlSize = NSControlSizeSmall;
         plus.identifier = @"sq.new";
-        plus.font = [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium];
+        plus.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
         plus.contentTintColor = [RLPTheme current].mut;   // web .sqnew-btn color:var(--mut)
         plus.translatesAutoresizingMaskIntoConstraints = NO;
         [wrap addSubview:plus];
         [cs addObjectsFromArray:@[
-            [plus.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:-12],
+            [plus.trailingAnchor constraintEqualToAnchor:wrap.trailingAnchor constant:kRLPSidebarLabelTrail],
             [plus.centerYAnchor constraintEqualToAnchor:sec.centerYAnchor],
+            [sec.trailingAnchor constraintLessThanOrEqualToAnchor:plus.leadingAnchor constant:-6],
         ]];
+    } else {
+        [cs addObject:[sec.trailingAnchor constraintLessThanOrEqualToAnchor:wrap.trailingAnchor constant:kRLPSidebarLabelTrail]];
     }
     [NSLayoutConstraint activateConstraints:cs];
     return wrap;
@@ -547,7 +572,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (NSView *)emptySavedQueueCellForTableView:(NSTableView *)tableView {
     NSTableCellView *cell = [tableView makeViewWithIdentifier:@"SQEmpty" owner:self];
     if (!cell) {
-        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, kRLPSidebarNavRowHeight)];
         cell.identifier = @"SQEmpty";
         RLPDashedBox *box = [[RLPDashedBox alloc] initWithFrame:NSZeroRect];
         box.identifier = @"sq.empty";
@@ -556,17 +581,20 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         NSTextField *lab = [NSTextField labelWithString:RLPTr(@"＋ 新建歌单")];
         lab.identifier = @"sq.empty.label";
         lab.font = [NSFont systemFontOfSize:13];
+        lab.lineBreakMode = NSLineBreakByTruncatingTail;
+        lab.maximumNumberOfLines = 1;
+        lab.usesSingleLineMode = YES;
         lab.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:lab];
         [NSLayoutConstraint activateConstraints:@[
             // web .sqempty 的边框盒子与 .nav 同左沿（8），内部文字与导航文字同基线（20）。
-            [box.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:8],
-            [box.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
-            [box.topAnchor constraintEqualToAnchor:cell.topAnchor constant:1],
-            [box.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-1],
-            [lab.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
+            [box.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:kRLPSidebarPillInsetX],
+            [box.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-kRLPSidebarPillInsetX],
+            [box.topAnchor constraintEqualToAnchor:cell.topAnchor constant:kRLPSidebarPillInsetY],
+            [box.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-kRLPSidebarPillInsetY],
+            [lab.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:kRLPSidebarContentLead],
             [lab.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-            [lab.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:-16],
+            [lab.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:kRLPSidebarLabelTrail],
         ]];
     }
     RLPTheme *t = [RLPTheme current];
@@ -588,7 +616,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 - (NSView *)savedQueueCellForTableView:(NSTableView *)tableView row:(NSInteger)row item:(NSDictionary *)item {
     NSTableCellView *cell = [tableView makeViewWithIdentifier:@"SQRow" owner:self];
     if (!cell) {
-        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, kRLPSidebarNavRowHeight)];
         cell.identifier = @"SQRow";
         NSView *pill = [[NSView alloc] initWithFrame:NSZeroRect];
         pill.identifier = @"gain";   // 与普通导航行同名 pill，颜色更新路径一致
@@ -598,6 +626,9 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         [cell addSubview:pill];
         NSTextField *lab = RLPLabel(@"", [NSFont systemFontOfSize:13], [RLPTheme current].text);
         lab.identifier = @"label";
+        lab.lineBreakMode = NSLineBreakByTruncatingTail;
+        lab.maximumNumberOfLines = 1;
+        lab.usesSingleLineMode = YES;
         lab.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:lab];
         NSButton *ren = [NSButton buttonWithTitle:@"\u270e" target:self action:@selector(onRenameSavedQueue:)];
@@ -613,11 +644,11 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         del.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:del];
         [NSLayoutConstraint activateConstraints:@[
-            [pill.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:8],
-            [pill.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
-            [pill.topAnchor constraintEqualToAnchor:cell.topAnchor constant:1],
-            [pill.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-1],
-            [del.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-12],
+            [pill.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:kRLPSidebarPillInsetX],
+            [pill.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-kRLPSidebarPillInsetX],
+            [pill.topAnchor constraintEqualToAnchor:cell.topAnchor constant:kRLPSidebarPillInsetY],
+            [pill.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-kRLPSidebarPillInsetY],
+            [del.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:kRLPSidebarLabelTrail],
             [del.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [del.widthAnchor constraintEqualToConstant:18],
             [del.heightAnchor constraintEqualToConstant:18],
@@ -625,7 +656,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
             [ren.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [ren.widthAnchor constraintEqualToConstant:18],
             [ren.heightAnchor constraintEqualToConstant:18],
-            [lab.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
+            [lab.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:kRLPSidebarContentLead],
             [lab.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [lab.trailingAnchor constraintLessThanOrEqualToAnchor:ren.leadingAnchor constant:-6],
         ]];
@@ -675,7 +706,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 
     NSTableCellView *cell = [tableView makeViewWithIdentifier:cellId owner:self];
     if (!cell) {
-        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, 34)];
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 232, kRLPSidebarNavRowHeight)];
         cell.identifier = cellId;
         cell.wantsLayer = YES;
 
@@ -688,15 +719,19 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         pill.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:pill];
         [NSLayoutConstraint activateConstraints:@[
-            [pill.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:8],
-            [pill.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
-            [pill.topAnchor constraintEqualToAnchor:cell.topAnchor constant:1],
-            [pill.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-1],
+            [pill.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:kRLPSidebarPillInsetX],
+            [pill.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-kRLPSidebarPillInsetX],
+            [pill.topAnchor constraintEqualToAnchor:cell.topAnchor constant:kRLPSidebarPillInsetY],
+            [pill.bottomAnchor constraintEqualToAnchor:cell.bottomAnchor constant:-kRLPSidebarPillInsetY],
         ]];
 
         NSImageView *iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
         iconView.identifier = @"icon";
         iconView.imageScaling = NSImageScaleProportionallyDown;
+        if (@available(macOS 11.0, *)) {
+            iconView.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:13.5
+                                                                                           weight:NSFontWeightMedium];
+        }
         iconView.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:iconView];
 
@@ -709,14 +744,13 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         label.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:label];
 
-        const CGFloat rightPad = isStation ? -10.0 : -12.0;
         [NSLayoutConstraint activateConstraints:@[
-            [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
+            [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:kRLPSidebarContentLead],
             [iconView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
             [iconView.widthAnchor constraintEqualToConstant:16],
             [iconView.heightAnchor constraintEqualToConstant:16],
             [label.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:10],
-            [label.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:rightPad],
+            [label.trailingAnchor constraintLessThanOrEqualToAnchor:cell.trailingAnchor constant:kRLPSidebarLabelTrail],
             [label.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
         ]];
     }

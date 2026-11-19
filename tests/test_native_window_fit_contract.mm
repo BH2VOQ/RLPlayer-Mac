@@ -483,6 +483,257 @@ static void CheckSidebarEnglishLabel(RLPMainWindowController *wc, const char *st
         lab.stringValue, expectedText, needW, lab.bounds.size.width, lab.bounds.size.height]);
 }
 
+static void CheckSidebarHarmony(RLPMainWindowController *wc, const char *stage,
+                                BOOL expectStationSelected, BOOL checkFirstScreenFit) {
+    [wc.window.contentView layoutSubtreeIfNeeded];
+    NSScrollView *scroll = nil;
+    NSTableView *tv = SidebarTableView(wc.sidebar, &scroll);
+    if (tv) [tv layoutSubtreeIfNeeded];
+
+    if (!tv || !scroll || wc.sidebar.rowCount <= 0) {
+        Ck(NO, [[NSString stringWithFormat:@"V8-%s 侧栏表格存在", stage] UTF8String], @"table/scroll nil");
+        return;
+    }
+
+    NSArray<NSString *> *expectNonSQKeys = @[
+        @"station", @"albums", @"artists", @"tracks", @"folders", @"streaming",
+        @"queue", @"recent", @"favorites", @"settings"
+    ];
+    NSArray<NSString *> *expectSections = @[
+        RLPTr(@"资料库"), RLPTr(@"播放列表"), RLPTr(@"我的歌单"), RLPTr(@"音频引擎")
+    ];
+    NSMutableArray<NSString *> *actualNonSQKeys = [NSMutableArray array];
+    NSMutableArray<NSString *> *actualSections = [NSMutableArray array];
+
+    NSMutableArray<NSNumber *> *navHeights = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *secHeights = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *gapsBelowSec = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *gapsAboveSec = [NSMutableArray array];
+    NSMutableArray<NSString *> *truncErrs = [NSMutableArray array];
+
+    CGFloat stationH = -1.0;
+    CGFloat maxMidYDiff = 0.0;
+    CGFloat minIconX = 9999.0, maxIconX = -9999.0;
+    CGFloat minLabelX = 9999.0, maxLabelX = -9999.0;
+    CGFloat minSecBottomPad = 9999.0;
+    BOOL symConfigMissing = NO;
+    BOOL iconBoxBad = NO;
+    BOOL secStyleOk = YES;
+    BOOL overlapErr = NO;
+    BOOL cellOverlapErr = NO;
+    BOOL firstScreenOk = YES;
+
+    CGFloat prevRowMaxY = -1.0;
+    NSView *prevCell = nil;
+    NSRect prevCellInTv = NSZeroRect;
+    NSRect prevPillInTv = NSZeroRect;
+    BOOL hasPendingSec = NO;
+    NSRect pendingSecInTv = NSZeroRect;
+    NSRect stationCellFrame = NSZeroRect;
+    NSRect firstSecCellFrame = NSZeroRect;
+    NSRect firstItemCellFrame = NSZeroRect;
+    NSInteger favoritesRow = -1;
+
+    const NSRect vis = scroll.documentVisibleRect;
+    const NSInteger nRows = wc.sidebar.rowCount;
+    for (NSInteger r = 0; r < nRows; ++r) {
+        NSRect rowRect = [tv rectOfRow:r];
+        if (r > 0 && NSMinY(rowRect) < prevRowMaxY - 0.5) overlapErr = YES;
+        prevRowMaxY = NSMaxY(rowRect);
+
+        NSView *cell = [tv viewAtColumn:0 row:r makeIfNecessary:YES];
+        if (!cell) cell = [tv.delegate tableView:tv viewForTableColumn:nil row:r];
+        if (!cell) { secStyleOk = NO; continue; }
+        [cell layoutSubtreeIfNeeded];
+
+        const BOOL mounted = (cell.superview != nil);
+        const CGFloat h = mounted ? NSHeight(cell.frame) : [tv.delegate tableView:tv heightOfRow:r];
+        NSRect cellInTv = mounted ? [cell convertRect:cell.bounds toView:tv] : NSZeroRect;
+        if (mounted && prevCell && prevCell.superview) {
+            if (NSMinY(cellInTv) <= NSMaxY(prevCellInTv) + 0.5) cellOverlapErr = YES;
+        }
+
+        if ([cell.identifier isEqualToString:@"SecWrap"]) {
+            if (NSIsEmptyRect(firstSecCellFrame)) firstSecCellFrame = cellInTv;
+            [secHeights addObject:@(h)];
+            NSTextField *secLab = FirstTextFieldInCell(cell);
+            if (!secLab) {
+                secStyleOk = NO;
+            } else {
+                [actualSections addObject:secLab.stringValue ?: @""];
+                NSRect secInCell = [secLab convertRect:secLab.bounds toView:cell];
+                const CGFloat bottomPad = cell.isFlipped
+                    ? (NSHeight(cell.bounds) - NSMaxY(secInCell))
+                    : (NSMinY(secInCell) - NSMinY(cell.bounds));
+                minSecBottomPad = MIN(minSecBottomPad, bottomPad);
+                if (std::fabs((double)secLab.font.pointSize - 11.0) > 0.1 ||
+                    std::fabs((double)NSMinX(secInCell) - 20.0) > 0.5 ||
+                    !NSContainsRect(NSInsetRect(cell.bounds, -0.5, -0.5), secInCell)) {
+                    secStyleOk = NO;
+                }
+                const CGFloat needW = secLab.attributedStringValue.size.width;
+                if (needW > NSWidth(secLab.bounds) + 1.0) {
+                    [truncErrs addObject:[NSString stringWithFormat:@"sec:%@(%.1f/%.1f)",
+                                          secLab.stringValue, needW, NSWidth(secLab.bounds)]];
+                }
+                if ([secLab.stringValue isEqualToString:RLPTr(@"我的歌单")]) {
+                    NSButton *plus = (NSButton *)FindById(cell, @"sq.new");
+                    if (!plus) {
+                        secStyleOk = NO;
+                    } else {
+                        NSRect plusInCell = [plus convertRect:plus.bounds toView:cell];
+                        if (!NSContainsRect(NSInsetRect(cell.bounds, -0.5, -0.5), plusInCell) ||
+                            std::fabs((double)NSMidY(plusInCell) - (double)NSMidY(secInCell)) > 1.5 ||
+                            std::fabs((double)plus.font.pointSize - 11.0) > 0.1) {
+                            secStyleOk = NO;
+                        }
+                    }
+                }
+                if (mounted) {
+                    NSRect secInTv = [secLab convertRect:secLab.bounds toView:tv];
+                    if (!NSIsEmptyRect(prevPillInTv)) {
+                        const CGFloat gapAbove = tv.isFlipped
+                            ? (NSMinY(secInTv) - NSMaxY(prevPillInTv))
+                            : (NSMinY(prevPillInTv) - NSMaxY(secInTv));
+                        [gapsAboveSec addObject:@(gapAbove)];
+                    }
+                    pendingSecInTv = secInTv;
+                    hasPendingSec = YES;
+                }
+            }
+        } else {
+            NSString *k = [wc.sidebar keyForRow:r] ?: @"";
+            if (![k isEqualToString:@"playlists"]) [actualNonSQKeys addObject:k];
+            if ([k isEqualToString:@"favorites"]) favoritesRow = r;
+            if (r == 0) {
+                stationH = h;
+                stationCellFrame = cellInTv;
+            } else if (NSIsEmptyRect(firstItemCellFrame) && !NSIsEmptyRect(firstSecCellFrame)) {
+                firstItemCellFrame = cellInTv;
+            }
+            [navHeights addObject:@(h)];
+
+            NSView *pill = FindById(cell, @"pill") ?: FindById(cell, @"gain") ?: FindById(cell, @"sq.empty");
+            NSImageView *icon = (NSImageView *)FindById(cell, @"icon");
+            NSTextField *lab = (NSTextField *)(FindById(cell, @"label") ?: FindById(cell, @"sq.empty.label"));
+            if (!lab) {
+                [truncErrs addObject:[NSString stringWithFormat:@"row%ld:nil-label", (long)r]];
+            } else {
+                NSRect labInCell = [lab convertRect:lab.bounds toView:cell];
+                const CGFloat needW = lab.attributedStringValue.size.width;
+                const BOOL textClips = (needW > NSWidth(lab.bounds) + 1.0) ||
+                                       (NSHeight(lab.bounds) > h + 0.5) ||
+                                       !NSContainsRect(NSInsetRect(cell.bounds, -0.5, -0.5), labInCell);
+                if (textClips && ![k isEqualToString:@"playlists"]) {
+                    [truncErrs addObject:[NSString stringWithFormat:@"%@(%.1f/%.1f h=%.1f)",
+                                          lab.stringValue, needW, NSWidth(lab.bounds), NSHeight(lab.bounds)]];
+                }
+                if (icon) {
+                    NSRect iconInCell = [icon convertRect:icon.bounds toView:cell];
+                    const CGFloat diff = std::fabs((double)NSMidY(iconInCell) - (double)NSMidY(labInCell));
+                    maxMidYDiff = MAX(maxMidYDiff, diff);
+                    minIconX = MIN(minIconX, NSMinX(iconInCell));
+                    maxIconX = MAX(maxIconX, NSMinX(iconInCell));
+                    minLabelX = MIN(minLabelX, NSMinX(labInCell));
+                    maxLabelX = MAX(maxLabelX, NSMinX(labInCell));
+                    if (std::fabs((double)NSWidth(iconInCell) - 16.0) > 0.5 ||
+                        std::fabs((double)NSHeight(iconInCell) - 16.0) > 0.5 ||
+                        !NSContainsRect(NSInsetRect(cell.bounds, -0.5, -0.5), iconInCell)) {
+                        iconBoxBad = YES;
+                    }
+                    if (@available(macOS 11.0, *)) {
+                        if (!icon.symbolConfiguration) symConfigMissing = YES;
+                    }
+                } else {
+                    if (std::fabs((double)NSMinX(labInCell) - 20.0) > 0.5) iconBoxBad = YES;
+                }
+            }
+            if (mounted && pill) {
+                NSRect pillInTv = [pill convertRect:pill.bounds toView:tv];
+                if (hasPendingSec) {
+                    const CGFloat gapBelow = tv.isFlipped
+                        ? (NSMinY(pillInTv) - NSMaxY(pendingSecInTv))
+                        : (NSMinY(pendingSecInTv) - NSMaxY(pillInTv));
+                    [gapsBelowSec addObject:@(gapBelow)];
+                    hasPendingSec = NO;
+                }
+                prevPillInTv = pillInTv;
+            }
+        }
+        prevCell = cell;
+        prevCellInTv = cellInTv;
+    }
+
+    if (checkFirstScreenFit) {
+        const CGFloat winW = wc.window.frame.size.width;
+        if (winW >= 1100.0 && wc.sidebar.savedQueueRowCount == 0) {
+            const NSRect lastR = [tv rectOfRow:nRows - 1];
+            if (NSMaxY(lastR) > NSMaxY(vis) + 0.5) firstScreenOk = NO;
+        } else if (favoritesRow >= 0) {
+            const NSRect favR = [tv rectOfRow:favoritesRow];
+            if (NSMaxY(favR) > NSMaxY(vis) + 0.5) firstScreenOk = NO;
+        }
+    }
+
+    auto MinMax = [](NSArray<NSNumber *> *arr, CGFloat &outMin, CGFloat &outMax) {
+        outMin = 9999.0; outMax = -9999.0;
+        for (NSNumber *n in arr) {
+            const CGFloat v = n.doubleValue;
+            outMin = MIN(outMin, v);
+            outMax = MAX(outMax, v);
+        }
+    };
+    CGFloat minNavH = 0, maxNavH = 0, minSecH = 0, maxSecH = 0;
+    CGFloat minGapBelow = 0, maxGapBelow = 0, minGapAbove = 0, maxGapAbove = 0;
+    MinMax(navHeights, minNavH, maxNavH);
+    MinMax(secHeights, minSecH, maxSecH);
+    MinMax(gapsBelowSec, minGapBelow, maxGapBelow);
+    MinMax(gapsAboveSec, minGapAbove, maxGapAbove);
+
+    const BOOL orderOk = [actualNonSQKeys isEqualToArray:expectNonSQKeys] &&
+                         [actualSections isEqualToArray:expectSections] &&
+                         [[wc.sidebar keyForRow:0] isEqualToString:@"station"];
+    const BOOL stationSelOk = !expectStationSelected ||
+                              (wc.sidebar.selectedRow == 0 && [wc.sidebar.selectedKey isEqualToString:@"station"]);
+
+    std::printf("  [V8 %s] navH=%.1f..%.1f(station=%.1f) secH=%.1f..%.1f midY<=%.2f iconX=%.1f..%.1f "
+                "secBot=%.1f gapBelow=%.1f..%.1f gapAbove=%.1f..%.1f station=%s sec0=%s first=%s visH=%.1f\n",
+                stage, minNavH, maxNavH, stationH, minSecH, maxSecH, maxMidYDiff, minIconX, maxIconX,
+                minSecBottomPad, minGapBelow, maxGapBelow, minGapAbove, maxGapAbove,
+                NSStringFromRect(stationCellFrame).UTF8String,
+                NSStringFromRect(firstSecCellFrame).UTF8String,
+                NSStringFromRect(firstItemCellFrame).UTF8String,
+                vis.size.height);
+
+    Ck(orderOk && stationSelOk && navHeights.count >= 11 &&
+       (maxNavH - minNavH) <= 0.5 && Near(minNavH, 30.0, 0.5) && Near(stationH, 30.0, 0.5),
+       [[NSString stringWithFormat:@"V8a-%s 侧栏行顺序/key/选中不变且所有导航行与顶部 station 高度统一为 30pt", stage] UTF8String],
+       [NSString stringWithFormat:@"order=%d sel=%d(row=%ld key=%@) navH=%.1f..%.1f stationH=%.1f",
+        (int)orderOk, (int)stationSelOk, (long)wc.sidebar.selectedRow, wc.sidebar.selectedKey ?: @"",
+        minNavH, maxNavH, stationH]);
+
+    Ck(maxMidYDiff <= 1.0 && !symConfigMissing && !iconBoxBad &&
+       (maxIconX - minIconX) <= 0.5 && Near(minIconX, 20.0, 0.5) &&
+       (maxLabelX - minLabelX) <= 0.5 && truncErrs.count == 0 &&
+       !overlapErr && !cellOverlapErr && firstScreenOk,
+       [[NSString stringWithFormat:@"V8b-%s 图标/文字 midY 差<=1、左 padding 与符号配置一致、无重叠且首屏不截断", stage] UTF8String],
+       [NSString stringWithFormat:@"midY=%.2f symCfg=%d iconBad=%d iconX=%.1f..%.1f labX=%.1f..%.1f ov=%d/%d fs=%d trunc=%@",
+        maxMidYDiff, (int)!symConfigMissing, (int)iconBoxBad, minIconX, maxIconX, minLabelX, maxLabelX,
+        (int)overlapErr, (int)cellOverlapErr, (int)firstScreenOk, [truncErrs componentsJoinedByString:@","]]);
+
+    Ck(secHeights.count == 4 && (maxSecH - minSecH) <= 0.5 && Near(minSecH, 30.0, 0.5) &&
+       secStyleOk && minSecBottomPad >= 3.8 &&
+       gapsBelowSec.count == 4 && (maxGapBelow - minGapBelow) <= 1.0 && minGapBelow >= 6.5,
+       [[NSString stringWithFormat:@"V8c-%s 分组标题字号/对齐/下边距一致且标题与首行间距统一", stage] UTF8String],
+       [NSString stringWithFormat:@"secH=%.1f..%.1f style=%d botPad=%.1f gapBelow=%.1f..%.1f",
+        minSecH, maxSecH, (int)secStyleOk, minSecBottomPad, minGapBelow, maxGapBelow]);
+
+    Ck(gapsAboveSec.count == 4 && (maxGapAbove - minGapAbove) <= 1.0 && minGapAbove >= minGapBelow + 3.0,
+       [[NSString stringWithFormat:@"V8d-%s 各分组间呼吸距统一且明显大于组内标题与首行间距", stage] UTF8String],
+       [NSString stringWithFormat:@"gapAbove=%.1f..%.1f gapBelow=%.1f..%.1f",
+        minGapAbove, maxGapAbove, minGapBelow, maxGapBelow]);
+}
+
 int main() {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
@@ -959,6 +1210,41 @@ int main() {
 
             RLPSetLanguage(@"zh");
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            Pump(0.1);
+
+            // V8: 900x600 / 1180x760 × 中英文 × listen/pro 侧栏布局谐和契约（station 在 row0 且选中）
+            g_spy.savedQueuesFixture = @[];
+            [wc.sidebar reloadSavedQueues];
+            for (NSDictionary *cfg in @[
+                @{ @"name": @"zh-listen@900",  @"w": @900,  @"h": @600, @"lang": @"zh", @"mode": @"listen" },
+                @{ @"name": @"zh-pro@900",     @"w": @900,  @"h": @600, @"lang": @"zh", @"mode": @"pro" },
+                @{ @"name": @"en-listen@900",  @"w": @900,  @"h": @600, @"lang": @"en", @"mode": @"listen" },
+                @{ @"name": @"en-pro@900",     @"w": @900,  @"h": @600, @"lang": @"en", @"mode": @"pro" },
+                @{ @"name": @"zh-listen@1180", @"w": @1180, @"h": @760, @"lang": @"zh", @"mode": @"listen" },
+                @{ @"name": @"en-pro@1180",    @"w": @1180, @"h": @760, @"lang": @"en", @"mode": @"pro" },
+            ]) {
+                RLPSetLanguage(cfg[@"lang"]);
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+                ResizeWindow(wc, [cfg[@"w"] doubleValue], [cfg[@"h"] doubleValue]);
+                [wc setUiMode:cfg[@"mode"] persist:NO];
+                [wc.sidebar selectKey:@"station"];
+                Pump(0.15);
+                CheckSidebarHarmony(wc, [cfg[@"name"] UTF8String], YES, YES);
+            }
+            g_spy.savedQueuesFixture = @[
+                @{ @"name": @"Sleep Mix", @"n": @3 },
+                @{ @"name": @"Jazz Hi-Res", @"n": @8 },
+            ];
+            [wc.sidebar reloadSavedQueues];
+            RLPSetLanguage(@"zh");
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            ResizeWindow(wc, 900, 600);
+            [wc setUiMode:@"listen" persist:NO];
+            [wc.sidebar selectKey:@"station"];
+            Pump(0.15);
+            CheckSidebarHarmony(wc, "zh-playlists@900", YES, YES);
+            g_spy.savedQueuesFixture = @[];
+            [wc.sidebar reloadSavedQueues];
             Pump(0.1);
         }
 

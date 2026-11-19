@@ -190,6 +190,123 @@ static BOOL SidebarHasTitle(RLPSidebarViewController *sb, NSString *title) {
     return NO;
 }
 
+static void CheckSidebarHarmonyInMode(RLPMainWindowController *wc, const char *stage) {
+    [wc.window.contentView layoutSubtreeIfNeeded];
+    NSTableView *tv = nil;
+    for (NSView *v in wc.sidebar.view.subviews) {
+        if ([v isKindOfClass:[NSScrollView class]]) {
+            NSView *doc = ((NSScrollView *)v).documentView;
+            if ([doc isKindOfClass:[NSTableView class]]) { tv = (NSTableView *)doc; break; }
+        }
+    }
+    if (!tv || wc.sidebar.rowCount <= 0) {
+        Ck(NO, [[NSString stringWithFormat:@"S1-%s 侧栏表格存在", stage] UTF8String], @"tv nil");
+        return;
+    }
+    [tv layoutSubtreeIfNeeded];
+
+    NSMutableArray<NSNumber *> *navH = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *secH = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *gapBelow = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *gapAbove = [NSMutableArray array];
+    CGFloat stationH = -1.0, maxMidY = 0.0, minIconX = 9999.0, maxIconX = -9999.0, minSecBot = 9999.0;
+    BOOL symMissing = NO, secOk = YES, orderOk = YES;
+    NSRect prevPill = NSZeroRect, pendingSec = NSZeroRect;
+    BOOL hasPendingSec = NO;
+
+    NSArray<NSString *> *wantOrder = @[
+        @"station", @"albums", @"artists", @"tracks", @"folders", @"streaming",
+        @"queue", @"recent", @"favorites", @"playlists", @"settings"
+    ];
+    NSMutableArray<NSString *> *gotKeys = [NSMutableArray array];
+
+    for (NSInteger r = 0; r < wc.sidebar.rowCount; ++r) {
+        NSView *cell = [tv viewAtColumn:0 row:r makeIfNecessary:YES];
+        if (!cell) cell = [tv.delegate tableView:tv viewForTableColumn:nil row:r];
+        if (!cell) { secOk = NO; continue; }
+        [cell layoutSubtreeIfNeeded];
+        const BOOL mounted = (cell.superview != nil);
+        const CGFloat h = mounted ? NSHeight(cell.frame) : [tv.delegate tableView:tv heightOfRow:r];
+
+        if ([cell.identifier isEqualToString:@"SecWrap"]) {
+            [secH addObject:@(h)];
+            NSTextField *secLab = nil;
+            for (NSView *s in cell.subviews) {
+                if ([s isKindOfClass:[NSTextField class]]) { secLab = (NSTextField *)s; break; }
+            }
+            if (!secLab) { secOk = NO; continue; }
+            NSRect sr = [secLab convertRect:secLab.bounds toView:cell];
+            const CGFloat bot = cell.isFlipped ? (NSHeight(cell.bounds) - NSMaxY(sr)) : NSMinY(sr);
+            minSecBot = MIN(minSecBot, bot);
+            if (std::abs(secLab.font.pointSize - 11.0) > 0.1 || std::abs(NSMinX(sr) - 20.0) > 0.5) secOk = NO;
+            if (mounted) {
+                NSRect stv = [secLab convertRect:secLab.bounds toView:tv];
+                if (!NSIsEmptyRect(prevPill)) {
+                    [gapAbove addObject:@(tv.isFlipped ? (NSMinY(stv) - NSMaxY(prevPill))
+                                                       : (NSMinY(prevPill) - NSMaxY(stv)))];
+                }
+                pendingSec = stv;
+                hasPendingSec = YES;
+            }
+        } else {
+            NSString *k = [wc.sidebar keyForRow:r] ?: @"";
+            [gotKeys addObject:k];
+            if (r == 0) stationH = h;
+            [navH addObject:@(h)];
+
+            NSView *pill = FindById(cell, @"pill") ?: FindById(cell, @"gain") ?: FindById(cell, @"sq.empty");
+            NSImageView *icon = (NSImageView *)FindById(cell, @"icon");
+            NSTextField *lab = (NSTextField *)(FindById(cell, @"label") ?: FindById(cell, @"sq.empty.label"));
+            if (icon && lab) {
+                NSRect ir = [icon convertRect:icon.bounds toView:cell];
+                NSRect lr = [lab convertRect:lab.bounds toView:cell];
+                maxMidY = MAX(maxMidY, std::abs(NSMidY(ir) - NSMidY(lr)));
+                minIconX = MIN(minIconX, NSMinX(ir));
+                maxIconX = MAX(maxIconX, NSMinX(ir));
+                if (@available(macOS 11.0, *)) {
+                    if (!icon.symbolConfiguration) symMissing = YES;
+                }
+            }
+            if (mounted && pill) {
+                NSRect ptv = [pill convertRect:pill.bounds toView:tv];
+                if (hasPendingSec) {
+                    [gapBelow addObject:@(tv.isFlipped ? (NSMinY(ptv) - NSMaxY(pendingSec))
+                                                       : (NSMinY(pendingSec) - NSMaxY(ptv)))];
+                    hasPendingSec = NO;
+                }
+                prevPill = ptv;
+            }
+        }
+    }
+    orderOk = [gotKeys isEqualToArray:wantOrder];
+
+    auto Span = [](NSArray<NSNumber *> *a, CGFloat &lo, CGFloat &hi) {
+        lo = 9999.0; hi = -9999.0;
+        for (NSNumber *n in a) { lo = MIN(lo, n.doubleValue); hi = MAX(hi, n.doubleValue); }
+    };
+    CGFloat minNH = 0, maxNH = 0, minSH = 0, maxSH = 0, minGB = 0, maxGB = 0, minGA = 0, maxGA = 0;
+    Span(navH, minNH, maxNH);
+    Span(secH, minSH, maxSH);
+    Span(gapBelow, minGB, maxGB);
+    Span(gapAbove, minGA, maxGA);
+
+    NSString *detail = [NSString stringWithFormat:
+        @"order=%d navH=%.1f..%.1f(st=%.1f) secH=%.1f..%.1f midY<=%.2f iconX=%.1f..%.1f "
+        "sym=%d secOk=%d secBot=%.1f gapB=%.1f..%.1f gapA=%.1f..%.1f",
+        (int)orderOk, minNH, maxNH, stationH, minSH, maxSH, maxMidY, minIconX, maxIconX,
+        (int)!symMissing, (int)secOk, minSecBot, minGB, maxGB, minGA, maxGA];
+    std::printf("  [S1 %s] %s\n", stage, detail.UTF8String);
+
+    Ck(orderOk && navH.count == 11 && (maxNH - minNH) <= 0.5 &&
+       std::abs(minNH - 30.0) <= 0.5 && std::abs(stationH - 30.0) <= 0.5 &&
+       maxMidY <= 1.0 && !symMissing && (maxIconX - minIconX) <= 0.5 && std::abs(minIconX - 20.0) <= 0.5 &&
+       secH.count == 4 && (maxSH - minSH) <= 0.5 && std::abs(minSH - 30.0) <= 0.5 && secOk && minSecBot >= 3.8 &&
+       gapBelow.count == 4 && (maxGB - minGB) <= 1.0 && minGB >= 6.5 &&
+       gapAbove.count == 4 && (maxGA - minGA) <= 1.0 && minGA >= minGB + 3.0,
+       [[NSString stringWithFormat:@"S1-%s 侧栏行高/图标基线/分组标题与组间距一致", stage] UTF8String],
+       detail);
+}
+
 // Forward the real methods unchanged; the latest input and call count distinguish
 // a cached layout from a fresh update (including the 1052pt construction fallback).
 static IMP g_listenLayout, g_proLayout;
@@ -362,6 +479,7 @@ int main() {
            !SidebarHasTitle(wc.sidebar, RLPTr(@"数字音乐台")),
            "C1c listen 模式下侧栏仅有 1 个 station 入口 (row 0) 且标签为「聆听室」",
            [NSString stringWithFormat:@"stationRows=%@", stationRowsListen]);
+        CheckSidebarHarmonyInMode(wc, "listen-init");
 
         g_spy.holdSettingsGet = YES;
         [wc reloadUiModePreference];
@@ -414,6 +532,7 @@ int main() {
            "C2c 切换后侧栏仍选中 row 0 (station)",
            [NSString stringWithFormat:@"row=%ld key=%@",
             (long)wc.sidebar.selectedRow, wc.sidebar.selectedKey ?: @"(nil)"]);
+        CheckSidebarHarmonyInMode(wc, "pro-switch");
         Ck([wc.currentContent isKindOfClass:[RLPWorkbenchViewController class]] &&
            [wc.currentContent.view.identifier isEqualToString:@"page.station"],
            "C2d pro 模式下 station 原子切换到 RLPWorkbenchViewController (page.station)",
@@ -468,6 +587,7 @@ int main() {
            "C2i 切回 listen 模式回到 RLPQuickStartViewController，row 0 保持选中且无重复入口",
            [NSString stringWithFormat:@"vc=%@ row=%ld rows=%@",
             NSStringFromClass(wc.currentContent.class), (long)wc.sidebar.selectedRow, stationRowsBack]);
+        CheckSidebarHarmonyInMode(wc, "listen-return");
 
         [wc.sidebar selectKey:@"albums"];
         const auto albums = TraceGeometry(wc, "albums before sidebar return to listen station");
