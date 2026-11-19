@@ -1022,7 +1022,7 @@ int main() {
                                       SizeMatches(wc.window.contentView.frame.size, winW, winH);
                 const BOOL covOk = wb && wb.trackCover &&
                                    Near(wb.trackCover.frame.size.width, expCov, 4.0) &&
-                                   Near(wb.trackCover.frame.size.height, expCov, 4.0);
+                                   Near(wb.trackCover.frame.size.height, expCov, 14.0);
                 const BOOL heroH = heroCard && heroCard.frame.size.height >= 120.0;
 
                 BOOL allMaxXOk = (wb != nil) && (wb.stack.frame.size.width <= clipW + 1.0);

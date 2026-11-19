@@ -724,6 +724,7 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     devBar.layer.cornerRadius = t.rSm;
     devBar.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
     devBar.identifier = @"wb.top.devicebar";
+    [devBar.heightAnchor constraintGreaterThanOrEqualToConstant:38].active = YES;
     self.topDeviceBar = devBar;
 
     self.topDeviceLabel = RLPLabel(RLPTr(@"输出设备"), [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.text);
@@ -747,6 +748,7 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     NSLayoutConstraint *topDevMaxW = [self.topDevicePopup.widthAnchor constraintLessThanOrEqualToConstant:480];
     topDevMaxW.priority = NSLayoutPriorityDefaultHigh;
     topDevMaxW.active = YES;
+    [self.topDevicePopup.heightAnchor constraintGreaterThanOrEqualToConstant:28].active = YES;
 
     self.topDeviceRefreshBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新列表"), self, @selector(onRefreshDevicesClicked:));
     self.topDeviceRefreshBtn.identifier = @"wb.top.device.refresh";
@@ -1825,6 +1827,9 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     self.rackOutput = [self buildRackOutputColumn];
     self.rackColumns = 3;
     [self.rackWidthConstraints removeAllObjects];
+    // 行先接入 rackStack，再激活列宽约束；否则 col 与 rackStack 尚无共同祖先。
+    [self.rackStack addArrangedSubview:self.rackRow1];
+    [self.rackStack addArrangedSubview:self.rackRow2];
     for (NSView *col in @[self.rackPCM, self.rackDSD, self.rackOutput]) {
         [col setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self.rackRow1 addArrangedSubview:col];
@@ -1834,9 +1839,6 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         eqW.active = NO;
         [self.rackWidthConstraints addObject:eqW];
     }
-
-    [self.rackStack addArrangedSubview:self.rackRow1];
-    [self.rackStack addArrangedSubview:self.rackRow2];
     [self.rackRow1.widthAnchor constraintEqualToAnchor:self.rackStack.widthAnchor].active = YES;
     [self.rackRow2.widthAnchor constraintEqualToAnchor:self.rackStack.widthAnchor].active = YES;
 
