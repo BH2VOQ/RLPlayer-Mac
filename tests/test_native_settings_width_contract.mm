@@ -37,7 +37,23 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <unistd.h>
+
+@interface RLPMainWindowController (TelemetryAudit)
+- (void)setUiMode:(NSString *)mode persist:(BOOL)persist;
+- (void)onNowPlaying:(id)sender;
+- (void)onCloseNowPlaying:(nullable NSNotification *)note;
+@end
+
+@interface RLPSettingsViewController (TelemetryAudit)
+@property (nonatomic, copy, nullable) void (^fbProbeTransport)(void (^done)(NSInteger status, NSData * _Nullable body, BOOL timedOut));
+@property (nonatomic, copy, nullable) void (^fbUploadTransport)(NSString *url, NSString *body, void (^done)(NSInteger status, NSData * _Nullable body));
+@property (nonatomic, copy, nullable) void (^diagSummaryTransport)(void (^done)(NSDictionary * _Nullable json));
+- (void)postKey:(NSString *)key value:(NSString *)value completion:(void (^_Nullable)(BOOL ok))completion;
+- (void)onFeedbackRetry:(id)sender;
+@end
 
 static int g_pass = 0, g_fail = 0;
 
@@ -61,6 +77,10 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy) NSString *srcActive;
 @property (nonatomic, assign) NSInteger srcSeq;
 @property (nonatomic, copy, nullable) NSString *srcNextError;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *uiEvents;
+@property (nonatomic, strong) NSMutableArray<NSString *> *uiEventBodies;
+@property (nonatomic, assign) BOOL failNextSettingsPost;
+@property (nonatomic, assign) BOOL diagZipEmpty;
 @end
 
 static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
@@ -87,6 +107,8 @@ static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
         _requests = [NSMutableArray array];
         _srcServers = [NSMutableArray array];
         _srcActive = @"";
+        _uiEvents = [NSMutableArray array];
+        _uiEventBodies = [NSMutableArray array];
     }
     return self;
 }
@@ -94,6 +116,22 @@ static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
 - (BOOL)startEmbedded { return NO; }
 - (void)shutdown { }
 - (NSDictionary *)handlePostPath:(NSString *)path body:(nullable NSString *)body {
+    if ([path isEqualToString:@"/api/ui/events"] && body.length) {
+        [self.uiEventBodies addObject:[body copy]];
+        NSData *d = [body dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *parsed = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+        NSArray *arr = [parsed isKindOfClass:[NSDictionary class]] &&
+                       [parsed[@"events"] isKindOfClass:[NSArray class]]
+                     ? parsed[@"events"] : nil;
+        for (id ev in arr) {
+            if ([ev isKindOfClass:[NSDictionary class]]) [self.uiEvents addObject:ev];
+        }
+        return @{ @"ok": @YES, @"accepted": @(arr.count) };
+    }
+    if ([path hasPrefix:@"/api/settings"] && self.failNextSettingsPost) {
+        self.failNextSettingsPost = NO;
+        return @{ @"ok": @NO, @"error": @"mock rejected" };
+    }
     if ([path hasPrefix:@"/api/src/config"]) {
         if (self.srcNextError.length) {
             NSString *err = [self.srcNextError copy];
@@ -186,8 +224,15 @@ static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
     dispatch_async(dispatch_get_main_queue(), ^{ done(res); });
 }
 - (void)getData:(NSString *)path completion:(nullable RLPDataCompletion)done {
-    (void)path;
-    if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
+    [self.requests addObject:[NSString stringWithFormat:@"GET %@", path ?: @""]];
+    NSData *payload = nil;
+    if ([path hasPrefix:@"/api/diagzip"] && !self.diagZipEmpty) {
+        static const unsigned char kFakeZip[] = { 'P', 'K', 3, 4, 20, 0, 0, 0, 0, 0, 0, 0 };
+        payload = [NSData dataWithBytes:kFakeZip length:sizeof(kFakeZip)];
+    } else if ([path hasPrefix:@"/api/diagjson"]) {
+        payload = [@"{\"ok\":true,\"kind\":\"diagjson\"}" dataUsingEncoding:NSUTF8StringEncoding];
+    }
+    if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(payload); });
 }
 - (void)postData:(NSString *)path
             body:(NSData *)body
@@ -274,6 +319,7 @@ static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
         };
     }
     if ([path hasPrefix:@"/api/cast/state"]) return @{ @"ok": @YES, @"running": @NO, @"device": @"" };
+    if ([path hasPrefix:@"/api/diag"]) return @{ @"ok": @YES, @"version": @"audit", @"summary": @"ok" };
     return @{ @"ok": @YES };
 }
 @end
@@ -281,6 +327,11 @@ static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
 static RLPWidthContractSpy *g_spy = nil;
 static id FakeSharedClient(id cls, SEL sel) { (void)cls; (void)sel; return g_spy; }
 static void NoopProbe(id self, SEL sel) { (void)self; (void)sel; }
+static NSModalResponse g_savePanelResult = NSModalResponseCancel;
+static NSURL *g_savePanelURL = nil;
+static NSModalResponse FakeSavePanelRunModal(id self, SEL _cmd) { (void)self; (void)_cmd; return g_savePanelResult; }
+static NSURL *FakeSavePanelURL(id self, SEL _cmd) { (void)self; (void)_cmd; return g_savePanelURL; }
+static void NoopCheckManually(id self, SEL _cmd, BOOL manual) { (void)self; (void)_cmd; (void)manual; }
 
 static void Pump(double seconds) {
     NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
@@ -746,6 +797,7 @@ int main() {
         Method sharedM = class_getClassMethod(RLPCoreClient.class, @selector(shared));
         method_setImplementation(sharedM, (IMP)FakeSharedClient);
         Method probeM = class_getInstanceMethod(RLPSettingsViewController.class, @selector(probeFeedbackChannel));
+        IMP origProbeImp = probeM ? method_getImplementation(probeM) : nullptr;
         if (probeM) method_setImplementation(probeM, (IMP)NoopProbe);
 
         std::printf("=== test_native_settings_width_contract（meta 宽度契约 M1–M4 · 离屏 Spy）===\n");
@@ -1320,6 +1372,264 @@ int main() {
         [RLPTheme setUiStyle:@"apple"];
         [wcD stopAllActivity];
         [wcD.window close];
+
+        // =========================================================================
+        // 部分 E：原生 UI 诊断遥测（/api/ui/events）T1–T6 契约 · 离屏 Spy
+        // =========================================================================
+        std::printf("\n[Suite E] 原生 UI 诊断遥测 /api/ui/events 契约（T1–T6 · 离屏 Spy）\n");
+        std::printf("红基线对照：旧码 332433d 无 RLPDiagEvent 埋点，POST /api/ui/events 事件数为 0；新码 >= 1 且严格脱敏。\n");
+
+        {
+            if (probeM && origProbeImp) method_setImplementation(probeM, origProbeImp);
+            Method saveRunM = class_getInstanceMethod([NSSavePanel class], @selector(runModal));
+            Method saveUrlM = class_getInstanceMethod([NSSavePanel class], @selector(URL));
+            IMP origSaveRunImp = saveRunM ? method_getImplementation(saveRunM) : nullptr;
+            IMP origSaveUrlImp = saveUrlM ? method_getImplementation(saveUrlM) : nullptr;
+            Class updCls = NSClassFromString(@"RLPUpdateWindowController");
+            Method updCheckM = updCls ? class_getInstanceMethod(updCls, @selector(checkManually:)) : nullptr;
+            IMP origUpdCheckImp = updCheckM ? method_getImplementation(updCheckM) : nullptr;
+
+            NSString *tmpRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                                 [NSString stringWithFormat:@"rlp_telem_audit_%d", (int)getpid()]];
+            NSString *secretDiagDir = [tmpRoot stringByAppendingPathComponent:@"secret_user_diag_dir"];
+            NSString *stateDir = [tmpRoot stringByAppendingPathComponent:@"state_dir"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:secretDiagDir
+                                      withIntermediateDirectories:YES attributes:nil error:nil];
+            [[NSFileManager defaultManager] createDirectoryAtPath:stateDir
+                                      withIntermediateDirectories:YES attributes:nil error:nil];
+            const char *prevStateEnv = std::getenv("RLPLAYER_STATE_DIR");
+            std::string prevStateCopy = prevStateEnv ? prevStateEnv : "";
+            setenv("RLPLAYER_STATE_DIR", stateDir.UTF8String, 1);
+
+            RLPMainWindowController *wcE = [[RLPMainWindowController alloc] init];
+            wcE.window.releasedWhenClosed = NO;
+            [wcE.window setFrameAutosaveName:@""];
+            ResetMainWindowFrame(wcE, 1000.0, 700.0);
+
+            @try {
+                if (saveRunM) method_setImplementation(saveRunM, (IMP)FakeSavePanelRunModal);
+                if (saveUrlM) method_setImplementation(saveUrlM, (IMP)FakeSavePanelURL);
+                if (updCheckM) method_setImplementation(updCheckM, (IMP)NoopCheckManually);
+
+                [wcE.sidebar selectKey:@"albums"];
+                Pump(0.1);
+                RLPDiagTelemetryResetForAudit();
+                [g_spy.uiEvents removeAllObjects];
+                [g_spy.uiEventBodies removeAllObjects];
+                [g_spy.requests removeAllObjects];
+
+                // T1: 切页进 settings -> settings_open -> 切子页签
+                [wcE.sidebar selectKey:@"settings"];
+                Pump(0.12);
+                RLPSettingsViewController *settingsE = (RLPSettingsViewController *)wcE.currentContent;
+                Ck([settingsE isKindOfClass:[RLPSettingsViewController class]],
+                   "T1-pre 打开设置页成功", NSStringFromClass(wcE.currentContent.class));
+
+                if (settingsE) {
+                    settingsE.fbProbeTransport = ^(void (^done)(NSInteger, NSData *, BOOL)) {
+                        NSData *okBody = [@"{\"ok\":true,\"rate_per_minute\":3}"
+                                          dataUsingEncoding:NSUTF8StringEncoding];
+                        done(200, okBody, NO);
+                    };
+                    settingsE.fbUploadTransport = ^(NSString *url, NSString *body,
+                                                    void (^done)(NSInteger, NSData *)) {
+                        (void)url; (void)body;
+                        NSData *okReply = [@"{\"ok\":true,\"id\":\"FB-AUDIT-777\",\"diag_stored\":true}"
+                                           dataUsingEncoding:NSUTF8StringEncoding];
+                        done(200, okReply);
+                    };
+
+                    [settingsE selectPane:@"meta"];
+                    Pump(0.1);
+                    [settingsE selectPane:@"diag"];
+                    Pump(0.15);
+
+                    // T2: diag_export (ok + cancelled) / diag_json / diag_summary
+                    NSButton *zipBtn = (NSButton *)FindById(settingsE.view, @"sp_diagzip");
+                    NSButton *jsonBtn = (NSButton *)FindById(settingsE.view, @"sp_diagjson");
+                    NSButton *sumBtn = (NSButton *)FindById(settingsE.view, @"sp_diagsummary");
+                    Ck(zipBtn && jsonBtn && sumBtn, "T2-pre 找到诊断导出三按钮", @"nil");
+                    if (zipBtn) {
+                        g_savePanelURL = [NSURL fileURLWithPath:
+                                          [secretDiagDir stringByAppendingPathComponent:@"rlplayer-diag.zip"]];
+                        g_savePanelResult = NSModalResponseOK;
+                        [zipBtn performClick:nil];
+                        Pump(0.12);
+
+                        g_savePanelResult = NSModalResponseCancel;
+                        [zipBtn performClick:nil];
+                        Pump(0.12);
+                    }
+                    if (jsonBtn) {
+                        g_savePanelResult = NSModalResponseCancel;
+                        [jsonBtn performClick:nil];
+                        Pump(0.12);
+                    }
+                    if (sumBtn) {
+                        [sumBtn performClick:nil];
+                        Pump(0.12);
+                    }
+
+                    // T3: diag_channels_check + fb_send（含高敏反馈正文与路径，必须完全脱敏）
+                    NSButton *retryBtn = (NSButton *)FindById(settingsE.view, @"sp_fbretry");
+                    (void)retryBtn;
+                    [settingsE onFeedbackRetry:nil];
+                    Pump(0.12);
+
+                    NSTextView *fbTextView = (NSTextView *)FindById(settingsE.view, @"sp_fbtext");
+                    NSSwitch *fbDiagSw = (NSSwitch *)FindById(settingsE.view, @"sp_fbdiag");
+                    NSButton *fbSendBtn = (NSButton *)FindById(settingsE.view, @"sp_fbsend");
+                    Ck(fbTextView && fbSendBtn && fbSendBtn.enabled,
+                       "T3-pre 反馈框与发送按钮就绪",
+                       [NSString stringWithFormat:@"tv=%p btn=%p en=%d",
+                        fbTextView, fbSendBtn, fbSendBtn ? (int)fbSendBtn.enabled : -1]);
+                    if (fbTextView && fbSendBtn) {
+                        fbTextView.string = @"测试反馈正文包含隐私路径 /Users/alice/Private/track.flac 与 token=secret-999";
+                        if (fbDiagSw) fbDiagSw.state = NSControlStateValueOn;
+                        [fbSendBtn performClick:nil];
+                        Pump(0.15);
+                    }
+
+                    // T4: update_check + update_channel_switch
+                    NSButton *updBtn = (NSButton *)FindById(settingsE.view, @"sp_updcheck");
+                    NSPopUpButton *updChan = (NSPopUpButton *)FindById(settingsE.view, @"sp_updchannel");
+                    if (updBtn) { [updBtn performClick:nil]; Pump(0.1); }
+                    if (updChan && updChan.numberOfItems >= 2) {
+                        [updChan selectItemAtIndex:1];
+                        [updChan sendAction:updChan.action to:updChan.target];
+                        Pump(0.1);
+                    }
+
+                    // T5: 关键 /api 失败（postKey 触发 /api/settings 失败）
+                    g_spy.failNextSettingsPost = YES;
+                    [settingsE postKey:@"loudness" value:@"1" completion:nil];
+                    Pump(0.12);
+                }
+
+                // T1b: mode_switch + np + close np
+                [wcE setUiMode:@"pro" persist:YES];
+                Pump(0.12);
+                [wcE onNowPlaying:nil];
+                Pump(0.12);
+                [wcE onCloseNowPlaying:nil];
+                Pump(0.15);
+
+                auto hasEvent = ^BOOL(NSString *evt, NSString *name, NSString *routePrefix, NSString *pathExact) {
+                    for (NSDictionary *e in g_spy.uiEvents) {
+                        if (evt && ![e[@"evt"] isEqualToString:evt]) continue;
+                        if (name && ![e[@"name"] isEqualToString:name]) continue;
+                        if (routePrefix && !([e[@"route"] isKindOfClass:[NSString class]] &&
+                                             [e[@"route"] hasPrefix:routePrefix])) continue;
+                        if (pathExact && ![e[@"path"] isEqualToString:pathExact]) continue;
+                        return YES;
+                    }
+                    return NO;
+                };
+
+                NSInteger uiPostCount = 0;
+                for (NSString *r in g_spy.requests) {
+                    if ([r isEqualToString:@"POST /api/ui/events"]) ++uiPostCount;
+                }
+                Ck(uiPostCount >= 1 && g_spy.uiEvents.count >= 10,
+                   "T1 绿基线：原生关键交互确实 POST /api/ui/events（新码事件数 >= 1，旧码为 0）",
+                   [NSString stringWithFormat:@"posts=%ld events=%lu",
+                    (long)uiPostCount, (unsigned long)g_spy.uiEvents.count]);
+                Ck(hasEvent(@"nav", @"page_switch", @"settings", nil),
+                   "T1a page_switch(route=settings) 已上报", @"missing");
+                Ck(hasEvent(@"action", @"settings_open", @"settings", nil),
+                   "T1b settings_open 已上报", @"missing");
+                Ck(hasEvent(@"nav", @"settings_tab_switch", @"settings:meta", nil) &&
+                   hasEvent(@"nav", @"settings_tab_switch", @"settings:diag", nil),
+                   "T1c settings_tab_switch(settings:meta / settings:diag) 已上报", @"missing");
+                Ck(hasEvent(@"action", @"mode_switch", @"station", @"/api/settings"),
+                   "T1d mode_switch(route=station, path=/api/settings) 已上报", @"missing");
+                Ck(hasEvent(@"nav", @"page_switch", @"np", nil),
+                   "T1e page_switch(route=np) 已上报", @"missing");
+
+                Ck(hasEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip"),
+                   "T2a diag_export(path=/api/diagzip) 已上报", @"missing");
+                Ck(hasEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag"),
+                   "T2b diag_json(path=/api/diag) 已上报", @"missing");
+                Ck(hasEvent(@"action", @"diag_summary", @"settings:diag", @"/api/diag"),
+                   "T2c diag_summary(path=/api/diag) 已上报", @"missing");
+
+                Ck(hasEvent(@"action", @"diag_channels_check", @"settings:diag", nil),
+                   "T3a diag_channels_check 已上报", @"missing");
+                Ck(hasEvent(@"action", @"fb_send", @"settings:diag", nil),
+                   "T3b fb_send 已上报", @"missing");
+                Ck(hasEvent(@"action", @"update_check", @"settings:diag", nil),
+                   "T4a update_check 已上报", @"missing");
+                Ck(hasEvent(nil, @"update_channel_switch", @"settings:diag", nil),
+                   "T4b update_channel_switch 已上报", @"missing");
+                Ck(hasEvent(@"error", @"api_fail", @"settings", @"/api/settings"),
+                   "T5a /api/settings 失败记录 error/api_fail", @"missing");
+
+                NSString *joinedBodies = [g_spy.uiEventBodies componentsJoinedByString:@"\n"];
+                NSArray<NSString *> *forbidden = @[
+                    @"测试反馈正文", @"alice", @"track.flac", @"secret-999",
+                    @"FB-AUDIT-777", @"secret_user_diag_dir", @"rlplayer-diag.zip",
+                    @"/Users/", @"/var/", @"/tmp/", @"loudness", @"mock rejected"
+                ];
+                NSMutableArray<NSString *> *leaks = [NSMutableArray array];
+                for (NSString *tok in forbidden) {
+                    if ([joinedBodies rangeOfString:tok options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                        [leaks addObject:tok];
+                    }
+                }
+                Ck(leaks.count == 0,
+                   "T3c/T2d 遥测载荷零泄露（不含反馈正文、文件路径、工单号、提交键值）",
+                   [leaks componentsJoinedByString:@", "]);
+
+                // T5b + T6: URL query/路径脱敏、同签 5s 去重冷却、突发 40 条限流（均不影响 UI）
+                RLPDiagTelemetryResetForAudit();
+                [g_spy.uiEvents removeAllObjects];
+                [g_spy.uiEventBodies removeAllObjects];
+
+                RLPDiagEvent(@"error", @"api_fail", @"settings:meta",
+                             @"/api/llm/test?key=secret-token&q=abc", 401, 15.2,
+                             @"/Users/bob/secret.flac");
+                RLPDiagEvent(@"error", @"api_fail", @"settings:meta",
+                             @"/api/llm/test?key=secret-token&q=abc", 401, 16.0,
+                             @"/Users/bob/secret.flac");
+                Pump(0.12);
+                Ck(g_spy.uiEvents.count == 1 &&
+                   [g_spy.uiEvents.firstObject[@"path"] isEqualToString:@"/api/llm/test"] &&
+                   !g_spy.uiEvents.firstObject[@"code"],
+                   "T5b/T6a URL query 与文件路径被剥离，且 5s 同签错误去重只落 1 条",
+                   [NSString stringWithFormat:@"count=%lu first=%@",
+                    (unsigned long)g_spy.uiEvents.count, g_spy.uiEvents.firstObject]);
+                NSString *negBody = [g_spy.uiEventBodies componentsJoinedByString:@"\n"];
+                Ck([negBody rangeOfString:@"secret"].location == NSNotFound &&
+                   [negBody rangeOfString:@"bob"].location == NSNotFound &&
+                   [negBody rangeOfString:@"?"].location == NSNotFound,
+                   "T5c 负例遥测体不含 query / secret / 用户名路径", negBody);
+
+                [g_spy.uiEvents removeAllObjects];
+                [g_spy.uiEventBodies removeAllObjects];
+                RLPDiagTelemetryResetForAudit();
+                for (int i = 0; i < 40; ++i) {
+                    RLPDiagEvent(@"action", @"rate_probe", @"settings:adv", nil, 0, -1,
+                                 [NSString stringWithFormat:@"c%d", i]);
+                }
+                Pump(0.2);
+                Ck(g_spy.uiEvents.count >= 1 && g_spy.uiEvents.count <= 24,
+                   "T6b 2s 突发 40 条事件被限流保护（1 <= 送达 <= 24，防轮询刷爆）",
+                   [NSString stringWithFormat:@"delivered=%lu", (unsigned long)g_spy.uiEvents.count]);
+            } @finally {
+                if (probeM) method_setImplementation(probeM, (IMP)NoopProbe);
+                if (saveRunM && origSaveRunImp) method_setImplementation(saveRunM, origSaveRunImp);
+                if (saveUrlM && origSaveUrlImp) method_setImplementation(saveUrlM, origSaveUrlImp);
+                if (updCheckM && origUpdCheckImp) method_setImplementation(updCheckM, origUpdCheckImp);
+                g_savePanelURL = nil;
+                [wcE stopAllActivity];
+                [wcE.window close];
+                if (prevStateCopy.empty()) unsetenv("RLPLAYER_STATE_DIR");
+                else setenv("RLPLAYER_STATE_DIR", prevStateCopy.c_str(), 1);
+                [[NSFileManager defaultManager] removeItemAtPath:tmpRoot error:nil];
+                [RLPTheme setThemeName:@"light"];
+                [RLPTheme setUiStyle:@"apple"];
+            }
+        }
 
         std::printf("\n结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

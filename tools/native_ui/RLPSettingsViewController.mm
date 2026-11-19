@@ -995,6 +995,11 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     }
     // 诊断页每次进入补一次通道探活（web bindFeedbackCard 同语义；30s 内不重复，见 probeFeedbackChannel）。
     if (tab == RLPSTabDiag) [self probeFeedbackChannel];
+    if (outgoingPane != nil && tab != self.shownTab) {
+        NSString *tabKey = RLPSettingsKeyForTab(tab) ?: @"adv";
+        RLPDiagEvent(@"nav", @"settings_tab_switch",
+                     [NSString stringWithFormat:@"settings:%@", tabKey], nil, 0, -1, nil);
+    }
     self.shownTab = tab;
     if (tab == RLPSTabStream) {
         if (self.srvGroup) [self.srvGroup contentDidChange];
@@ -1498,6 +1503,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (notSent) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", 503, durMs, @"core_not_started");
             [self_ applySettingsSaveFailure:kv
                                        text:[NSString stringWithFormat:@"%@%@",
                                              RLPTr(@"保存失败："), RLPTr(@"核心未启动")]];
@@ -1505,11 +1514,20 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             return;
         }
         if (timedOut || !json) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", timedOut ? 504 : 500, durMs,
+                         timedOut ? @"timeout" : @"empty_response");
             [self_ applySettingsSaveFailure:@{} text:RLPTr(@"保存失败：服务没响应")];
             if (completion) completion(NO);
             return;
         }
         if (![json[@"ok"] boolValue]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", 400, durMs, @"rejected");
             NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
                           ? json[@"error"] : RLPTr(@"保存失败");
             // 后端明确拒绝：控件会被退回最近一次读回的真值 ⟹ 文案要说明"原值还在"，
@@ -1538,6 +1556,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         }
         if (accepted.count) [self_ applySettingsSaveSuccess:accepted seq:seq];
         if (dropped.count) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", 422, durMs, @"dropped_keys");
             // 只说"这些键没写进去"：不承诺"已保留原值"（这几个控件可能根本没有已知旧值可退）。
             [self_ applySettingsSaveFailure:dropped
                                        text:[NSString stringWithFormat:@"%@%@",
@@ -1649,6 +1671,8 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.fbServerOK = -1;
     [self fbChannelText:RLPTr(@"正在检查反馈通道…") kind:0];
     [self fbUpdateSendEnabled];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
+    RLPDiagEvent(@"action", @"diag_channels_check", @"settings:diag", nil, 0, -1, @"start");
 
     __weak __typeof__(self) weakSelf = self;
     __block BOOL settled = NO;
@@ -1657,6 +1681,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             __typeof__(self) self_ = weakSelf;
             if (!self_ || settled) return;
             settled = YES;
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
             if (self_.fbProbeDeadline) { [self_.fbProbeDeadline invalidate]; self_.fbProbeDeadline = nil; }
             self_.fbChannelChecking = NO;
             self_.fbLastChannelCheck = [NSDate date];
@@ -1665,6 +1690,8 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             const auto wd = rta::feedback::parse_feedback_watchdog((int)status, raw);
             if (wd.reachable) {
                 self_.fbServerOK = 1;
+                RLPDiagEvent(@"action", @"diag_channels_check", @"settings:diag", nil,
+                             status > 0 ? status : 200, durMs, @"ok");
                 NSString *line = RLPTr(@"反馈通道已连接");
                 if (wd.rate_per_minute > 0) {
                     line = [NSString stringWithFormat:@"%@%@%ld%@", line, RLPTr(@"（每分钟最多 "),
@@ -1673,6 +1700,9 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
                 [self_ fbChannelText:line kind:1];
             } else {
                 self_.fbServerOK = 0;
+                RLPDiagEvent(@"error", @"diag_channels_check", @"settings:diag", nil,
+                             status > 0 ? status : (timedOut ? 504 : 503), durMs,
+                             timedOut ? @"timeout" : @"unreachable");
                 NSString *msg = [NSString stringWithUTF8String:wd.error.c_str()] ?: @"";
                 if (timedOut) msg = RLPTr(@"反馈通道无响应，请稍后重试");
                 if ([msg stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length == 0)
@@ -1704,6 +1734,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             self_.fbChannelChecking = NO;
             self_.fbServerOK = 0;
             self_.fbLastChannelCheck = [NSDate date];
+            RLPDiagEvent(@"error", @"diag_channels_check", @"settings:diag", nil, 504, 12000.0, @"timeout");
             [self_ fbChannelText:RLPTr(@"反馈通道无响应，请稍后重试") kind:2];
             [self_ fbUpdateSendEnabled];
         }];
@@ -3816,6 +3847,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
         self.llmModelMsgIsWarn = NO;
     }
     NSString *url = force ? @"/api/llm/models?refresh=1" : @"/api/llm/models";
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3825,6 +3857,9 @@ static void RLPMetaClearStackRow(NSStackView *row) {
         NSString *cur = [json[@"current"] isKindOfClass:[NSString class]] ? json[@"current"]
                         : (self_.llmModel.stringValue ?: @"");
         if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm/models",
+                         json ? 400 : 500, durMs, @"models_failed");
             // 降级：隐藏下拉、保留手填（值填当前 model，用户可改可留空）。
             self_.llmModelPopup.hidden = YES;
             [self_ updateMetaResponsiveLayoutForHostWidth:[self_ metaTargetHostWidthPreferringViewBounds:(self_.paneHost && self_.paneHost.bounds.size.width > 1.0)]];
@@ -3903,6 +3938,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     if (!m.length || ![RLPCoreClient shared].started) return;
     ++self.llmSeq;
     NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(m)];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3910,6 +3946,10 @@ static void RLPMetaClearStackRow(NSStackView *row) {
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             [self_ clearDirtyControlId:@"llm.modeltext" expectedValue:m];
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"model_save_failed");
         }
         self_.llmStatus.stringValue = ok
             ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"已保存"), m]
@@ -3929,6 +3969,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     [self.dirtyControlIds addObject:@"llm.modeltext"];
     ++self.llmSeq;
     NSString *body = [NSString stringWithFormat:@"model=%@", RLPEnc(title)];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3936,6 +3977,10 @@ static void RLPMetaClearStackRow(NSStackView *row) {
         const BOOL ok = (json && [json[@"ok"] boolValue]);
         if (ok) {
             [self_ clearDirtyControlId:@"llm.modeltext" expectedValue:title];
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"model_pick_failed");
         }
         self_.llmStatus.stringValue = ok
             ? RLPTr(@"已保存") : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败")));
@@ -3963,6 +4008,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     }
     ++self.llmSeq;
     self.llmStatus.stringValue = RLPTr(@"保存中…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -3986,6 +4032,9 @@ static void RLPMetaClearStackRow(NSStackView *row) {
             [self_ loadLlmModels:YES];
             [self_ runLlmTestSilently];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"llm_save_failed");
             self_.llmStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
                 ? json[@"error"] : RLPTr(@"保存失败");
         }
@@ -3999,6 +4048,7 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     NSString *submittedKey = [self.llmKey.stringValue stringByTrimmingCharactersInSet:
                               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     ++self.llmSeq;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"clear=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -4010,6 +4060,10 @@ static void RLPMetaClearStackRow(NSStackView *row) {
                 [self_.dirtyControlIds removeObject:@"llm.key"];
                 if (!curKey.length) self_.lastLoadedValues[@"llm.key"] = @"";
             }
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"llm_clear_failed");
         }
         self_.llmStatus.stringValue = (json && [json[@"ok"] boolValue])
             ? RLPTr(@"已清除 API Key（可随时重新填入）")
@@ -4141,6 +4195,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     if (key.length) [body appendFormat:@"&search_key=%@", RLPEnc(key)];
     ++self.llmSeq;
     self.searchStatus.stringValue = RLPTr(@"保存中…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -4157,6 +4212,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             self_.searchStatus.stringValue = RLPTr(@"检索端点已保存");
             [self_ loadLlmConfig];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"search_save_failed");
             self_.searchStatus.stringValue = [json[@"error"] isKindOfClass:[NSString class]]
                 ? json[@"error"] : RLPTr(@"保存失败");
         }
@@ -4170,6 +4228,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     NSString *submittedKey = [self.searchKey.stringValue stringByTrimmingCharactersInSet:
                               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     ++self.llmSeq;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/llm" body:@"search_key_clear=1"
                           completion:^(NSDictionary * _Nullable json) {
@@ -4182,6 +4241,10 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
                 [self_.dirtyControlIds removeObject:@"search.key"];
                 if (!curKey.length) self_.lastLoadedValues[@"search.key"] = @"";
             }
+        } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm",
+                         json ? 400 : 500, durMs, @"search_clear_failed");
         }
         self_.searchStatus.stringValue = (json && [json[@"ok"] boolValue])
             ? RLPTr(@"已清除检索 Key")
@@ -4202,6 +4265,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 /// 真正发测试请求并把结果写进状态行。保存端点成功后也会调它（web llmSave 顺手测一次）。
 - (void)runLlmTestSilently {
     if (![RLPCoreClient shared].started) return;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/llm/test" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -4213,6 +4277,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
             self_.llmStatus.stringValue = [NSString stringWithFormat:
                 RLPTr(@"连接成功：模型 %@，耗时 %ld ms（key 有效）"), model, (long)ms];
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/llm/test",
+                         json ? 400 : 500, durMs, @"llm_test_failed");
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.llmStatus.stringValue = [RLPTr(@"连接失败：") stringByAppendingString:err];
         }
@@ -4379,12 +4446,16 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     if (![RLPCoreClient shared].started || self.wbBusy) return;
     [self wbSetBusy:YES];
     self.writebackStatus.stringValue = RLPTr(@"正在扫描 MetaBase…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/writeback?dry=1" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         [self_ wbSetBusy:NO];
         if (!json || ![json[@"ok"] boolValue]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/writeback",
+                         json ? 400 : 500, durMs, @"writeback_dry_failed");
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.writebackStatus.stringValue = @"";
             RLPToast([RLPTr(@"预览失败：") stringByAppendingString:err]);
@@ -4409,6 +4480,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
     if ([a runModal] != NSAlertFirstButtonReturn) return;
     [self wbSetBusy:YES];
     self.writebackStatus.stringValue = RLPTr(@"写回批次已启动…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/writeback" body:@"{\"apply\":true}"
                           completion:^(NSDictionary * _Nullable json) {
@@ -4416,6 +4488,9 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
         if (!self_) return;
         const BOOL started = json && [json[@"ok"] boolValue] && [json[@"started"] boolValue];
         if (!started) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:meta", @"/api/writeback",
+                         json ? 400 : 500, durMs, @"writeback_apply_failed");
             [self_ wbSetBusy:NO];
             NSString *err = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"未知错误");
             self_.writebackStatus.stringValue = @"";
@@ -4427,6 +4502,7 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 }
 
 - (void)onCheckUpdate:(id)sender {
+    RLPDiagEvent(@"action", @"update_check", @"settings:diag", nil, 0, -1, @"manual");
     [[RLPUpdateWindowController shared] checkManually:YES];
 }
 
@@ -4436,47 +4512,72 @@ static NSInteger RLPSearchIndexForProviderId(NSString *pid) {
 - (void)exportDiagAsZip:(BOOL)zip {
     // /api/diagzip 回的是 ZIP 原始字节（不是 JSON）⟹ 必须走 getData。
     // 不假装成功：取字节失败、用户取消、写盘失败三种情况分别如实说明。
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     if (!zip) {
+        RLPDiagEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag", 0, -1, @"start");
         __weak __typeof__(self) weakSelf2 = self;
         [[RLPCoreClient shared] getJSON:@"/api/diag" completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self2 = weakSelf2;
             if (!self2) return;
-            if (!json) { RLPToast(RLPTr(@"诊断 JSON 导出失败")); return; }
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            if (!json) {
+                RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/diag", 500, durMs, @"empty_response");
+                RLPToast(RLPTr(@"诊断 JSON 导出失败"));
+                return;
+            }
             NSData *d = [NSJSONSerialization dataWithJSONObject:json
                 options:NSJSONWritingPrettyPrinted error:nil];
             NSSavePanel *panel = [NSSavePanel savePanel];
             panel.nameFieldStringValue = @"rlplayer-diag.json";
-            if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+            if ([panel runModal] != NSModalResponseOK || !panel.URL) {
+                RLPDiagEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag", 0, durMs, @"cancelled");
+                return;
+            }
             if (![d writeToURL:panel.URL options:NSDataWritingAtomic error:nil]) {
+                RLPDiagEvent(@"error", @"diag_json", @"settings:diag", @"/api/diag", 0, durMs, @"write_failed");
                 RLPToast(RLPTr(@"写入失败"));
                 return;
             }
+            RLPDiagEvent(@"action", @"diag_json", @"settings:diag", @"/api/diag", 200, durMs, @"ok");
             RLPToast([NSString stringWithFormat:RLPTr(@"已导出 %@"), panel.URL.lastPathComponent]);
         }];
         return;
     }
+    RLPDiagEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip", 0, -1, @"start");
     [[RLPCoreClient shared] getData:@"/api/diagzip" completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (!data.length) { RLPToast(RLPTr(@"诊断包导出失败")); return; }
+        const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+        if (!data.length) {
+            RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/diagzip", 500, durMs, @"empty_response");
+            RLPToast(RLPTr(@"诊断包导出失败"));
+            return;
+        }
         // 服务端超预算时回的是 JSON 错误报文（不是 ZIP）。不能把它存成 .zip 假装成功；
         // 也顺手兜住 8 MiB 上限（与反馈通道同一闸门，P0-2）。
         const NSUInteger nbytes = data.length;
         const unsigned char *pb = (const unsigned char *)data.bytes;
         const bool isZip = nbytes >= 4 && pb[0] == 'P' && pb[1] == 'K' && pb[2] == 3 && pb[3] == 4;
         if (!isZip || nbytes > 8u * 1024u * 1024u) {
+            RLPDiagEvent(@"error", @"diag_export", @"settings:diag", @"/api/diagzip",
+                         422, durMs, !isZip ? @"invalid_zip" : @"too_large");
             RLPToast(RLPTr(@"诊断包导出失败"));
             return;
         }
         NSSavePanel *panel = [NSSavePanel savePanel];
         panel.nameFieldStringValue = @"rlplayer-diag.zip";
-        if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+        if ([panel runModal] != NSModalResponseOK || !panel.URL) {
+            RLPDiagEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip", 0, durMs, @"cancelled");
+            return;
+        }
         NSError *err = nil;
         if (![data writeToURL:panel.URL options:NSDataWritingAtomic error:&err]) {
+            RLPDiagEvent(@"error", @"diag_export", @"settings:diag", @"/api/diagzip", 0, durMs, @"write_failed");
             RLPToast(err.localizedDescription ?: RLPTr(@"写入失败"));
             return;
         }
+        RLPDiagEvent(@"action", @"diag_export", @"settings:diag", @"/api/diagzip", 200, durMs, @"ok");
         // 提示里写**真实字节数**（UI 文案必须与落盘大小一致；MB 只是人类可读换算）。
         NSString *name = panel.URL.lastPathComponent;
         RLPToast([NSString stringWithFormat:@"%@  %.2f MB",
@@ -4520,12 +4621,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     if (self.fbSending) return;
     NSString *text = self.fbText.string ?: @"";
     if (RLPFeedbackTextBlank(text)) {
+        RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, @"blank");
         [self fbResultText:RLPTr(@"请先写下反馈内容再发送") kind:2];
         [self.fbText.window makeFirstResponder:self.fbText];
         return;
     }
     const NSUInteger bytes = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
     if (bytes > rta::feedback::kFeedbackMaxTextBytes) {
+        RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, @"too_large");
         NSString *line = [NSString stringWithFormat:@"%@%llu%@%lu%@",
                           RLPTr(@"内容超过 "), (unsigned long long)rta::feedback::kFeedbackMaxTextBytes,
                           RLPTr(@" 字节（当前 "), (unsigned long)bytes, RLPTr(@"），请精简后再发")];
@@ -4534,15 +4637,18 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     }
     // web 同一道闸门：只有**探活成功**（==1）才发，null/失败一律拒。
     if (self.fbServerOK != 1) {
+        RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, @"channel_unavailable");
         [self fbResultText:RLPTr(@"反馈后台当前不可用，请稍后再试") kind:2];
         return;
     }
     const BOOL wantDiag = (self.fbDiagSwitch.state == NSControlStateValueOn);
+    RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil, 0, -1, wantDiag ? @"start_diag" : @"start");
     self.fbSending = YES;
     [self fbResultText:(wantDiag ? RLPTr(@"正在打包诊断包并上传…") : RLPTr(@"正在上传…")) kind:0];
     [self fbUpdateSendEnabled];
 
     if (!wantDiag) { [self fbUploadText:text diagJson:@"" attach:NO]; return; }
+    const NSTimeInterval diagT0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     // 诊断包走 /api/diagjson（与「导出诊断包」同一份组装 + 脱敏），不自己拼现场。
     [[RLPCoreClient shared] getData:@"/api/diagjson" completion:^(NSData * _Nullable data) {
@@ -4550,8 +4656,11 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         if (!self_) return;
         NSString *diag = data.length
             ? ([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        if (!diag.length)
+        if (!diag.length) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - diagT0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/diagjson", 500, durMs, @"empty_response");
             [self_ fbResultText:RLPTr(@"诊断包读取失败，将只提交正文") kind:0];
+        }
         [self_ fbUploadText:text diagJson:diag attach:(diag.length > 0)];
     }];
 }
@@ -4561,6 +4670,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 - (void)fbUploadText:(NSString *)text diagJson:(NSString *)diag attach:(BOOL)attach {
     NSString *client = [self feedbackInstallId];
     if (!client.length) {
+        RLPDiagEvent(@"error", @"fb_send", @"settings:diag", nil, 0, -1, @"install_id_invalid");
         self.fbSending = NO;
         [self fbResultText:RLPTr(@"安装 ID 无效：本机安装标识缺失或格式不对，请重新启动应用后再试。") kind:2];
         [self fbUpdateSendEnabled];
@@ -4582,6 +4692,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
     const auto built = rta::feedback::build_feedback_upload(in);
     if (!built.ok) {
+        RLPDiagEvent(@"error", @"fb_send", @"settings:diag", nil, 0, -1, @"build_failed");
         self.fbSending = NO;
         NSString *err = [NSString stringWithUTF8String:built.error.c_str()] ?: RLPTr(@"反馈内容不合法");
         [self fbResultText:err kind:2];
@@ -4592,18 +4703,22 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     const std::string bodyCpp = built.json;
     NSString *bodyStr = [NSString stringWithUTF8String:bodyCpp.c_str()] ?: @"";
     NSString *url = [NSString stringWithUTF8String:rta::feedback::kFeedbackUploadUrl] ?: @"";
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
 
     __weak __typeof__(self) weakSelf = self;
     void (^reply)(NSInteger, NSData *) = ^(NSInteger status, NSData *body) {
         dispatch_async(dispatch_get_main_queue(), ^{
             __typeof__(self) self_ = weakSelf;
             if (!self_) return;
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
             NSString *rawStr = body.length
                 ? ([[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"") : @"";
             const std::string raw = rawStr.UTF8String ?: "";
             const auto r = rta::feedback::parse_feedback_upload_reply((int)status, raw);
             self_.fbSending = NO;
             if (r.ok) {
+                RLPDiagEvent(@"action", @"fb_send", @"settings:diag", nil,
+                             status > 0 ? status : 200, durMs, @"ok");
                 NSString *ticket = [NSString stringWithUTF8String:r.id.c_str()] ?: @"";
                 NSString *line = [NSString stringWithFormat:@"%@%@%@",
                                   RLPTr(@"已收到，工单号 "),
@@ -4615,6 +4730,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
                 self_.fbText.string = @"";
                 [self_ updateFbCount];
             } else {
+                NSString *errCode = !r.code.empty()
+                    ? ([NSString stringWithUTF8String:r.code.c_str()] ?: @"upload_failed")
+                    : [NSString stringWithFormat:@"http_%ld", (long)status];
+                RLPDiagEvent(@"error", @"fb_send", @"settings:diag", nil, status, durMs, errCode);
                 NSString *m = [NSString stringWithUTF8String:r.error.c_str()] ?: @"";
                 if (!m.length) m = [NSString stringWithFormat:RLPTr(@"提交失败（HTTP %d）"), (int)status];
                 NSString *hint = @"";
@@ -4652,7 +4771,13 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [self reloadData];
 }
 
-- (void)activate { [self reloadData]; [self wbSyncBusy]; }
+- (void)activate {
+    NSString *paneKey = [self currentPaneKey] ?: @"adv";
+    RLPDiagEvent(@"action", @"settings_open",
+                 [NSString stringWithFormat:@"settings:%@", paneKey], nil, 0, -1, nil);
+    [self reloadData];
+    [self wbSyncBusy];
+}
 
 - (void)reloadData {
     [self reloadDataIncludingEqualizer:YES];
@@ -4663,13 +4788,20 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         self.statusLine.stringValue = RLPTr(@"核心未启动");
         return;
     }
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
 
     [[RLPCoreClient shared] getJSON:@"/api/devices" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         id devs = json[@"devices"];
-        if (![devs isKindOfClass:[NSArray class]]) return;
+        if (![devs isKindOfClass:[NSArray class]]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/devices", json ? 400 : 500, durMs, @"devices_failed");
+            return;
+        }
         [self_.devicePopup removeAllItems];
         [self_.inDevicePopup removeAllItems];
         // web #sp_device：首项 value="" 的「默认设备」，设备项 value = 稳定 id
@@ -4696,6 +4828,13 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     [[RLPCoreClient shared] getJSON:@"/api/filters" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        if (!json) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/filters", 500, durMs, @"filters_failed");
+            return;
+        }
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : nil;
         if (!items.count) return;
         [self_.filt1xPopup removeAllItems];
@@ -4762,7 +4901,14 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         std::fprintf(stderr, "[DIAG] GET completion seq=%lu cur=%lu\n", (unsigned long)seq, (unsigned long)self_.settingsGetSeq);
         if (!self_ || seq != self_.settingsGetSeq) return;
         NSDictionary *rawKV = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
-        if (!rawKV) { self_.statusLine.stringValue = RLPTr(@"设置读取失败"); return; }
+        if (!rawKV) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - getIssueAt) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail",
+                         [NSString stringWithFormat:@"settings:%@", [self_ currentPaneKey] ?: @"adv"],
+                         @"/api/settings", json ? 400 : 500, durMs, @"settings_read_failed");
+            self_.statusLine.stringValue = RLPTr(@"设置读取失败");
+            return;
+        }
         // 只跳过「本次读回发出之后又被保存过」的键（那些值由保存本身负责刷新），
         // 而不是因为期间有过保存就把整包丢掉（2026-11-18 夜间评审 A2）。
         NSMutableDictionary *kvFiltered = [rawKV mutableCopy];
@@ -5164,12 +5310,18 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     self.inStartBtn.enabled = NO;
     self.inStopBtn.enabled = NO;
     self.inMsg.stringValue = RLPTr(@"正在启动采集…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/input/start" body:body
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         const BOOL ok = json && [json[@"ok"] boolValue];
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:in", @"/api/input/start",
+                         json ? 400 : 500, durMs, @"input_start_failed");
+        }
         self_.inStartBtn.enabled = !ok;
         self_.inStopBtn.enabled = ok;
         self_.inMsg.stringValue = ok
@@ -5181,12 +5333,18 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
 
 - (void)onInputStop:(id)sender {
     if (![RLPCoreClient shared].started) return;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/input/stop" body:nil
                           completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         const BOOL ok = json && [json[@"ok"] boolValue];
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:in", @"/api/input/stop",
+                         json ? 400 : 500, durMs, @"input_stop_failed");
+        }
         self_.inStartBtn.enabled = YES;
         self_.inStopBtn.enabled = NO;
         self_.inMsg.stringValue = ok ? RLPTr(@"已停止")
@@ -5229,6 +5387,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     const NSInteger i = s.indexOfSelectedItem;
     NSString *modeVal = (i >= 0 && i < 3) ? vals[i] : @"1";
     NSString *url = [NSString stringWithFormat:@"/api/playmode?mode=%@", modeVal];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -5236,6 +5395,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
         if (json && [json[@"ok"] boolValue]) {
             self_.statusLine.stringValue = RLPTr(@"已保存");
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:adv", @"/api/playmode",
+                         json ? 400 : 500, durMs, @"playmode_set_failed");
             NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
                           ? json[@"error"] : RLPTr(@"保存失败");
             self_.statusLine.stringValue = err;
@@ -5249,6 +5411,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     // 不另造一种写法，否则两端行为会悄悄分叉。
     NSString *url = [NSString stringWithFormat:@"/api/shuffle?on=%@",
                      s.state == NSControlStateValueOn ? @"1" : @"0"];
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -5256,6 +5419,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
         if (json && [json[@"ok"] boolValue]) {
             self_.statusLine.stringValue = RLPTr(@"已保存");
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:adv", @"/api/shuffle",
+                         json ? 400 : 500, durMs, @"shuffle_set_failed");
             // 旧实现 completion:nil：开关已经勾上、后端却没写成（ok:false 或服务没响应）时，
             // 状态行一个字都不变、也没有提示 —— 保存失败被完全吞掉，用户以为已经开了随机。
             NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
@@ -5271,6 +5437,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
 - (void)onAddRoot:(id)sender {
     NSString *p = [self.rootField.stringValue copy] ?: @"";
     if (!p.length) { RLPToast(RLPTr(@"请先填目录或点「浏览…」")); return; }
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/lib/roots"
                                 body:[NSString stringWithFormat:@"add=%@", RLPEnc(p)]
@@ -5289,6 +5456,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
             [self_ reloadRoots];
             RLPToast(RLPTr(@"目录已加入"));
         } else {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:adv", @"/api/lib/roots",
+                         json ? 400 : 500, durMs, @"root_add_failed");
             RLPToast(([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil)
                      ?: RLPTr(@"添加目录失败"));
         }
@@ -5336,11 +5506,17 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     // 「查看 / 复制诊断摘要」按用户 2026-11-13 的要求：**只做复制 + 就地提示**。
     // 不显示 JSON 面板、不弹窗、不出现第二个容器（旧实现把摘要渲染进 sp_diagsummarytext 面板，
     // 用户截图六看到的整块 JSON 就是它）。摘要是空的就不假装「已复制」。
-    if (![RLPCoreClient shared].started) { self.diagMsg.stringValue = RLPTr(@"核心未启动"); return; }
+    if (![RLPCoreClient shared].started) {
+        RLPDiagEvent(@"error", @"diag_summary", @"settings:diag", @"/api/diag", 503, -1, @"core_not_started");
+        self.diagMsg.stringValue = RLPTr(@"核心未启动");
+        return;
+    }
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     void (^done)(NSDictionary * _Nullable) = ^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
         NSString *text = json ? [[NSString alloc] initWithData:
             [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:nil]
             encoding:NSUTF8StringEncoding] : nil;
@@ -5348,8 +5524,11 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
             [[NSPasteboard generalPasteboard] clearContents];
             [[NSPasteboard generalPasteboard] setString:text forType:NSPasteboardTypeString];
             self_.diagMsg.stringValue = RLPTr(@"摘要已复制");
+            RLPDiagEvent(@"action", @"diag_summary", @"settings:diag", @"/api/diag", 200, durMs, @"ok");
         } else {
             self_.diagMsg.stringValue = RLPTr(@"诊断摘要读取失败");
+            RLPDiagEvent(@"error", @"diag_summary", @"settings:diag", @"/api/diag",
+                         json ? 422 : 500, durMs, json ? @"empty_summary" : @"empty_response");
         }
     };
     if (self.diagSummaryTransport) { self.diagSummaryTransport(done); return; }
@@ -5363,11 +5542,14 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     [self.netGroup contentDidChange];
     if (![RLPCoreClient shared].started) { self.netMsg.stringValue = RLPTr(@"核心未启动"); return; }
     self.netMsg.stringValue = RLPTr(@"读取中…");
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/net" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (![json isKindOfClass:[NSDictionary class]]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", @"settings:diag", @"/api/net", 500, durMs, @"net_info_failed");
             self_.netMsg.stringValue = RLPTr(@"网络信息读取失败，稍后重试");
             return;
         }
@@ -5390,6 +5572,9 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     const std::string want = s.indexOfSelectedItem == 1 ? "cn" : "global";
     std::string err;
     const bool ok = rta::update::set_update_channel(want, err);
+    NSString *chanStr = [NSString stringWithUTF8String:want.c_str()] ?: @"global";
+    RLPDiagEvent(ok ? @"action" : @"error", @"update_channel_switch", @"settings:diag", nil,
+                 ok ? 200 : 500, -1, ok ? chanStr : @"save_failed");
     if (!ok) {
         [self showStatus:[NSString stringWithFormat:@"%@：%s", RLPTr(@"切换更新通道失败"),
                                                    err.empty() ? "unknown" : err.c_str()]];

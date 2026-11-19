@@ -668,4 +668,16 @@ NSDictionary<NSString *, NSString *> *RLPNPWorkTarget(NSDictionary * _Nullable m
 /// 纯函数：不读文件、不弹面板，供队列页与判据共用同一份解析。
 NSDictionary<NSString *, id> * _Nullable RLPParseM3U(NSString *text, NSString * _Nullable folder);
 
+/// 诊断遥测（/api/ui/events）：异步批量上报关键原生动作/路由/接口错误。
+/// 严格脱敏，绝不写入正文、文件路径、标题、token 或密码；带去重冷却与限流，失败静默不阻塞 UI。
+void RLPDiagEvent(NSString * _Nullable kind,
+                  NSString * _Nullable name,
+                  NSString * _Nullable route,
+                  NSString * _Nullable path,
+                  NSInteger status,
+                  double dur,
+                  NSString * _Nullable code);
+/// 判据专用：同步清空遥测队列与限流计数，隔离同进程先后测试之间的状态。
+void RLPDiagTelemetryResetForAudit(void);
+
 NS_ASSUME_NONNULL_END

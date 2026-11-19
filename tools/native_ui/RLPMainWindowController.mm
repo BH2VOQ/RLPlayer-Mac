@@ -676,6 +676,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         }
     }
     if (!key.length) key = @"albums";
+    NSString *resolvedRoute = key;
     NSString *cacheKey = [self cacheKeyForRouteKey:key];
     NSViewController *vc = self.pageCache[cacheKey];
     if (!vc) {
@@ -698,8 +699,10 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
             [sv applyUiMode:self.uiMode];
             vc = sv;
         }
-        else vc = self.albums;
+        else { vc = self.albums; resolvedRoute = @"albums"; }
         self.pageCache[cacheKey] = vc;
+    } else if (!RLPPageIdentifier(key)) {
+        resolvedRoute = @"albums";
     }
     if (vc == self.currentContent) {
         // 同页再次点选：清详情返回栈、重设标题并按需重新上报计数
@@ -709,6 +712,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         return;
     }
     [self.rowStack removeAllObjects];
+    const BOOL hadPreviousContent = (self.currentContent != nil);
     if (self.currentContent) [self.currentContent.view removeFromSuperview];
     self.currentContent = vc;
 
@@ -716,7 +720,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     // 页面根视图的 identifier = "page.<web view key>"（字面量表 RLPPageIdentifier）。
     // 这不是装饰：parity 表靠字面量机械抽取原生侧事实，页面没有稳定锚点就没法证明
     // 「web 的某个视图在原生存在」，只能靠人记 —— 那就等于没证据。
-    v.identifier = RLPPageIdentifier(key);
+    v.identifier = RLPPageIdentifier(resolvedRoute);
     v.translatesAutoresizingMaskIntoConstraints = NO;
     [self.pageHost addSubview:v];
     [NSLayoutConstraint activateConstraints:@[
@@ -727,6 +731,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     ]];
     // 顺序重要：先同步标题（会清空计数），再 activate（页面此时上报计数）
     [self syncTopbarTitle];
+    if (hadPreviousContent) {
+        RLPDiagEvent(@"nav", @"page_switch", resolvedRoute, nil, 0, -1, nil);
+    }
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
 
@@ -771,6 +778,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 /// 后端已在扫时 started=false，提示"扫描已在进行中"，不假装启动。
 - (void)onScanLibrary:(id)sender {
     if (![RLPCoreClient shared].started) { RLPToast(RLPTr(@"核心未启动")); return; }
+    NSString *route = [self currentViewKey] ?: @"albums";
+    RLPDiagEvent(@"action", @"lib_scan", route, @"/api/lib/scan", 0, -1, nil);
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/lib/scan" body:nil completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -778,6 +788,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         // 2026-11-17：请求本身失败时不要报「开始扫描」，更不要开始轮询（否则首轮就会
         // 误报「扫描完成」——119 的边角问题，这里收紧）。
         if (!json || ![json[@"ok"] boolValue]) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", route, @"/api/lib/scan", json ? 400 : 500, durMs,
+                         json ? @"scan_failed" : @"empty_response");
             RLPToast(RLPTr(@"扫描请求失败"));
             return;
         }
@@ -810,12 +823,19 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 }
 
 - (void)pollScanStatus {
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/lib/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         const BOOL ok = [json[@"ok"] respondsToSelector:@selector(boolValue)] ? [json[@"ok"] boolValue] : NO;
-        if (!ok) { [self_ stopScanPolling]; return; }
+        if (!ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", [self_ currentViewKey] ?: @"albums",
+                         @"/api/lib/status", json ? 400 : 500, durMs, @"poll_failed");
+            [self_ stopScanPolling];
+            return;
+        }
         const BOOL scanning = [json[@"scanning"] respondsToSelector:@selector(boolValue)] ? [json[@"scanning"] boolValue] : NO;
         if (scanning) {
             NSInteger scanned = [json[@"scanned"] respondsToSelector:@selector(integerValue)] ? [json[@"scanned"] integerValue] : 0;
@@ -854,12 +874,14 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     if (![note.object isKindOfClass:[NSString class]] || ![(NSString *)note.object length]) return;
     RLPAlbumDetailViewController *detail = [[RLPAlbumDetailViewController alloc] initWithAlbumKey:(NSString *)note.object];
     [self pushDetail:detail];
+    RLPDiagEvent(@"nav", @"page_switch", @"album", nil, 0, -1, nil);
 }
 
 - (void)onOpenArtist:(NSNotification *)note {
     if (![note.object isKindOfClass:[NSString class]] || ![(NSString *)note.object length]) return;
     RLPArtistDetailViewController *detail = [[RLPArtistDetailViewController alloc] initWithArtistName:(NSString *)note.object];
     [self pushDetail:detail];
+    RLPDiagEvent(@"nav", @"page_switch", @"artist", nil, 0, -1, nil);
 }
 
 - (void)onBack:(NSNotification *)note {
@@ -899,6 +921,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     if (!self.worksPage) self.worksPage = [[RLPWorksViewController alloc] init];
     [self pushDetail:self.worksPage];
     [self.worksPage loadWork:title composer:composer fromNowPlaying:YES];
+    RLPDiagEvent(@"nav", @"page_switch", @"works", nil, 0, -1, nil);
 }
 
 - (void)pushDetail:(NSViewController *)detail {
@@ -941,6 +964,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         return;
     }
     [self swapContentTo:vc];
+    RLPDiagEvent(@"nav", @"nav_back", backKey.length ? backKey : @"albums", nil, 0, -1, nil);
 }
 
 - (NSInteger)currentRow {
@@ -1152,6 +1176,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 /// 打开但停在歌词页签时先切回队列页签，已停在队列页签时再次点击关闭。
 - (void)onQueue:(id)sender {
     (void)sender;
+    RLPDiagEvent(@"action", @"drawer_toggle", [self currentViewKey] ?: @"albums", nil, 0, -1, @"queue");
     const BOOL open = !self.rightDrawer.hidden;
     NSString *tab = self.rightDrawer.tab ?: @"q";
     if (!open) {
@@ -1198,6 +1223,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 /// - 已打开且在队列页签时切到歌词页签，不误关队列抽屉；
 /// - 已打开且停在歌词页签时再次单击关闭抽屉，同步 hidden 与 drawerOpen。
 - (void)toggleLyricDrawer {
+    RLPDiagEvent(@"action", @"drawer_toggle", [self currentViewKey] ?: @"albums", nil, 0, -1, @"lyric");
     const BOOL open = !self.rightDrawer.hidden;
     NSString *tab = self.rightDrawer.tab ?: @"q";
     if (!open) {
@@ -1240,10 +1266,12 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [NSLayoutConstraint activateConstraints:@[[v.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],[v.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],[v.topAnchor constraintEqualToAnchor:root.topAnchor],[v.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]]];
     [self.npPage activate];
     [self.window makeFirstResponder:v];
+    RLPDiagEvent(@"nav", @"page_switch", @"np", nil, 0, -1, nil);
 }
 - (void)onCloseNowPlaying:(NSNotification *)note {
     if(!self.nowPlayingOverlayVisible)return;
     [self.npPage viewDidDisappear];[self.npPage.view removeFromSuperview];self.nowPlayingOverlayVisible=NO;
+    RLPDiagEvent(@"nav", @"page_switch", [self currentViewKey] ?: @"albums", nil, 0, -1, @"np_close");
 }
 
 
@@ -1422,7 +1450,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         NSNumber *writeToken = @(writeSeq);
         [self.inFlightModeWrites addObject:writeToken];
         [self applyUiModeDisplay:next navigateToStation:navigate];
+        RLPDiagEvent(@"action", @"mode_switch", @"station", @"/api/settings", 0, -1, next);
         NSString *body = [NSString stringWithFormat:@"uimode=%@", RLPEnc(next)];
+        const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
         __weak __typeof__(self) weakSelf = self;
         [[RLPCoreClient shared] postJSON:@"/api/settings" body:body completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self_ = weakSelf;
@@ -1448,6 +1478,14 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
                 }
                 return;
             }
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            const NSInteger st = ([json isKindOfClass:[NSDictionary class]] &&
+                                  [json[@"status"] respondsToSelector:@selector(integerValue)])
+                               ? [json[@"status"] integerValue] : (json ? 400 : 500);
+            NSString *code = ([json isKindOfClass:[NSDictionary class]] &&
+                              [json[@"code"] isKindOfClass:[NSString class]])
+                           ? (NSString *)json[@"code"] : (json ? @"uimode_save_failed" : @"empty_response");
+            RLPDiagEvent(@"error", @"api_fail", @"station", @"/api/settings", st, durMs, code);
             if (writeSeq != self_->_modeWriteSequence) return;
             RLPToast(RLPTr(@"保存模式设置失败"));
             NSString *fallback = self_.confirmedUiMode ?: @"listen";
@@ -1467,6 +1505,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     const NSUInteger epoch = self.modeEpoch;
     const NSUInteger sequence = ++self.modeReadSequence;
     const NSUInteger writeSeq = self.modeWriteSequence;
+    const NSTimeInterval t0 = [NSProcessInfo processInfo].systemUptime;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -1479,7 +1518,12 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
                             [json[@"kv"] isKindOfClass:[NSDictionary class]]) ? json[@"kv"] : nil;
         id okVal = kv ? json[@"ok"] : nil;
         const BOOL ok = !okVal || ([okVal respondsToSelector:@selector(boolValue)] && [okVal boolValue]);
-        if (!kv || !ok) return; // 读取失败不能重置用户模式
+        if (!kv || !ok) {
+            const double durMs = ([NSProcessInfo processInfo].systemUptime - t0) * 1000.0;
+            RLPDiagEvent(@"error", @"api_fail", [self_ currentViewKey] ?: @"albums",
+                         @"/api/settings", json ? 400 : 500, durMs, @"uimode_read_failed");
+            return; // 读取失败不能重置用户模式
+        }
         NSString *raw = [kv[@"uimode"] isKindOfClass:[NSString class]] ? kv[@"uimode"] : nil;
         NSString *resolved = [raw isEqualToString:@"pro"] ? @"pro" : @"listen";
         [self_ applyUiMode:resolved persist:NO navigateToStation:NO];
