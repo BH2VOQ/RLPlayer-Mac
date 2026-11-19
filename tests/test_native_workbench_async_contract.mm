@@ -10,6 +10,7 @@
 //   4. 音质监控总开关关闭后重开，同曲应可再次自动分析
 //   5. viewDidDisappear 后到达的旧 /api/status 不得触发新的 /api/health
 //   6. /api/profiles GET 失败（nil / ok:false）应保留旧列表与激活项
+//   9. 顶部 trackCover：/api/status 加载封面、切歌清旧图、乱序丢弃、无封面/错图占位、暗色主题与 900x600/1180x760 布局
 //
 // 纪律：真实 RLPWorkbenchViewController + swizzle +[RLPCoreClient shared] 指向可控异步 mock，
 //       不改写 production RLPCoreClient 实现、不启服务、不触碰 8899、不碰音频设备、不建可见窗口。
@@ -21,6 +22,7 @@
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 
+#include <cmath>
 #include <cstdio>
 
 static int g_pass = 0, g_fail = 0;
@@ -56,6 +58,11 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy) NSString *profileActive;
 @property (nonatomic, strong) NSTableView *profileTable;
 @property (nonatomic, strong) NSTextField *profileStatus;
+@property (nonatomic, strong) NSImageView *trackCover;
+@property (nonatomic, strong, nullable) NSImageView *trackCoverPlaceholder;
+@property (nonatomic, strong) NSTextField *trackTitle;
+@property (nonatomic, strong) NSTextField *trackSub;
+- (void)applyTheme;
 - (void)selectStudioTab:(NSString *)tab;
 - (void)reloadEqPresets;
 - (void)onEqPresetLoad:(NSPopUpButton *)sender;
@@ -99,6 +106,11 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *settingsKV;
 @property (nonatomic, assign) NSInteger cancelCount;
 @property (nonatomic, strong) NSMutableArray<NSDictionary<NSString *, NSString *> *> *postLog;
+
+@property (nonatomic, assign) BOOL holdGetData;
+@property (nonatomic, strong) NSMutableArray<RLPDataCompletion> *heldGetDatas;
+@property (nonatomic, strong) NSMutableArray<NSString *> *getDataLog;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSData *> *dataByPath;
 @end
 
 @implementation RLPWorkbenchAsyncSpy
@@ -112,6 +124,9 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         _heldProfilesGets = [NSMutableArray array];
         _settingsKV = [NSMutableDictionary dictionary];
         _postLog = [NSMutableArray array];
+        _heldGetDatas = [NSMutableArray array];
+        _getDataLog = [NSMutableArray array];
+        _dataByPath = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -130,8 +145,14 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     return nil;
 }
 - (void)getData:(NSString *)path completion:(nullable RLPDataCompletion)done {
-    (void)path;
-    if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
+    NSString *p = path ?: @"";
+    [self.getDataLog addObject:p];
+    if (self.holdGetData) {
+        if (done) [self.heldGetDatas addObject:[done copy]];
+        return;
+    }
+    NSData *resp = self.dataByPath[p];
+    if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(resp); });
 }
 - (void)postData:(NSString *)path body:(NSData *)body contentType:(NSString *)contentType
       completion:(nullable RLPJSONCompletion)done {
@@ -267,6 +288,29 @@ static RLPWorkbenchViewController *MakeOffscreenWorkbench(void) {
     vc.view.frame = NSMakeRect(0, 0, 1080, 760);
     [vc.view layoutSubtreeIfNeeded];
     return vc;
+}
+
+static NSData *MakeSolidPNGData(NSInteger width, NSInteger height, NSColor *color) {
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL pixelsWide:width pixelsHigh:height
+                   bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                  colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:ctx];
+    [color setFill];
+    NSRectFill(NSMakeRect(0, 0, width, height));
+    [NSGraphicsContext restoreGraphicsState];
+    return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
+
+static NSView * _Nullable FindSubviewByIdentifier(NSView *root, NSString *ident) {
+    if ([root.identifier isEqualToString:ident]) return root;
+    for (NSView *sub in root.subviews) {
+        NSView *found = FindSubviewByIdentifier(sub, ident);
+        if (found) return found;
+    }
+    return nil;
 }
 
 int main() {
@@ -691,6 +735,216 @@ int main() {
                 (long)pausePosts, [vc.status[@"playing"] boolValue], wbWin.firstResponder, frBefore]);
             [wbWin orderOut:nil];
             static NSWindow *sWbWin; sWbWin = wbWin; (void)sWbWin;
+        }
+
+        // -----------------------------------------------------------------
+        // 9. 顶部 trackCover：真实封面加载、切歌清旧图、乱序丢弃、失败占位与双尺寸布局
+        // -----------------------------------------------------------------
+        {
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            vc.view.frame = NSMakeRect(0, 0, 900, 600);
+            [vc.view layoutSubtreeIfNeeded];
+
+            NSView *trackCard = FindSubviewByIdentifier(vc.view, @"wb.trackcard");
+            NSView *topRow = vc.trackCover.superview;
+            NSView *detailBtn = FindSubviewByIdentifier(vc.view, @"wb.chaindetail");
+            NSView *playBtn = FindSubviewByIdentifier(vc.view, @"wb.trackplay");
+            NSImage *placeholderImg = vc.trackCover.image;
+            const CGFloat cardHeightBefore = trackCard ? trackCard.frame.size.height : 0.0;
+            const CGFloat topRowHeightBefore = topRow ? topRow.frame.size.height : 0.0;
+            Ck(vc.trackCover != nil && placeholderImg != nil && placeholderImg.isTemplate &&
+               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
+               trackCard != nil && cardHeightBefore > 0.0 && std::fabs(topRowHeightBefore - 56.0) <= 0.5,
+               "9-precondition: initial trackCover is 56x56 template placeholder",
+               [NSString stringWithFormat:@"cover=%@ img=%@ tpl=%d size=%@ cardH=%.1f rowH=%.1f",
+                vc.trackCover, placeholderImg, placeholderImg.isTemplate,
+                NSStringFromSize(vc.trackCover.frame.size), cardHeightBefore, topRowHeightBefore]);
+
+            NSData *pngA = MakeSolidPNGData(120, 80, NSColor.systemRedColor);
+            NSData *pngB = MakeSolidPNGData(80, 120, NSColor.systemBlueColor);
+            NSString *pathA = @"/tmp/mock-cover-a.flac";
+            NSString *pathB = @"/tmp/mock-cover-b.flac";
+            NSString *urlA = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(pathA)];
+            NSString *urlB = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(pathB)];
+
+            g_spy.holdGetData = NO;
+            [g_spy.heldGetDatas removeAllObjects];
+            [g_spy.getDataLog removeAllObjects];
+            [g_spy.dataByPath removeAllObjects];
+            g_spy.dataByPath[urlA] = pngA;
+            g_spy.dataByPath[urlB] = pngB;
+            g_spy.holdStatusGet = NO;
+
+            // 9a: fake /api/status 返回曲 A，加载真实封面且状态轮询不重复打请求
+            g_spy.statusGetResponse = @{
+                @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                @"current": pathA, @"title": @"Track A", @"artist": @"Artist A", @"album": @"Album A",
+            };
+            [vc reloadStatus];
+            Pump(0.05);
+            [vc.view layoutSubtreeIfNeeded];
+            Ck(vc.trackCover.image != nil && vc.trackCover.image != placeholderImg &&
+               !vc.trackCover.image.isTemplate &&
+               NSEqualSizes(vc.trackCover.image.size, NSMakeSize(120, 80)) &&
+               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
+               (vc.trackCoverPlaceholder == nil || vc.trackCoverPlaceholder.hidden) &&
+               std::fabs((topRow ? topRow.frame.size.height : 0.0) - topRowHeightBefore) <= 0.5 &&
+               std::fabs(trackCard.frame.size.height - cardHeightBefore) <= 0.5 &&
+               [g_spy.getDataLog containsObject:urlA],
+               "9a: track A status loads real cover NSImage and keeps 56x56 & card height",
+               [NSString stringWithFormat:@"img=%@ tpl=%d imgSz=%@ frameSz=%@ rowH=%.1f/%.1f cardH=%.1f/%.1f log=%@",
+                vc.trackCover.image, vc.trackCover.image.isTemplate,
+                NSStringFromSize(vc.trackCover.image.size), NSStringFromSize(vc.trackCover.frame.size),
+                topRow ? topRow.frame.size.height : 0.0, topRowHeightBefore,
+                trackCard.frame.size.height, cardHeightBefore, g_spy.getDataLog]);
+
+            const NSUInteger fetchCountAfterA = g_spy.getDataLog.count;
+            [vc reloadStatus];
+            Pump(0.05);
+            Ck(g_spy.getDataLog.count == fetchCountAfterA &&
+               NSEqualSizes(vc.trackCover.image.size, NSMakeSize(120, 80)),
+               "9a-poll: repeated /api/status poll for same track A does not re-fetch or clear cover",
+               [NSString stringWithFormat:@"count=%lu imgSz=%@",
+                (unsigned long)g_spy.getDataLog.count, NSStringFromSize(vc.trackCover.image.size)]);
+
+            // 9b: 切歌 A -> B，切歌瞬间立即清 A 的旧图；按序返回 B 后显示 B 且尺寸不变
+            g_spy.holdGetData = YES;
+            [g_spy.heldGetDatas removeAllObjects];
+            g_spy.statusGetResponse = @{
+                @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                @"current": pathB, @"title": @"Track B", @"artist": @"Artist B", @"album": @"Album B",
+            };
+            [vc reloadStatus];
+            Pump(0.05);
+            Ck(vc.trackCover.image == placeholderImg &&
+               (vc.trackCoverPlaceholder == nil || !vc.trackCoverPlaceholder.hidden) &&
+               g_spy.heldGetDatas.count == 1 && [g_spy.getDataLog.lastObject isEqualToString:urlB],
+               "9b-pre: switching A->B immediately clears A's old cover before B callback returns",
+               [NSString stringWithFormat:@"img=%@ held=%lu lastUrl=%@",
+                vc.trackCover.image, (unsigned long)g_spy.heldGetDatas.count, g_spy.getDataLog.lastObject]);
+
+            RLPDataCompletion cbB = g_spy.heldGetDatas.firstObject;
+            [g_spy.heldGetDatas removeAllObjects];
+            if (cbB) cbB(pngB);
+            Pump(0.05);
+            [vc.view layoutSubtreeIfNeeded];
+            Ck(vc.trackCover.image != nil && vc.trackCover.image != placeholderImg &&
+               !vc.trackCover.image.isTemplate &&
+               NSEqualSizes(vc.trackCover.image.size, NSMakeSize(80, 120)) &&
+               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
+               (vc.trackCoverPlaceholder == nil || vc.trackCoverPlaceholder.hidden),
+               "9b: B cover callback shows B NSImage and keeps 56x56",
+               [NSString stringWithFormat:@"imgSz=%@ frameSz=%@",
+                NSStringFromSize(vc.trackCover.image.size), NSStringFromSize(vc.trackCover.frame.size)]);
+
+            // 9c: 乱序回调丢弃 — 先请求 A 再切 B，B 先返回后到达的旧 A 回调不得覆盖 B
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"current": pathA, @"title": @"Track A2"} forSeq:vc.statusSeq + 1];
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"current": pathB, @"title": @"Track B2"} forSeq:vc.statusSeq + 1];
+            Ck(g_spy.heldGetDatas.count == 2,
+               "9c-precondition: both A and B cover requests held",
+               [NSString stringWithFormat:@"held=%lu", (unsigned long)g_spy.heldGetDatas.count]);
+            RLPDataCompletion staleCbA = g_spy.heldGetDatas[0];
+            RLPDataCompletion freshCbB = g_spy.heldGetDatas[1];
+            [g_spy.heldGetDatas removeAllObjects];
+            freshCbB(pngB);
+            Pump(0.05);
+            staleCbA(pngA);
+            Pump(0.05);
+            Ck(NSEqualSizes(vc.trackCover.image.size, NSMakeSize(80, 120)) &&
+               vc.trackCover.image != placeholderImg,
+               "9c: stale cover callback for A arriving after B does not overwrite B",
+               [NSString stringWithFormat:@"imgSz=%@", NSStringFromSize(vc.trackCover.image.size)]);
+
+            // 9d: 无封面 (nil) / 损坏图片字节 / 空曲 均回到占位且不卡住
+            g_spy.holdGetData = NO;
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"current": @"/tmp/mock-no-cover.flac", @"title": @"No Cover"}
+                            forSeq:vc.statusSeq + 1];
+            Pump(0.05);
+            Ck(vc.trackCover.image == placeholderImg &&
+               (vc.trackCoverPlaceholder == nil || !vc.trackCoverPlaceholder.hidden) &&
+               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)),
+               "9d-nil: track without cover displays placeholder and does not keep B's old image",
+               [NSString stringWithFormat:@"img=%@ frameSz=%@", vc.trackCover.image, NSStringFromSize(vc.trackCover.frame.size)]);
+
+            NSString *badPath = @"/tmp/mock-bad-cover.flac";
+            g_spy.dataByPath[[NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(badPath)]] =
+                [@"not-an-image" dataUsingEncoding:NSUTF8StringEncoding];
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"current": badPath, @"title": @"Bad Cover"}
+                            forSeq:vc.statusSeq + 1];
+            Pump(0.05);
+            Ck(vc.trackCover.image == placeholderImg &&
+               (vc.trackCoverPlaceholder == nil || !vc.trackCoverPlaceholder.hidden),
+               "9d-bad: invalid cover bytes safely fall back to placeholder", @"");
+
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"current": pathA, @"title": @"Track A"}
+                            forSeq:vc.statusSeq + 1];
+            Pump(0.05);
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @NO, @"current": @""}
+                            forSeq:vc.statusSeq + 1];
+            Pump(0.05);
+            Ck(vc.trackCover.image == placeholderImg &&
+               (vc.trackCoverPlaceholder == nil || !vc.trackCoverPlaceholder.hidden),
+               "9d-idle: empty current track resets cover to placeholder", @"");
+
+            // 9e: 暗色主题可读性与 900x600 / 1180x760 布局不重叠、不撑高
+            [RLPTheme setThemeName:@"dark"];
+            [vc applyTheme];
+            Ck(vc.trackCover.layer.backgroundColor != nil &&
+               (vc.trackCoverPlaceholder == nil || [vc.trackCoverPlaceholder.contentTintColor isEqual:[RLPTheme current].mut]),
+               "9e-dark: dark theme updates placeholder tint and cover container background", @"");
+
+            [vc applyStatusPayload:@{
+                @"ok": @YES, @"playing": @YES, @"current": pathA,
+                @"title": @"Very Long Track Title That Should Truncate Without Overlapping Right Action Buttons In Narrow Layout",
+                @"artist": @"Artist Name", @"album": @"Album Name",
+            } forSeq:vc.statusSeq + 1];
+            Pump(0.05);
+            BOOL layoutOk900 = NO, layoutOk1180 = NO;
+            for (NSNumber *wNum in @[@900, @1180]) {
+                const CGFloat w = [wNum doubleValue];
+                const CGFloat h = (w < 1000.0) ? 600.0 : 760.0;
+                vc.view.frame = NSMakeRect(0, 0, w, h);
+                [vc.view layoutSubtreeIfNeeded];
+                NSRect coverR = [vc.trackCover convertRect:vc.trackCover.bounds toView:trackCard];
+                NSRect titleR = [vc.trackTitle convertRect:vc.trackTitle.bounds toView:trackCard];
+                NSRect subR = [vc.trackSub convertRect:vc.trackSub.bounds toView:trackCard];
+                NSRect detailR = detailBtn ? [detailBtn convertRect:detailBtn.bounds toView:trackCard] : NSZeroRect;
+                NSRect playR = playBtn ? [playBtn convertRect:playBtn.bounds toView:trackCard] : NSZeroRect;
+                BOOL ok = NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
+                          std::fabs((topRow ? topRow.frame.size.height : 0.0) - topRowHeightBefore) <= 0.5 &&
+                          std::fabs(trackCard.frame.size.height - cardHeightBefore) <= 0.5 &&
+                          !NSIntersectsRect(coverR, titleR) &&
+                          !NSIntersectsRect(coverR, subR) &&
+                          !NSIntersectsRect(coverR, detailR) &&
+                          !NSIntersectsRect(titleR, subR) &&
+                          !NSIntersectsRect(titleR, detailR) &&
+                          !NSIntersectsRect(titleR, playR) &&
+                          !NSIntersectsRect(subR, detailR) &&
+                          !NSIntersectsRect(subR, playR) &&
+                          !NSIntersectsRect(detailR, playR);
+                if (w < 1000.0) layoutOk900 = ok;
+                else layoutOk1180 = ok;
+            }
+            Ck(layoutOk900 && layoutOk1180 && NSEqualSizes(vc.trackCover.image.size, NSMakeSize(120, 80)),
+               "9e-layout: 900x600 and 1180x760 preserve hero height, 56x56 cover, and zero overlap under dark theme",
+               [NSString stringWithFormat:@"ok900=%d ok1180=%d cardH=%.1f/%.1f",
+                layoutOk900, layoutOk1180, trackCard.frame.size.height, cardHeightBefore]);
+
+            // 9f: 无路径仅有 albumKey 时通过 RLPCoverLoader 加载
+            NSString *albKey = @"alb-wb-cover-1";
+            g_spy.dataByPath[[NSString stringWithFormat:@"/api/lib/cover?k=%@", RLPEnc(albKey)]] = pngB;
+            [vc applyStatusPayload:@{@"ok": @YES, @"playing": @YES, @"current": @"", @"albumKey": albKey, @"title": @"Album Only"}
+                            forSeq:vc.statusSeq + 1];
+            Pump(0.05);
+            Ck(vc.trackCover.image != placeholderImg && !vc.trackCover.image.isTemplate &&
+               NSEqualSizes(vc.trackCover.image.size, NSMakeSize(80, 120)),
+               "9f: albumKey fallback loads cover via RLPCoverLoader",
+               [NSString stringWithFormat:@"imgSz=%@", NSStringFromSize(vc.trackCover.image.size)]);
+
+            [RLPTheme setThemeName:@"light"];
+            g_spy.holdGetData = NO;
+            [g_spy.dataByPath removeAllObjects];
+            [g_spy.heldGetDatas removeAllObjects];
         }
 
         method_setImplementation(shared, origShared);
