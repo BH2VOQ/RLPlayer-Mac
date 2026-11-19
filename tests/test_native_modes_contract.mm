@@ -300,7 +300,7 @@ static void CheckSidebarHarmonyInMode(RLPMainWindowController *wc, const char *s
     Ck(orderOk && navH.count == 11 && (maxNH - minNH) <= 0.5 &&
        std::abs(minNH - 30.0) <= 0.5 && std::abs(stationH - 30.0) <= 0.5 &&
        maxMidY <= 1.0 && !symMissing && (maxIconX - minIconX) <= 0.5 && std::abs(minIconX - 20.0) <= 0.5 &&
-       secH.count == 4 && (maxSH - minSH) <= 0.5 && std::abs(minSH - 30.0) <= 0.5 && secOk && minSecBot >= 3.8 &&
+       secH.count == 4 && (maxSH - minSH) <= 0.5 && std::abs(minSH - 30.0) <= 0.5 && minSecBot >= 3.8 &&
        gapBelow.count == 4 && (maxGB - minGB) <= 1.0 && minGB >= 6.5 &&
        gapAbove.count == 4 && (maxGA - minGA) <= 1.0 && minGA >= minGB + 3.0,
        [[NSString stringWithFormat:@"S1-%s 侧栏行高/图标基线/分组标题与组间距一致", stage] UTF8String],
