@@ -91,6 +91,24 @@ static NSInteger CardBodyItems(NSView *card) {
     NSView *body = FindId(card, @"set.group.body");
     return body ? (NSInteger)body.subviews.count : 0;
 }
+static NSRect VisRectIn(NSView *sub, NSView *container) {
+    NSRect r = [sub convertRect:sub.bounds toView:container];
+    if (!container.isFlipped) r.origin.y = container.bounds.size.height - NSMaxY(r);
+    return r;
+}
+static NSArray<NSTextField *> *CardNotesIn(NSView *card) {
+    NSMutableArray<NSTextField *> *out = [NSMutableArray array];
+    for (NSView *sub in Descendants(card)) {
+        if ([sub isKindOfClass:[NSTextField class]] && [sub.identifier isEqualToString:@"set.note"]) {
+            [out addObject:(NSTextField *)sub];
+        }
+    }
+    return out;
+}
+static CGFloat SingleLineHeightForFont(NSFont *font) {
+    NSTextField *probe = RLPLabel(@"Ag", font ?: [NSFont systemFontOfSize:11], NSColor.labelColor);
+    return ceil(probe.intrinsicContentSize.height);
+}
 static BOOL IsControl(NSView *v) {
     return [v isKindOfClass:[NSButton class]] ||      // 含 NSSwitch / NSPopUpButton
            [v isKindOfClass:[NSTextField class]] ||
@@ -344,7 +362,8 @@ int main() {
                [NSString stringWithFormat:@"【A】%@ 在「软件更新」卡体内", ident], @"归卡失败");
         }
         NSArray<NSString *> *fbIds = @[ @"sp_fbtext", @"sp_fbcount", @"sp_fbchan",
-                                        @"sp_fbdiag", @"sp_fbsend", @"sp_fbmsg" ];
+                                        @"sp_fbdiag", @"sp_fbpreview", @"sp_fbpreviewbox",
+                                        @"sp_fbresult", @"sp_fbsend", @"sp_fbmsg" ];
         for (NSString *ident in fbIds) {
             NSView *x = FindId(diagPane, ident);
             Ck(x && fbCard && CardFor(x) == fbCard,
@@ -354,6 +373,40 @@ int main() {
         Ck(FindId(diagPane, @"sp_diagsummarytext") == nil && FindId(diagPane, @"sp_diagscroll") == nil,
            @"【D】诊断页不存在摘要 JSON 面板（sp_diagsummarytext / sp_diagscroll）", @"旧面板还在");
         if (snapDir) Snap(diagPane, snapDir, @"native-pane-diag.png");
+        // 点预览后预览框按 ≥5 行伸展，且不与任何 set.note 说明行相交
+        {
+            NSButton *pvBtn = (NSButton *)FindId(diagPane, @"sp_fbpreview");
+            NSTextField *pvBox = (NSTextField *)FindId(diagPane, @"sp_fbpreviewbox");
+            if (pvBtn && pvBox && fbCard) {
+                [pvBtn performClick:nil];
+                Pump(0.15);
+                [v layoutSubtreeIfNeeded];
+                Pump(0.15);
+                [v layoutSubtreeIfNeeded];
+                const NSRect rPv = VisRectIn(pvBox, fbCard);
+                const CGFloat lineH = SingleLineHeightForFont(pvBox.font);
+                NSArray<NSTextField *> *notes = CardNotesIn(fbCard);
+                std::printf("  [FRAMES cards_diag_preview] pv={x=%.1f,y=%.1f,w=%.1f,h=%.1f} lineH=%.1f notes=%lu\n",
+                            rPv.origin.x, rPv.origin.y, rPv.size.width, rPv.size.height,
+                            lineH, (unsigned long)notes.count);
+                Ck(!pvBox.hidden && rPv.size.height >= 5.0 * lineH - 2.0,
+                   @"【A】点「先看会发送什么」后 sp_fbpreviewbox 展平≥5行",
+                   [NSString stringWithFormat:@"h=%.1f lineH=%.1f hidden=%d",
+                    rPv.size.height, lineH, pvBox.hidden]);
+                BOOL hitNote = NO;
+                for (NSTextField *note in notes) {
+                    const NSRect rN = VisRectIn(note, fbCard);
+                    std::printf("    [FRAME note] {x=%.1f,y=%.1f,w=%.1f,h=%.1f}\n",
+                                rN.origin.x, rN.origin.y, rN.size.width, rN.size.height);
+                    if (NSIntersectsRect(rPv, rN)) hitNote = YES;
+                }
+                Ck(!hitNote && notes.count >= 2,
+                   @"【A】sp_fbpreviewbox 与反馈卡片底部说明行两两不相交",
+                   [NSString stringWithFormat:@"hitNote=%d notes=%lu", hitNote, (unsigned long)notes.count]);
+            } else {
+                Ck(NO, @"【A】反馈预览框与卡片存在", @"缺 sp_fbpreview / sp_fbpreviewbox / fbCard");
+            }
+        }
 
         // ---- ⑦ 其余页签的结构兜底（逐页已遍历，这里补各自的点名控件） ----
         [settings selectPane:@"adv"];

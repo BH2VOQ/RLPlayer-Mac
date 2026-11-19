@@ -81,6 +81,198 @@ static NSView *CardFor(NSView *v) {
         if ([NSStringFromClass(p.class) isEqualToString:@"RLPSettingsGroup"]) return p;
     return nil;
 }
+/// 转成自顶向下的视觉坐标（minY 在上、maxY 在下）。
+static NSRect VisRectIn(NSView *sub, NSView *container) {
+    NSRect r = [sub convertRect:sub.bounds toView:container];
+    if (!container.isFlipped) {
+        r.origin.y = container.bounds.size.height - NSMaxY(r);
+    }
+    return r;
+}
+static NSArray<NSTextField *> *CardNotesIn(NSView *card) {
+    NSMutableArray<NSTextField *> *notes = [NSMutableArray array];
+    for (NSView *v in Descendants(card)) {
+        if ([v isKindOfClass:[NSTextField class]] && [v.identifier isEqualToString:@"set.note"]) {
+            [notes addObject:(NSTextField *)v];
+        }
+    }
+    [notes sortUsingComparator:^NSComparisonResult(NSTextField *a, NSTextField *b) {
+        const CGFloat ya = VisRectIn(a, card).origin.y;
+        const CGFloat yb = VisRectIn(b, card).origin.y;
+        if (ya < yb) return NSOrderedAscending;
+        if (ya > yb) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    return notes;
+}
+static CGFloat SingleLineHeightForFont(NSFont *font) {
+    NSTextField *probe = RLPLabel(@"Ag", font ?: [NSFont systemFontOfSize:11], NSColor.labelColor);
+    return ceil(probe.intrinsicContentSize.height);
+}
+static CGFloat RequiredWrapHeight(NSTextField *tf, CGFloat availW) {
+    if (!tf || !tf.stringValue.length || availW <= 1.0) return 0.0;
+    NSTextField *m = RLPLabel(tf.stringValue, tf.font ?: [NSFont systemFontOfSize:11], NSColor.labelColor);
+    m.lineBreakMode = NSLineBreakByWordWrapping;
+    m.maximumNumberOfLines = 0;
+    if ([m.cell isKindOfClass:[NSTextFieldCell class]]) {
+        NSTextFieldCell *cell = (NSTextFieldCell *)m.cell;
+        cell.wraps = YES;
+        cell.scrollable = NO;
+        cell.usesSingleLineMode = NO;
+    }
+    const NSSize sz = [m.cell cellSizeForBounds:NSMakeRect(0, 0, availW, 100000.0)];
+    return ceil(sz.height);
+}
+static void TriggerFbResultEmpty(RLPSettingsViewController *settings) {
+    SEL sel = NSSelectorFromString(@"fbResultText:kind:");
+    NSMethodSignature *sig = [settings methodSignatureForSelector:sel];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = settings;
+    inv.selector = sel;
+    NSString *empty = @"";
+    NSInteger kind = 0;
+    [inv setArgument:&empty atIndex:2];
+    [inv setArgument:&kind atIndex:3];
+    [inv invoke];
+}
+static void AssertFeedbackCardGeometry(RLPSettingsViewController *settings,
+                                       NSString *tag,
+                                       BOOL expectResultVisible,
+                                       BOOL expectRetryVisible) {
+    NSView *diagPane = FindId(settings.view, @"tab.diag");
+    NSTextField *pvBox = (NSTextField *)FindId(diagPane, @"sp_fbpreviewbox");
+    NSTextField *resBox = (NSTextField *)FindId(diagPane, @"sp_fbresult");
+    NSTextField *fbCount = (NSTextField *)FindId(diagPane, @"sp_fbcount");
+    NSTextField *fbChan = (NSTextField *)FindId(diagPane, @"sp_fbchan");
+    NSTextField *fbMsg = (NSTextField *)FindId(diagPane, @"sp_fbmsg");
+    NSView *fbScroll = FindId(diagPane, @"sp_fbscroll");
+    NSSwitch *fbDiag = (NSSwitch *)FindId(diagPane, @"sp_fbdiag");
+    NSButton *pvBtn = (NSButton *)FindId(diagPane, @"sp_fbpreview");
+    NSButton *sendBtn = (NSButton *)FindId(diagPane, @"sp_fbsend");
+    NSButton *retryBtn = (NSButton *)FindId(diagPane, @"sp_fbretry");
+    NSView *fbCard = CardFor(pvBox ?: fbChan);
+    Ck(fbCard != nil && pvBox != nil && resBox != nil && fbCount != nil && fbChan != nil &&
+       fbScroll != nil && fbDiag != nil && pvBtn != nil && sendBtn != nil && retryBtn != nil,
+       [NSString stringWithFormat:@"[%@] 反馈卡片与关键控件齐全", tag], @"控件缺失");
+    if (!fbCard || !pvBox || !resBox) return;
+
+    NSArray<NSTextField *> *notes = CardNotesIn(fbCard);
+    Ck(notes.count >= 2, [NSString stringWithFormat:@"[%@] 反馈卡片底部两条说明存在", tag],
+       [NSString stringWithFormat:@"notes=%lu", (unsigned long)notes.count]);
+    if (notes.count < 2) return;
+
+    const CGFloat cardW = fbCard.bounds.size.width;
+    const CGFloat cardH = fbCard.bounds.size.height;
+    const NSRect rScroll = VisRectIn(fbScroll, fbCard);
+    const NSRect rCount = VisRectIn(fbCount, fbCard);
+    const NSRect rChan = VisRectIn(fbChan, fbCard);
+    const NSRect rDiag = VisRectIn(fbDiag, fbCard);
+    const NSRect rPvBtn = VisRectIn(pvBtn, fbCard);
+    const NSRect rSendBtn = VisRectIn(sendBtn, fbCard);
+    const NSRect rRetryBtn = VisRectIn(retryBtn, fbCard);
+    const NSRect rMsg = VisRectIn(fbMsg, fbCard);
+    const NSRect rPv = VisRectIn(pvBox, fbCard);
+    const NSRect rRes = VisRectIn(resBox, fbCard);
+    const NSRect rN0 = VisRectIn(notes[0], fbCard);
+    const NSRect rN1 = VisRectIn(notes[1], fbCard);
+
+    const CGFloat lineH = SingleLineHeightForFont(pvBox.font);
+    const CGFloat needPvH = RequiredWrapHeight(pvBox, rPv.size.width);
+    const CGFloat needResH = expectResultVisible ? RequiredWrapHeight(resBox, rRes.size.width) : 0.0;
+
+    std::printf("  [FRAMES %s] card=(%.1f,%.1f) chan={%.1f,%.1f,%.1f,%.1f} diag={%.1f,%.1f,%.1f,%.1f} "
+                "pvBtn={%.1f,%.1f,%.1f,%.1f} sendBtn={%.1f,%.1f,%.1f,%.1f} retry={%.1f,%.1f,%.1f,%.1f}(h=%d) "
+                "msg={%.1f,%.1f,%.1f,%.1f} pv={%.1f,%.1f,%.1f,%.1f}(need=%.1f,lineH=%.1f) "
+                "res={%.1f,%.1f,%.1f,%.1f}(need=%.1f,h=%d) note0={%.1f,%.1f,%.1f,%.1f} note1={%.1f,%.1f,%.1f,%.1f}\n",
+                tag.UTF8String, cardW, cardH,
+                rChan.origin.x, rChan.origin.y, rChan.size.width, rChan.size.height,
+                rDiag.origin.x, rDiag.origin.y, rDiag.size.width, rDiag.size.height,
+                rPvBtn.origin.x, rPvBtn.origin.y, rPvBtn.size.width, rPvBtn.size.height,
+                rSendBtn.origin.x, rSendBtn.origin.y, rSendBtn.size.width, rSendBtn.size.height,
+                rRetryBtn.origin.x, rRetryBtn.origin.y, rRetryBtn.size.width, rRetryBtn.size.height,
+                (int)retryBtn.hidden,
+                rMsg.origin.x, rMsg.origin.y, rMsg.size.width, rMsg.size.height,
+                rPv.origin.x, rPv.origin.y, rPv.size.width, rPv.size.height, needPvH, lineH,
+                rRes.origin.x, rRes.origin.y, rRes.size.width, rRes.size.height, needResH, (int)resBox.hidden,
+                rN0.origin.x, rN0.origin.y, rN0.size.width, rN0.size.height,
+                rN1.origin.x, rN1.origin.y, rN1.size.width, rN1.size.height);
+
+    // 1. 预览框按≥5行与实际换行高度撑开，绝不被裁成一行
+    Ck(!pvBox.hidden && rPv.size.width > 120.0 &&
+       rPv.size.height >= 5.0 * lineH - 2.0 && rPv.size.height >= needPvH - 1.0,
+       [NSString stringWithFormat:@"[%@] 预览框高度满足≥5行且容纳完整换行文本", tag],
+       [NSString stringWithFormat:@"h=%.1f need=%.1f lineH=%.1f hidden=%d",
+        rPv.size.height, needPvH, lineH, pvBox.hidden]);
+
+    // 2. 结果框空态 hidden 不占位 vs 有字态在 preview 下方独立成行且 >= 6pt 间距
+    if (!expectResultVisible) {
+        const CGFloat gapPvNote0 = NSMinY(rN0) - NSMaxY(rPv);
+        Ck(resBox.hidden && rRes.size.height <= 0.5 &&
+           gapPvNote0 >= 6.0 - 0.5 && gapPvNote0 <= 24.0,
+           [NSString stringWithFormat:@"[%@] 空结果隐藏且不占垂直空间", tag],
+           [NSString stringWithFormat:@"resHidden=%d resH=%.1f gapPvNote0=%.1f",
+            resBox.hidden, rRes.size.height, gapPvNote0]);
+    } else {
+        const CGFloat gapPvRes = NSMinY(rRes) - NSMaxY(rPv);
+        const CGFloat gapResNote0 = NSMinY(rN0) - NSMaxY(rRes);
+        Ck(!resBox.hidden && rRes.size.height >= needResH - 1.0 &&
+           gapPvRes >= 6.0 - 0.5 && gapResNote0 >= 6.0 - 0.5,
+           [NSString stringWithFormat:@"[%@] 结果框在预览框下方>=6pt、多行换行且位于说明行上方", tag],
+           [NSString stringWithFormat:@"resHidden=%d resH=%.1f need=%.1f gapPvRes=%.1f gapResNote0=%.1f",
+            resBox.hidden, rRes.size.height, needResH, gapPvRes, gapResNote0]);
+    }
+
+    // 3. 长系统串/长正文/按钮/说明不横向溢出卡片，底部说明不超出卡片底
+    NSMutableArray<NSString *> *names = [@[
+        @"fbScroll", @"fbCount", @"fbChan", @"fbDiag", @"pvBtn", @"sendBtn",
+        @"fbMsg", @"pvBox", @"note0", @"note1"
+    ] mutableCopy];
+    NSMutableArray<NSValue *> *rects = [@[
+        [NSValue valueWithRect:rScroll], [NSValue valueWithRect:rCount],
+        [NSValue valueWithRect:rChan],   [NSValue valueWithRect:rDiag],
+        [NSValue valueWithRect:rPvBtn],  [NSValue valueWithRect:rSendBtn],
+        [NSValue valueWithRect:rMsg],    [NSValue valueWithRect:rPv],
+        [NSValue valueWithRect:rN0],     [NSValue valueWithRect:rN1]
+    ] mutableCopy];
+    if (expectResultVisible) {
+        [names addObject:@"resBox"];
+        [rects addObject:[NSValue valueWithRect:rRes]];
+    }
+    if (expectRetryVisible && !retryBtn.hidden) {
+        [names addObject:@"retryBtn"];
+        [rects addObject:[NSValue valueWithRect:rRetryBtn]];
+    }
+
+    NSMutableArray<NSString *> *overflows = [NSMutableArray array];
+    for (NSUInteger i = 0; i < rects.count; ++i) {
+        const NSRect r = rects[i].rectValue;
+        if (NSMinX(r) < -0.5 || NSMaxX(r) > cardW + 0.5 || NSMinY(r) < 38.0 || NSMaxY(r) > cardH + 0.5) {
+            [overflows addObject:[NSString stringWithFormat:@"%@(%.1f..%.1f,y=%.1f..%.1f vs %.1fx%.1f)",
+                                  names[i], NSMinX(r), NSMaxX(r), NSMinY(r), NSMaxY(r), cardW, cardH]];
+        }
+    }
+    Ck(overflows.count == 0,
+       [NSString stringWithFormat:@"[%@] 所有控件均无横向或底部溢出", tag],
+       [overflows componentsJoinedByString:@" | "]);
+
+    // 4. 两两不相交
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (NSUInteger i = 0; i < rects.count; ++i) {
+        const NSRect a = rects[i].rectValue;
+        if (a.size.width <= 0.1 || a.size.height <= 0.1) continue;
+        for (NSUInteger j = i + 1; j < rects.count; ++j) {
+            const NSRect b = rects[j].rectValue;
+            if (b.size.width <= 0.1 || b.size.height <= 0.1) continue;
+            if (NSIntersectsRect(a, b)) {
+                [hits addObject:[NSString stringWithFormat:@"%@×%@", names[i], names[j]]];
+            }
+        }
+    }
+    Ck(hits.count == 0,
+       [NSString stringWithFormat:@"[%@] 反馈卡片内各区两两不相交", tag],
+       [hits componentsJoinedByString:@" | "]);
+}
 /// 返回当前所有窗口的指纹，用于「没有新窗口」判据（数量 + 标题）。
 static NSString *WindowsFingerprint(void) {
     NSMutableArray<NSString *> *a = [NSMutableArray array];
@@ -430,6 +622,127 @@ int main() {
             Ck([pvBox.stringValue containsString:@"诊断包：不附带"],
                @"【P8】开关关掉后预览改为不附带", pvBox.stringValue);
             Ck(uploadCalls == before, @"【P9】预览绝不发请求", [NSString stringWithFormat:@"calls=%ld", (long)uploadCalls]);
+        }
+
+        // ---- 布局与防重叠回归：预览>=5行、空结果0占位、有结果在预览下方>=6pt、长正文/长系统串不溢出 ----
+        {
+            const struct { int w; int h; } sizes[] = {
+                { 900, 600 },
+                { 1180, 760 },
+                { 674, 600 },   // 900x600 主窗口减去 226pt 侧栏后的设置页实际可用宽
+            };
+            NSString *longBody =
+                @"第一行：播放 DSD256 时偶发轻微爆音，请排查缓冲配置。\n"
+                @"第二行：用于验证 900x600 与 1180x760、中英文下长正文自动换行且不与下方结果区、说明行重叠。\n"
+                @"LongUnbrokenPayloadToken_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            NSString *longOs =
+                @"Version 27.3 (Build 26C5035r) LongSystemVersionStringWithoutSpaces_ARM64_Darwin27_ExtendedDiagnosticBuild";
+            const char *longErrJson =
+                "{\"ok\":false,\"code\":\"server_error\",\"error\":"
+                "\"Upload rejected due to oversized diagnostic telemetry payload across multiple validation stages; "
+                "please uncheck diagnostics or shorten description and retry later "
+                "(LONG_ERROR_TOKEN_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ).\"}";
+
+            SetKVC(settings, @"fbSystemVersionOverride", longOs);
+            for (NSString *lang in @[ @"zh", @"en" ]) {
+                RLPSetLanguage(lang);
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification
+                                                                    object:nil];
+                Pump(0.2);
+                [v layoutSubtreeIfNeeded];
+
+                if (!probeReply) {
+                    SetKVC(settings, @"fbLastChannelCheck", nil);
+                    [settings performSelector:NSSelectorFromString(@"probeFeedbackChannel")];
+                    Pump(0.1);
+                }
+                if (probeReply) {
+                    void (^replyCopy)(NSInteger, NSData *, BOOL) = [probeReply copy];
+                    probeReply = nil;
+                    NSData *okWd = [NSData dataWithBytes:"{\"ok\":true,\"limits\":{\"textBytes\":16384,\"diagBytes\":8388608,\"ratePerMinute\":5}}"
+                                                  length:strlen("{\"ok\":true,\"limits\":{\"textBytes\":16384,\"diagBytes\":8388608,\"ratePerMinute\":5}}")];
+                    replyCopy(200, okWd, NO);
+                    Pump(0.15);
+                }
+
+                for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); ++si) {
+                    const int winW = sizes[si].w;
+                    const int winH = sizes[si].h;
+                    v.frame = NSMakeRect(0, 0, winW, winH);
+                    [v layoutSubtreeIfNeeded];
+                    Pump(0.1);
+                    [v layoutSubtreeIfNeeded];
+
+                    NSTextView *curText = (NSTextView *)FindId(settings.view, @"sp_fbtext");
+                    NSSwitch *curDiag = (NSSwitch *)FindId(settings.view, @"sp_fbdiag");
+                    NSButton *curPvBtn = (NSButton *)FindId(settings.view, @"sp_fbpreview");
+                    NSButton *curSendBtn = (NSButton *)FindId(settings.view, @"sp_fbsend");
+
+                    // A: 预览显示 >=5 行 + 长系统串 + 长正文 + 空结果隐藏不占位
+                    TriggerFbResultEmpty(settings);
+                    curText.string = longBody;
+                    [settings performSelector:NSSelectorFromString(@"updateFbCount")];
+                    curDiag.state = NSControlStateValueOn;
+                    [curPvBtn performClick:nil];
+                    Pump(0.15);
+                    [v layoutSubtreeIfNeeded];
+                    Pump(0.15);
+                    [v layoutSubtreeIfNeeded];
+                    AssertFeedbackCardGeometry(
+                        settings,
+                        [NSString stringWithFormat:@"%s_%dx%d_pv_emptyRes", lang.UTF8String, winW, winH],
+                        NO, NO);
+
+                    // B: 保留预览框，触发多行错误结果框 -> 结果必须在预览下方 >=6pt 且在说明行上方
+                    curDiag.state = NSControlStateValueOff;
+                    curText.string = @"Feedback layout verification payload";
+                    [settings performSelector:NSSelectorFromString(@"updateFbCount")];
+                    pendingReply = nil;
+                    [curSendBtn performClick:nil];
+                    Pump(0.15);
+                    if (pendingReply) {
+                        void (^upCopy)(NSInteger, NSData *) = [pendingReply copy];
+                        pendingReply = nil;
+                        upCopy(500, [NSData dataWithBytes:longErrJson length:strlen(longErrJson)]);
+                    }
+                    Pump(0.15);
+                    [v layoutSubtreeIfNeeded];
+                    Pump(0.15);
+                    [v layoutSubtreeIfNeeded];
+                    AssertFeedbackCardGeometry(
+                        settings,
+                        [NSString stringWithFormat:@"%s_%dx%d_pv_withRes", lang.UTF8String, winW, winH],
+                        YES, NO);
+
+                    // C: 最窄宽 + 英文下重探失败让 sp_fbretry 显示，验证操作行与状态仍不碰撞/不溢出
+                    if ([lang isEqualToString:@"en"] && winW == 674) {
+                        SetKVC(settings, @"fbLastChannelCheck", nil);
+                        probeReply = nil;
+                        [settings performSelector:NSSelectorFromString(@"probeFeedbackChannel")];
+                        Pump(0.1);
+                        if (probeReply) {
+                            void (^replyCopy)(NSInteger, NSData *, BOOL) = [probeReply copy];
+                            probeReply = nil;
+                            const char *dead = "{\"ok\":false,\"error\":\"Temporary maintenance window active for diagnostics endpoint testing\"}";
+                            replyCopy(503, [NSData dataWithBytes:dead length:strlen(dead)], NO);
+                        }
+                        Pump(0.15);
+                        [v layoutSubtreeIfNeeded];
+                        Pump(0.15);
+                        [v layoutSubtreeIfNeeded];
+                        AssertFeedbackCardGeometry(
+                            settings,
+                            [NSString stringWithFormat:@"%s_%dx%d_pv_withRes_retry", lang.UTF8String, winW, winH],
+                            YES, YES);
+                    }
+                }
+            }
+
+            SetKVC(settings, @"fbSystemVersionOverride", nil);
+            RLPSetLanguage(@"zh");
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification
+                                                                object:nil];
+            Pump(0.1);
         }
 
         std::printf("结果：%d passed, %d failed\n", gPass, gFail);

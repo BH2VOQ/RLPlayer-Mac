@@ -21,9 +21,74 @@ static const CGFloat kBodyPadY = 14.0;
 @property (nonatomic, assign) BOOL inRelayout;
 @property (nonatomic, assign) CGFloat lastWidth;
 @property (nonatomic, assign) NSUInteger lastItemCount;
+@property (nonatomic, copy) NSString *lastVisibilityKey;
 /// 最近一次排出来的内容高度。
 @property (nonatomic, assign) CGFloat contentHeight;
 @end
+
+static BOOL RLPIsWrappingLabel(NSTextField *tf) {
+    if (![tf isKindOfClass:[NSTextField class]] || tf.isEditable) return NO;
+    const NSLineBreakMode mode = tf.lineBreakMode;
+    if (mode == NSLineBreakByTruncatingTail ||
+        mode == NSLineBreakByTruncatingHead ||
+        mode == NSLineBreakByTruncatingMiddle) {
+        return NO;
+    }
+    if (tf.maximumNumberOfLines == 1) return NO;
+    return YES;
+}
+
+static void RLPEnsureWrappingLabel(NSTextField *tf) {
+    if (![tf isKindOfClass:[NSTextField class]]) return;
+    tf.lineBreakMode = NSLineBreakByWordWrapping;
+    if ([tf.cell isKindOfClass:[NSTextFieldCell class]]) {
+        NSTextFieldCell *cell = (NSTextFieldCell *)tf.cell;
+        cell.wraps = YES;
+        cell.scrollable = NO;
+        cell.usesSingleLineMode = NO;
+    }
+    [tf setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [tf setContentCompressionResistancePriority:1.0f
+                                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+}
+
+static void RLPConfigureGridItemWrappingWidth(NSView *v, CGFloat itemW) {
+    if ([v isKindOfClass:[NSTextField class]]) {
+        NSTextField *tf = (NSTextField *)v;
+        if (RLPIsWrappingLabel(tf)) {
+            RLPEnsureWrappingLabel(tf);
+            if (fabs(tf.preferredMaxLayoutWidth - itemW) > 0.5) {
+                tf.preferredMaxLayoutWidth = itemW;
+            }
+            [tf invalidateIntrinsicContentSize];
+        }
+        return;
+    }
+    if ([v isKindOfClass:[NSStackView class]] &&
+        ((NSStackView *)v).orientation == NSUserInterfaceLayoutOrientationVertical) {
+        for (NSView *sub in ((NSStackView *)v).arrangedSubviews) {
+            if ([sub isKindOfClass:[NSTextField class]]) {
+                NSTextField *tf = (NSTextField *)sub;
+                if (RLPIsWrappingLabel(tf)) {
+                    RLPEnsureWrappingLabel(tf);
+                    if (fabs(tf.preferredMaxLayoutWidth - itemW) > 0.5) {
+                        tf.preferredMaxLayoutWidth = itemW;
+                    }
+                    [tf invalidateIntrinsicContentSize];
+                }
+            }
+        }
+    }
+}
+
+static NSString *RLPVisibilitySignature(NSArray<NSView *> *items) {
+    NSMutableString *sig = [NSMutableString stringWithCapacity:items.count];
+    for (NSView *v in items) {
+        [sig appendString:(v.isHidden ? @"0" : @"1")];
+    }
+    return sig;
+}
 
 @implementation RLPFieldGrid
 
@@ -64,6 +129,7 @@ static const CGFloat kBodyPadY = 14.0;
     self.contentHeight = 0;
     self.lastWidth = -1;
     self.lastItemCount = NSUIntegerMax;
+    self.lastVisibilityKey = nil;
     [self setNeedsLayout:YES];
 }
 
@@ -81,17 +147,22 @@ static const CGFloat kBodyPadY = 14.0;
 - (void)relayout {
     if (self.inRelayout) return;
     const CGFloat wNow = self.bounds.size.width > 1 ? self.bounds.size.width : 640;
-    // 宽度与项数都没变 ⟹ 布局结果不会变，直接返回（避免 layout↔relayout 死循环）
-    if (fabs(wNow - self.lastWidth) < 0.5 && self.lastItemCount == self.items.count && self.live.count)
+    NSString *visKey = RLPVisibilitySignature(self.items);
+    // 宽度、项数与显隐状态都没变 ⟹ 布局结果不会变，直接返回（避免 layout↔relayout 死循环）
+    if (fabs(wNow - self.lastWidth) < 0.5 &&
+        self.lastItemCount == self.items.count &&
+        [self.lastVisibilityKey isEqualToString:visKey] &&
+        self.live.count)
         return;
     self.inRelayout = YES;
     self.lastWidth = wNow;
     self.lastItemCount = self.items.count;
+    self.lastVisibilityKey = visKey;
     if (self.live.count) { [NSLayoutConstraint deactivateConstraints:self.live]; [self.live removeAllObjects]; }
     const CGFloat w = wNow;
     const NSInteger cols = [self columnsForWidth:w];
     self.columnCount = cols;
-    // 逐行摆放：整行项独占一行；普通项按列填充。
+    // 逐行摆放：整行项独占一行；普通项按列填充；隐藏项不占位。
     const CGFloat kRowGapNow = MAX(0.0, self.rowGap);
     const CGFloat kColGapNow = MAX(0.0, self.columnGap);
     const CGFloat colW = (w - kBodyPadX * 2 - kColGapNow * (cols - 1)) / cols;
@@ -102,12 +173,36 @@ static const CGFloat kBodyPadY = 14.0;
     for (NSUInteger i = 0; i < self.items.count; ++i) {
         NSView *v = self.items[i];
         const BOOL full = self.spans[i].boolValue;
+        const CGFloat itemW = full ? (w - kBodyPadX * 2) : colW;
+        if (v.isHidden) {
+            [cs addObject:[v.leadingAnchor constraintEqualToAnchor:self.leadingAnchor]];
+            [cs addObject:[v.topAnchor constraintEqualToAnchor:self.topAnchor]];
+            NSLayoutConstraint *hw = [v.widthAnchor constraintEqualToConstant:
+                                      [v isKindOfClass:[NSTextField class]] ? 0.0 : itemW];
+            hw.priority = 998;
+            NSLayoutConstraint *hh = [v.heightAnchor constraintEqualToConstant:0.0];
+            hh.priority = 998;
+            [cs addObject:hw];
+            [cs addObject:hh];
+            continue;
+        }
         if (full && col > 0) { y += rowH + kRowGapNow; col = 0; rowH = 0; }
         const CGFloat x = kBodyPadX + col * (colW + kColGapNow);
-        const CGFloat itemW = full ? (w - kBodyPadX * 2) : colW;
+        RLPConfigureGridItemWrappingWidth(v, itemW);
         // 用 fittingSize / intrinsicContentSize 量高度，不调 layoutSubtreeIfNeeded：
         // 后者在约束求解过程中会重入（实测栈溢出）。
         CGFloat h = v.fittingSize.height;
+        if ([v isKindOfClass:[NSTextField class]]) {
+            NSTextField *tf = (NSTextField *)v;
+            if (RLPIsWrappingLabel(tf) && tf.maximumNumberOfLines == 0 && tf.stringValue.length > 0) {
+                const NSSize csSize = [tf.cell cellSizeForBounds:NSMakeRect(0, 0, itemW, 100000.0)];
+                const NSSize icSize = tf.intrinsicContentSize;
+                h = MAX(h, ceil(csSize.height));
+                if (icSize.height > 0 && icSize.height != NSViewNoIntrinsicMetric) {
+                    h = MAX(h, ceil(icSize.height));
+                }
+            }
+        }
         // 自定义整行视图（数据源列表 / 表格 / 子面板）用 intrinsicContentSize 报真实高度；
         // fittingSize 对"四边钉死但无内在高度"的容器会返回 0。
         if (h < 1) {
@@ -115,6 +210,7 @@ static const CGFloat kBodyPadY = 14.0;
             if (ic.height > 0 && ic.height != NSViewNoIntrinsicMetric) h = ic.height;
         }
         if (h < 1) h = 44;
+        h = ceil(h);
         [cs addObject:[v.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:x]];
         [cs addObject:[v.topAnchor constraintEqualToAnchor:self.topAnchor constant:y]];
         [cs addObject:[v.widthAnchor constraintEqualToConstant:itemW]];
@@ -125,10 +221,11 @@ static const CGFloat kBodyPadY = 14.0;
     if (col > 0) y += rowH + kRowGapNow;
     // 网格自身高度：优先级低于「卡片底 = 网格底」的钉子，避免两条等式互相打架
     // （实测打架结果是网格被压成 0 高、卡片只剩标题条，字段全被裁掉）。
-    NSLayoutConstraint *hc = [self.heightAnchor constraintEqualToConstant:MAX(1, y - kRowGap + kBodyPadY)];
+    const CGFloat totalH = MAX(1.0, y - kRowGapNow + kBodyPadY);
+    NSLayoutConstraint *hc = [self.heightAnchor constraintEqualToConstant:totalH];
     hc.priority = NSLayoutPriorityDefaultHigh;
     [cs addObject:hc];
-    self.contentHeight = MAX(1, y - kRowGap + kBodyPadY);
+    self.contentHeight = totalH;
     [NSLayoutConstraint activateConstraints:cs];
     self.live = cs;
     self.inRelayout = NO;
@@ -144,7 +241,8 @@ static const CGFloat kBodyPadY = 14.0;
 /// （2026-11-13 在元数据页截图里抓到：卡片只有标题行那么高，数据源行溢出卡片）。
 /// 这里显式清掉"宽/项数未变"的短路，重算项高度，再让父卡片重新协商自身高度。
 - (void)contentDidChange {
-    self.lastItemCount = -1;
+    self.lastItemCount = NSUIntegerMax;
+    self.lastVisibilityKey = nil;
     [self relayout];
     [self invalidateIntrinsicContentSize];
     if ([self.superview respondsToSelector:@selector(contentDidChange)])
@@ -158,13 +256,19 @@ static const CGFloat kBodyPadY = 14.0;
 }
 - (void)layout { [super layout]; [self relayout]; }
 /// 卡片被加进 stack 后宽度才确定：显式失效一次，让下一次 layout 重排。
-- (void)invalidateLayout { self.lastWidth = -1; self.lastItemCount = NSUIntegerMax; [self setNeedsLayout:YES]; }
+- (void)invalidateLayout {
+    self.lastWidth = -1;
+    self.lastItemCount = NSUIntegerMax;
+    self.lastVisibilityKey = nil;
+    [self setNeedsLayout:YES];
+}
 
 /// 内容（行数/行高）变了：强制下一次 layout 重排。
 - (void)invalidateIntrinsicContentSize {
     [super invalidateIntrinsicContentSize];
     self.lastWidth = -1;
     self.lastItemCount = NSUIntegerMax;
+    self.lastVisibilityKey = nil;
     [self setNeedsLayout:YES];
 }
 @end
@@ -271,6 +375,7 @@ static const CGFloat kBodyPadY = 14.0;
         hn.translatesAutoresizingMaskIntoConstraints = NO;
         hn.lineBreakMode = NSLineBreakByWordWrapping;
         hn.maximumNumberOfLines = 3;
+        RLPEnsureWrappingLabel(hn);
         [box addArrangedSubview:hn];
         [hn.widthAnchor constraintEqualToAnchor:box.widthAnchor].active = YES;
     }
@@ -307,6 +412,7 @@ static const CGFloat kBodyPadY = 14.0;
     l.translatesAutoresizingMaskIntoConstraints = NO;
     l.lineBreakMode = NSLineBreakByWordWrapping;
     l.maximumNumberOfLines = 2;
+    RLPEnsureWrappingLabel(l);
     [row addArrangedSubview:l];
     [box addArrangedSubview:row];
     [row.widthAnchor constraintEqualToAnchor:box.widthAnchor].active = YES;
@@ -315,6 +421,7 @@ static const CGFloat kBodyPadY = 14.0;
         hn.translatesAutoresizingMaskIntoConstraints = NO;
         hn.lineBreakMode = NSLineBreakByWordWrapping;
         hn.maximumNumberOfLines = 3;
+        RLPEnsureWrappingLabel(hn);
         [box addArrangedSubview:hn];
         [hn.widthAnchor constraintEqualToAnchor:box.widthAnchor].active = YES;
     }
@@ -384,20 +491,44 @@ static const CGFloat kBodyPadY = 14.0;
         if (c.firstAttribute == NSLayoutAttributeWidth && c.secondItem == nil) c.active = NO;
     }
     note.translatesAutoresizingMaskIntoConstraints = NO;
+    if (RLPIsWrappingLabel(note)) {
+        RLPEnsureWrappingLabel(note);
+        [note setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                        forOrientation:NSLayoutConstraintOrientationVertical];
+    }
     [self.grid addItem:note span:YES];
     [self syncHeight];
 }
 
 - (void)addNote:(NSString *)text {
     NSTextField *l = RLPLabel(text ?: @"", [NSFont systemFontOfSize:10.5], [RLPTheme current].mut2);
+    l.identifier = @"set.note";
     l.translatesAutoresizingMaskIntoConstraints = NO;
-    l.lineBreakMode = NSLineBreakByWordWrapping;
-    l.maximumNumberOfLines = 6;
+    l.maximumNumberOfLines = 0;
+    l.selectable = YES;
+    RLPEnsureWrappingLabel(l);
+    [l setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                  forOrientation:NSLayoutConstraintOrientationVertical];
     [self.grid addItem:l span:YES];
     [self syncHeight];
 }
 
 - (void)addFullRow:(NSView *)view {
+    if (!view) return;
+    for (NSLayoutConstraint *c in view.constraints.copy) {
+        if (c.firstAttribute == NSLayoutAttributeWidth &&
+            c.relation == NSLayoutRelationEqual &&
+            c.secondItem == nil) {
+            c.active = NO;
+        }
+    }
+    view.translatesAutoresizingMaskIntoConstraints = NO;
+    if ([view isKindOfClass:[NSTextField class]] && RLPIsWrappingLabel((NSTextField *)view)) {
+        NSTextField *tf = (NSTextField *)view;
+        RLPEnsureWrappingLabel(tf);
+        [tf setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh
+                                      forOrientation:NSLayoutConstraintOrientationVertical];
+    }
     [self.grid addItem:view span:YES];
     [self syncHeight];
 }
@@ -425,8 +556,10 @@ static const CGFloat kBodyPadY = 14.0;
 /// **只由数据加载方显式调用一次**，不挂任何 frame/通知观察者：
 /// 观察者会在布局过程中触发 → 标脏 → 再布局，AppKit 直接 abort（实测 SIGTRAP）。
 - (void)contentDidChange {
-    [self.grid invalidateIntrinsicContentSize];
+    [self.grid invalidateLayout];
+    [self.grid relayout];
     [self setNeedsUpdateConstraints:YES];
+    [self setNeedsLayout:YES];
 }
 
 - (void)applyTheme {
