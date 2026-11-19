@@ -56,6 +56,13 @@ static RLPDataCompletion pendingCover;
 @property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *pendingHealths;
 @property (nonatomic, assign) BOOL holdCancel;
 @property (nonatomic, copy, nullable) RLPJSONCompletion pendingCancel;
+@property (nonatomic, assign) BOOL holdMeta;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *pendingMetas;
+@property (nonatomic, assign) BOOL holdQueue;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *pendingQueues;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *pendingLyricsQueue;
+@property (nonatomic, strong) NSMutableArray<RLPDataCompletion> *pendingCoversQueue;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSData *> *coverFixtures;
 @end
 @implementation RLPRequestSpy
 - (instancetype)init {
@@ -63,6 +70,11 @@ static RLPDataCompletion pendingCover;
     if (self) {
         _requestLog = [NSMutableArray array];
         _pendingHealths = [NSMutableArray array];
+        _pendingMetas = [NSMutableArray array];
+        _pendingQueues = [NSMutableArray array];
+        _pendingLyricsQueue = [NSMutableArray array];
+        _pendingCoversQueue = [NSMutableArray array];
+        _coverFixtures = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -84,7 +96,20 @@ static RLPDataCompletion pendingCover;
 }
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     [self.requestLog addObject:[NSString stringWithFormat:@"GET %@", path ?: @""]];
-    if(holdNPRequests&&done&&[path hasPrefix:@"/api/lyrics?file="]){pendingLyrics=[done copy];return;}
+    if(holdNPRequests&&done&&[path hasPrefix:@"/api/lyrics?file="]){
+        RLPJSONCompletion cp=[done copy];
+        pendingLyrics=cp;
+        [self.pendingLyricsQueue addObject:cp];
+        return;
+    }
+    if(self.holdMeta&&done&&[path hasPrefix:@"/api/meta?file="]){
+        [self.pendingMetas addObject:[done copy]];
+        return;
+    }
+    if(self.holdQueue&&done&&[path hasPrefix:@"/api/queue"]){
+        [self.pendingQueues addObject:[done copy]];
+        return;
+    }
     if(self.holdSettings&&done&&[path isEqualToString:@"/api/settings"]){self.pendingSettings=[done copy];return;}
     if(self.holdHealth&&done&&([path hasPrefix:@"/api/track/health"]||[path hasPrefix:@"/api/health"])){
         [self.pendingHealths addObject:[done copy]];return;
@@ -95,7 +120,19 @@ static RLPDataCompletion pendingCover;
 }
 /// refresh 会在切曲分支顺带 loadCoverForPath（/api/cover 走 getData）：桩必须应答，
 /// 否则刷新路径上第一个 getData 就是 doesNotRecognizeSelector（实测 SIGABRT）。
-- (void)getData:(NSString *)path completion:(RLPDataCompletion)done { if(holdNPRequests&&done&&[path hasPrefix:@"/api/cover?file="]){pendingCover=[done copy];return;} if(done)done(nil); }
+- (void)getData:(NSString *)path completion:(RLPDataCompletion)done {
+    if(holdNPRequests&&done&&[path hasPrefix:@"/api/cover?file="]){
+        RLPDataCompletion cp=[done copy];
+        pendingCover=cp;
+        [self.pendingCoversQueue addObject:cp];
+        return;
+    }
+    NSData *hit=nil;
+    for(NSString *key in self.coverFixtures){
+        if([path containsString:RLPEnc(key)] || [path isEqualToString:key]){hit=self.coverFixtures[key];break;}
+    }
+    if(done)done(hit);
+}
 @end
 static RLPRequestSpy *spy;static id fakeShared(id c,SEL s){return spy;}
 static int fail;
@@ -186,6 +223,16 @@ static void ck(bool ok,const char *n){printf("[%s] %s\n",ok?"PASS":"FAIL",n);if(
 - (void)applyCastChipStyle;
 - (void)applyCoverSourceGate;
 - (void)anlAutoTickForPath:(NSString *)path playing:(BOOL)playing paused:(BOOL)paused;
+- (void)reload;
+- (void)activate;
+- (void)stopPolling;
+- (void)loadMetaAndKnowledgeForPath:(NSString *)path;
+- (void)applyStatus:(RLPPlaybackStatus *)status rawJSON:(nullable NSDictionary *)json;
+@end
+@interface NSObject (RLPBarSyncTestSeam)
+- (void)applyStatus:(RLPPlaybackStatus *)st;
+- (void)fetchStatusForced:(BOOL)forced;
+- (void)stopPolling;
 @end
 int main(){@autoreleasepool{
  [NSApplication sharedApplication]; [RLPTheme setThemeName:@"light"];
@@ -1838,6 +1885,408 @@ int main(){@autoreleasepool{
   static NSWindow *sAnlWindow; sAnlWindow = anlWin; (void)sAnlWindow;
   if (savedAnlHiddenObj) [anlUd setObject:savedAnlHiddenObj forKey:@"RLPNPAnalysisHidden"];
   else [anlUd removeObjectForKey:@"RLPNPAnalysisHidden"];
+  method_setImplementation(sharedM, origSharedImp);
+  spy = prevSpy;
+ }
+ // ---- S1-S5: 切歌全量跟随（标题/封面/blurredCover/歌词/metaChips/rail/收藏/队列 + A→B→A 世代守卫 + 同路径元信息 + 底栏同步） ----
+ {
+  Method sharedM = class_getClassMethod([RLPCoreClient class], @selector(shared));
+  RLPRequestSpy *prevSpy = spy;
+  RLPRequestSpy *syncSpy = [RLPRequestSpy new];
+  syncSpy.fakeStarted = YES;
+  spy = syncSpy;
+  IMP origSharedImp = method_setImplementation(sharedM, (IMP)fakeShared);
+
+  NSString *pathA = @"/offline/npstale-A.flac";
+  NSString *pathB = @"/offline/npstale-B.flac";
+  NSString *pathStream = @"/offline/npstale-stream.flac";
+  NSData *imgA = NPPngOfColor([NSColor colorWithSRGBRed:0.15 green:0.35 blue:0.85 alpha:1.0]);
+  NSData *imgB = NPPngOfColor([NSColor colorWithSRGBRed:0.15 green:0.75 blue:0.30 alpha:1.0]);
+  NSData *imgStale = NPPngOfColor([NSColor colorWithSRGBRed:0.90 green:0.10 blue:0.10 alpha:1.0]);
+  syncSpy.coverFixtures[pathA] = imgA;
+  syncSpy.coverFixtures[pathB] = imgB;
+
+  NSDictionary *statusA = @{
+      @"ok": @YES, @"playing": @YES, @"paused": @NO,
+      @"current": pathA, @"title": @"SCOPE", @"artist": @"Artist A", @"dur": @180.0
+  };
+  NSDictionary *statusB = @{
+      @"ok": @YES, @"playing": @YES, @"paused": @NO,
+      @"current": pathB, @"title": @"7月的翼", @"artist": @"Artist B", @"dur": @210.0
+  };
+  NSDictionary *metaA = @{
+      @"ok": @YES, @"title": @"SCOPE", @"artist": @"Artist A", @"album": @"Scope Album",
+      @"codec": @"FLAC", @"sampleRate": @48000, @"bits": @24,
+      @"year": @2021, @"genre": @"Rock", @"albumArtist": @"Artist A",
+      @"summaryEnabled": @NO,
+      @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"tag" } }
+  };
+  NSDictionary *metaB = @{
+      @"ok": @YES, @"title": @"7月的翼", @"artist": @"Artist B", @"album": @"July Album",
+      @"codec": @"ALAC", @"sampleRate": @44100, @"bits": @16,
+      @"year": @2024, @"genre": @"Pop", @"albumArtist": @"Artist B",
+      @"summaryEnabled": @NO,
+      @"meta": @{ @"enriched": @YES, @"sources": @{ @"year": @"tag" } }
+  };
+  NSDictionary *lyrA = @{ @"ok": @YES, @"lrc": @"[00:01.00]SCOPE line 1\n[00:03.00]SCOPE line 2" };
+  NSDictionary *lyrB = @{ @"ok": @YES, @"lrc": @"[00:01.00]七月的翼第一行\n[00:03.00]七月的翼第二行" };
+  NSDictionary *queueA = @{ @"ok": @YES, @"mode": @0, @"index": @0, @"items": @[pathA, pathB] };
+  NSDictionary *queueB = @{ @"ok": @YES, @"mode": @0, @"index": @1, @"items": @[pathA, pathB] };
+
+  RLPNowPlayingViewController *npSync = [RLPNowPlayingViewController new];
+  (void)npSync.view;
+  npSync.view.frame = NSMakeRect(0, 0, 1180, 760);
+  [npSync.view layoutSubtreeIfNeeded];
+
+  NSTextField *tLabel = [npSync valueForKey:@"titleLabel2"];
+  NSTextField *aLabel = [npSync valueForKey:@"artistLabel2"];
+  NSImageView *cView = [npSync valueForKey:@"cover"];
+  NSArray<NSButton *> *mChips = [npSync valueForKey:@"metaChips"];
+  NSArray<NSView *> *rCards = [npSync valueForKey:@"railCards"];
+  NSUInteger (^VisibleMetaChipCount)(void) = ^NSUInteger {
+      NSUInteger n = 0;
+      for (NSButton *b in mChips) if (!b.hidden) ++n;
+      return n;
+  };
+  NSString *(^FirstVisibleChipTitle)(void) = ^NSString * {
+      for (NSButton *b in mChips) if (!b.hidden && b.title.length) return b.title;
+      return @"";
+  };
+
+  syncSpy.fixtures = [@{
+      @"/api/status": statusA,
+      @"/api/meta": metaA,
+      @"/api/lyrics": lyrA,
+      @"/api/queue": queueA,
+      @"/api/fav/list": @{ @"ok": @YES, @"files": @[pathA] },
+      @"/api/settings": @{ @"ok": @YES, @"kv": @{ @"autoanl": @"0" } }
+  } mutableCopy];
+  [npSync refresh];
+  for (int i = 0; i < 30 && [npSync valueForKeyPath:@"webCanvas.blurredCover"] == nil; ++i) {
+      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+  }
+  const BOOL s1BaselineA =
+      [tLabel.stringValue isEqualToString:@"SCOPE"] &&
+      [aLabel.stringValue isEqualToString:@"Artist A · Scope Album"] &&
+      cView.image != nil &&
+      [[npSync valueForKey:@"coverPath"] isEqualToString:pathA] &&
+      [npSync valueForKeyPath:@"webCanvas.blurredCover"] != nil &&
+      [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 2 &&
+      VisibleMetaChipCount() >= 2 &&
+      [[npSync valueForKey:@"favorite"] boolValue] &&
+      (rCards.count > 0 && !rCards[0].hidden);
+  ck(s1BaselineA, "S1a 基线曲目 A（SCOPE）封面/模糊背景/标题/副标题/歌词/徽标/收藏/AI栏就位");
+
+  // 制造两份属于第 1 世代 A 的在途迟到回包：一份在 A→B 后到达，另一份在 A→B→A 切回后才到达（验证 trackGeneration 守卫）
+  holdNPRequests = YES;
+  syncSpy.holdMeta = YES;
+  syncSpy.holdQueue = YES;
+  [syncSpy.pendingMetas removeAllObjects];
+  [syncSpy.pendingLyricsQueue removeAllObjects];
+  [syncSpy.pendingCoversQueue removeAllObjects];
+  [syncSpy.pendingQueues removeAllObjects];
+
+  [npSync loadMetaAndKnowledgeForPath:pathA];
+  [npSync loadLyricsForPath:pathA];
+  [npSync loadCoverForPath:pathA];
+  [npSync loadMetaAndKnowledgeForPath:pathA];
+  [npSync loadLyricsForPath:pathA];
+  [npSync loadCoverForPath:pathA];
+  RLPJSONCompletion lateAMeta1 = syncSpy.pendingMetas.count > 0 ? syncSpy.pendingMetas[0] : nil;
+  RLPJSONCompletion lateALyric1 = syncSpy.pendingLyricsQueue.count > 0 ? syncSpy.pendingLyricsQueue[0] : nil;
+  RLPDataCompletion lateACover1 = syncSpy.pendingCoversQueue.count > 0 ? syncSpy.pendingCoversQueue[0] : nil;
+  RLPJSONCompletion lateAGen1MetaAfterReturn = syncSpy.pendingMetas.count > 1 ? syncSpy.pendingMetas[1] : nil;
+  RLPJSONCompletion lateAGen1LyricAfterReturn = syncSpy.pendingLyricsQueue.count > 1 ? syncSpy.pendingLyricsQueue[1] : nil;
+  RLPDataCompletion lateAGen1CoverAfterReturn = syncSpy.pendingCoversQueue.count > 1 ? syncSpy.pendingCoversQueue[1] : nil;
+  [syncSpy.pendingMetas removeAllObjects];
+  [syncSpy.pendingLyricsQueue removeAllObjects];
+  [syncSpy.pendingCoversQueue removeAllObjects];
+
+  // S1b: 第二次 status 切歌 A→B（B 的 meta/lyrics/cover/queue 仍在途）
+  syncSpy.fixtures[@"/api/status"] = statusB;
+  syncSpy.fixtures[@"/api/fav/list"] = @{ @"ok": @YES, @"files": @[] };
+  [npSync refresh];
+  const BOOL s1ClearedImmediately =
+      [[npSync valueForKey:@"currentPath"] isEqualToString:pathB] &&
+      [[npSync valueForKey:@"trackKey"] containsString:@"7月的翼"] &&
+      [tLabel.stringValue isEqualToString:@"7月的翼"] &&
+      [aLabel.stringValue isEqualToString:@"Artist B"] &&
+      [npSync valueForKey:@"coverPath"] == nil &&
+      cView.image == nil &&
+      [npSync valueForKeyPath:@"webCanvas.blurredCover"] == nil &&
+      ![[npSync valueForKey:@"lyricPath"] isEqualToString:pathA] &&
+      [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 0 &&
+      [(NSArray *)[npSync valueForKey:@"lyricRows"] count] == 0 &&
+      [(NSDictionary *)[npSync valueForKey:@"trackMetadata"] count] == 0 &&
+      VisibleMetaChipCount() == 0 &&
+      ![[npSync valueForKey:@"favorite"] boolValue] &&
+      (rCards.count > 0 && rCards[0].hidden);
+  ck(s1ClearedImmediately,
+     "S1b A→B status 立即清空旧封面/模糊背景/coverPath/歌词/元数据/徽标/收藏/AI栏并替换新曲标题与艺术家");
+
+  RLPJSONCompletion bMetaPending = syncSpy.pendingMetas.lastObject;
+  RLPJSONCompletion bLyricPending = syncSpy.pendingLyricsQueue.lastObject;
+  RLPDataCompletion bCoverPending = syncSpy.pendingCoversQueue.lastObject;
+  RLPJSONCompletion bQueuePending = syncSpy.pendingQueues.lastObject;
+  [syncSpy.pendingMetas removeAllObjects];
+  [syncSpy.pendingLyricsQueue removeAllObjects];
+  [syncSpy.pendingCoversQueue removeAllObjects];
+  [syncSpy.pendingQueues removeAllObjects];
+
+  // S2: A 的迟到 meta/lyrics/cover 回包在 B 等待期间到达，必须全量丢弃
+  if (lateAMeta1) lateAMeta1(metaA);
+  if (lateALyric1) lateALyric1(@{ @"ok": @YES, @"lrc": @"[00:01.00]STALE_A_LYRIC" });
+  if (lateACover1) lateACover1(imgStale);
+  [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+  const BOOL s2BlockedStaleA =
+      lateAMeta1 != nil && lateALyric1 != nil && lateACover1 != nil &&
+      [tLabel.stringValue isEqualToString:@"7月的翼"] &&
+      [aLabel.stringValue isEqualToString:@"Artist B"] &&
+      [npSync valueForKey:@"coverPath"] == nil &&
+      cView.image == nil &&
+      [npSync valueForKeyPath:@"webCanvas.blurredCover"] == nil &&
+      [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 0 &&
+      [(NSDictionary *)[npSync valueForKey:@"trackMetadata"] count] == 0 &&
+      VisibleMetaChipCount() == 0;
+  ck(s2BlockedStaleA,
+     "S2 A→B 后迟到的 A metadata/lyrics/cover 不得覆盖新曲 B（标题/coverPath/图像/歌词/meta 仍为 B 加载态）");
+
+  // 放行 B 的正主回包，验证 B 完整落地
+  if (bMetaPending) bMetaPending(metaB);
+  if (bLyricPending) bLyricPending(lyrB);
+  if (bCoverPending) bCoverPending(imgB);
+  if (bQueuePending) bQueuePending(queueB);
+  for (int i = 0; i < 30 && [npSync valueForKeyPath:@"webCanvas.blurredCover"] == nil; ++i) {
+      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+  }
+  NSArray<RLPLyricLine *> *bLinesDone = [npSync valueForKey:@"lyricLines"];
+  const BOOL s2BLanded =
+      [tLabel.stringValue isEqualToString:@"7月的翼"] &&
+      [aLabel.stringValue isEqualToString:@"Artist B · July Album"] &&
+      [[npSync valueForKey:@"coverPath"] isEqualToString:pathB] &&
+      cView.image != nil &&
+      bLinesDone.count == 2 && [bLinesDone[0].text isEqualToString:@"七月的翼第一行"] &&
+      [FirstVisibleChipTitle() containsString:@"2024"];
+  ck(s2BLanded, "S2b 新曲 B 的真实 meta/lyrics/cover 回包全部正常落地");
+
+  // 持有 B 的一组在途回包后切回 A（B→A），验证：① B 清空 ② 迟到 B 与更早第 1 世代同路径 A 都被世代守卫拦截 ③ 新 A 完整恢复
+  [npSync loadMetaAndKnowledgeForPath:pathB];
+  [npSync loadLyricsForPath:pathB];
+  [npSync loadCoverForPath:pathB];
+  RLPJSONCompletion lateBMeta = syncSpy.pendingMetas.lastObject;
+  RLPJSONCompletion lateBLyric = syncSpy.pendingLyricsQueue.lastObject;
+  RLPDataCompletion lateBCover = syncSpy.pendingCoversQueue.lastObject;
+  [syncSpy.pendingMetas removeAllObjects];
+  [syncSpy.pendingLyricsQueue removeAllObjects];
+  [syncSpy.pendingCoversQueue removeAllObjects];
+
+  syncSpy.fixtures[@"/api/status"] = statusA;
+  syncSpy.fixtures[@"/api/fav/list"] = @{ @"ok": @YES, @"files": @[pathA] };
+  [npSync refresh];
+  const BOOL s3ClearedBOnReturn =
+      [[npSync valueForKey:@"currentPath"] isEqualToString:pathA] &&
+      [tLabel.stringValue isEqualToString:@"SCOPE"] &&
+      [npSync valueForKey:@"coverPath"] == nil &&
+      cView.image == nil &&
+      [npSync valueForKeyPath:@"webCanvas.blurredCover"] == nil &&
+      [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 0 &&
+      [(NSDictionary *)[npSync valueForKey:@"trackMetadata"] count] == 0;
+  if (lateBMeta) lateBMeta(metaB);
+  if (lateBLyric) lateBLyric(@{ @"ok": @YES, @"lrc": @"[00:01.00]STALE_B_LYRIC" });
+  if (lateBCover) lateBCover(imgStale);
+  NSMutableDictionary *staleGen1AMeta = [metaA mutableCopy];
+  staleGen1AMeta[@"title"] = @"STALE_GEN1_SCOPE";
+  if (lateAGen1MetaAfterReturn) lateAGen1MetaAfterReturn(staleGen1AMeta);
+  if (lateAGen1LyricAfterReturn) lateAGen1LyricAfterReturn(@{ @"ok": @YES, @"lrc": @"[00:01.00]STALE_GEN1_LYRIC" });
+  if (lateAGen1CoverAfterReturn) lateAGen1CoverAfterReturn(imgStale);
+  const BOOL s3GenGuardBlocked =
+      s3ClearedBOnReturn &&
+      [tLabel.stringValue isEqualToString:@"SCOPE"] &&
+      [npSync valueForKey:@"coverPath"] == nil &&
+      cView.image == nil &&
+      [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 0 &&
+      [(NSDictionary *)[npSync valueForKey:@"trackMetadata"] count] == 0;
+  ck(s3GenGuardBlocked,
+     "S3 B→A 切回时不仅拦截迟到 B，还按 trackGeneration 拦截更早第 1 世代同路径 A 的迟到回包");
+
+  RLPJSONCompletion aReturnMeta = syncSpy.pendingMetas.lastObject;
+  RLPJSONCompletion aReturnLyric = syncSpy.pendingLyricsQueue.lastObject;
+  RLPDataCompletion aReturnCover = syncSpy.pendingCoversQueue.lastObject;
+  RLPJSONCompletion aReturnQueue = syncSpy.pendingQueues.lastObject;
+  [syncSpy.pendingMetas removeAllObjects];
+  [syncSpy.pendingLyricsQueue removeAllObjects];
+  [syncSpy.pendingCoversQueue removeAllObjects];
+  [syncSpy.pendingQueues removeAllObjects];
+  if (aReturnMeta) aReturnMeta(metaA);
+  if (aReturnLyric) aReturnLyric(lyrA);
+  if (aReturnCover) aReturnCover(imgA);
+  if (aReturnQueue) aReturnQueue(queueA);
+  NSArray<RLPLyricLine *> *aLinesRestored = [npSync valueForKey:@"lyricLines"];
+  const BOOL s3RestoredA =
+      [tLabel.stringValue isEqualToString:@"SCOPE"] &&
+      [aLabel.stringValue isEqualToString:@"Artist A · Scope Album"] &&
+      [[npSync valueForKey:@"coverPath"] isEqualToString:pathA] &&
+      cView.image != nil &&
+      aLinesRestored.count == 2 && [aLinesRestored[0].text isEqualToString:@"SCOPE line 1"] &&
+      [FirstVisibleChipTitle() containsString:@"2021"];
+  ck(s3RestoredA, "S3b 切回 A 后 A 的标题/封面标识/歌词/元数据完整恢复");
+
+  // S4: 同路径 /api/status title/artist 变化也必须识别为切曲并立即清空重拉
+  holdNPRequests = NO;
+  syncSpy.holdMeta = NO;
+  syncSpy.holdQueue = NO;
+  syncSpy.coverFixtures[pathStream] = imgA;
+  syncSpy.fixtures = [@{
+      @"/api/status": @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                         @"current": pathStream, @"title": @"Stream Alpha", @"artist": @"DJ 1", @"dur": @90.0 },
+      @"/api/meta": @{ @"ok": @YES, @"title": @"Stream Alpha", @"artist": @"DJ 1",
+                       @"summaryEnabled": @NO, @"meta": @{ @"enriched": @NO } },
+      @"/api/lyrics": @{ @"ok": @YES, @"lrc": @"[00:01.00]stream one" },
+      @"/api/queue": @{ @"ok": @YES, @"mode": @0, @"items": @[pathStream] },
+      @"/api/fav/list": @{ @"ok": @YES, @"files": @[] }
+  } mutableCopy];
+  [npSync reload];
+  const BOOL stream1Ok = [tLabel.stringValue isEqualToString:@"Stream Alpha"] &&
+                         [[npSync valueForKey:@"coverPath"] isEqualToString:pathStream] &&
+                         [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 1;
+
+  holdNPRequests = YES;
+  syncSpy.holdMeta = YES;
+  syncSpy.fixtures[@"/api/status"] = @{ @"ok": @YES, @"playing": @YES, @"paused": @NO,
+                                        @"current": pathStream, @"title": @"Stream Beta", @"artist": @"DJ 2", @"dur": @90.0 };
+  [npSync reload];
+  const BOOL samePathSwitched =
+      stream1Ok &&
+      [[npSync valueForKey:@"currentPath"] isEqualToString:pathStream] &&
+      [[npSync valueForKey:@"trackKey"] containsString:@"Stream Beta"] &&
+      [tLabel.stringValue isEqualToString:@"Stream Beta"] &&
+      [aLabel.stringValue isEqualToString:@"DJ 2"] &&
+      [npSync valueForKey:@"coverPath"] == nil &&
+      cView.image == nil &&
+      [(NSArray *)[npSync valueForKey:@"lyricLines"] count] == 0 &&
+      [(NSDictionary *)[npSync valueForKey:@"trackMetadata"] count] == 0;
+  ck(samePathSwitched,
+     "S4 同路径下 /api/status 的 title/artist 变化同样触发切曲清旧封面/歌词/元数据并刷新");
+  holdNPRequests = NO;
+  syncSpy.holdMeta = NO;
+  [syncSpy.pendingMetas removeAllObjects];
+  [syncSpy.pendingLyricsQueue removeAllObjects];
+  [syncSpy.pendingCoversQueue removeAllObjects];
+  [npSync viewDidDisappear];
+
+  // S5: 播放条同步与关闭重开生命周期（lastStatus / trackKey / applyStatus / reload / activate）
+  RLPNowPlayingViewController *npBar = [RLPNowPlayingViewController new];
+  (void)npBar.view;
+  npBar.view.frame = NSMakeRect(0, 0, 1180, 760);
+  [npBar.view layoutSubtreeIfNeeded];
+  NSTextField *barNpTitle = [npBar valueForKey:@"titleLabel2"];
+  NSImageView *barNpCover = [npBar valueForKey:@"cover"];
+  ck([npBar respondsToSelector:@selector(applyStatus:)] &&
+     [npBar respondsToSelector:@selector(reload)] &&
+     [npBar valueForKey:@"lastStatus"] == nil,
+     "S5a RLPNowPlayingViewController 暴露 applyStatus / reload / lastStatus / trackKey 状态接缝");
+
+  syncSpy.fixtures = [@{
+      @"/api/status": statusA,
+      @"/api/meta": metaA,
+      @"/api/lyrics": lyrA,
+      @"/api/queue": queueA,
+      @"/api/fav/list": @{ @"ok": @YES, @"files": @[pathA] },
+      @"/api/settings": @{ @"ok": @YES, @"kv": @{ @"autoanl": @"0" } }
+  } mutableCopy];
+
+  Class barCls = NSClassFromString(@"RLPPlaybackBarView");
+  id bar = barCls ? [[barCls alloc] initWithFrame:NSMakeRect(0, 0, 960, 66)] : nil;
+  if (bar) {
+      [bar fetchStatusForced:YES];
+      const BOOL syncAOk =
+          [[bar valueForKey:@"trackKey"] isEqualToString:[npBar valueForKey:@"trackKey"]] &&
+          [barNpTitle.stringValue isEqualToString:@"SCOPE"] &&
+          [[npBar valueForKey:@"coverPath"] isEqualToString:pathA];
+      syncSpy.fixtures[@"/api/status"] = statusB;
+      syncSpy.fixtures[@"/api/meta"] = metaB;
+      syncSpy.fixtures[@"/api/lyrics"] = lyrB;
+      syncSpy.fixtures[@"/api/queue"] = queueB;
+      [bar fetchStatusForced:YES];
+      RLPPlaybackStatus *lastSt = [npBar valueForKey:@"lastStatus"];
+      NSArray<RLPLyricLine *> *barBLines = [npBar valueForKey:@"lyricLines"];
+      const BOOL syncBOk =
+          syncAOk &&
+          [[bar valueForKey:@"trackKey"] isEqualToString:[npBar valueForKey:@"trackKey"]] &&
+          [lastSt.currentPath isEqualToString:pathB] &&
+          [barNpTitle.stringValue isEqualToString:@"7月的翼"] &&
+          [[npBar valueForKey:@"coverPath"] isEqualToString:pathB] &&
+          barNpCover.image != nil &&
+          barBLines.count == 2 && [barBLines[0].text isEqualToString:@"七月的翼第一行"];
+      ck(syncBOk, "S5b 底部播放条切到 B 同一轮内立即同步触发播放页刷新（无需等二次轮询）");
+
+      // 关闭播放页期间底栏切回 A：即使尚未重开也必须清光 B，重开 activate 立刻补全 A
+      [npBar viewDidDisappear];
+      syncSpy.fixtures[@"/api/status"] = statusA;
+      syncSpy.fixtures[@"/api/meta"] = metaA;
+      syncSpy.fixtures[@"/api/lyrics"] = lyrA;
+      syncSpy.fixtures[@"/api/queue"] = queueA;
+      [bar fetchStatusForced:YES];
+      const BOOL clearedWhileClosed =
+          [barNpTitle.stringValue isEqualToString:@"SCOPE"] &&
+          [npBar valueForKey:@"coverPath"] == nil &&
+          barNpCover.image == nil &&
+          [npBar valueForKeyPath:@"webCanvas.blurredCover"] == nil &&
+          [(NSArray *)[npBar valueForKey:@"lyricLines"] count] == 0 &&
+          [(NSDictionary *)[npBar valueForKey:@"trackMetadata"] count] == 0 &&
+          [[npBar valueForKey:@"needsTrackReload"] boolValue];
+      [npBar activate];
+      NSArray<RLPLyricLine *> *reopenALines = [npBar valueForKey:@"lyricLines"];
+      const BOOL reloadedOnActivate =
+          [[npBar valueForKey:@"coverPath"] isEqualToString:pathA] &&
+          barNpCover.image != nil &&
+          reopenALines.count == 2 && [reopenALines[0].text isEqualToString:@"SCOPE line 1"] &&
+          ![[npBar valueForKey:@"needsTrackReload"] boolValue];
+      ck(clearedWhileClosed && reloadedOnActivate,
+         "S5c 关闭播放页期间底栏切歌立即清空旧曲、重开 activate 立即重载新曲");
+      [npBar stopPolling];
+      [bar stopPolling];
+  } else {
+      // 目标未链接 RLPPlaybackBarView 时，直接按与 RLPPlaybackBarView 同构的通知与 applyStatus:rawJSON: 契约验证同步
+      RLPPlaybackStatus *stA = [RLPPlaybackStatus statusFromJSON:statusA];
+      [npBar applyStatus:stA rawJSON:statusA];
+      syncSpy.fixtures[@"/api/status"] = statusB;
+      syncSpy.fixtures[@"/api/meta"] = metaB;
+      syncSpy.fixtures[@"/api/lyrics"] = lyrB;
+      syncSpy.fixtures[@"/api/queue"] = queueB;
+      RLPPlaybackStatus *stB = [RLPPlaybackStatus statusFromJSON:statusB];
+      [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusDidUpdateNotification"
+          object:nil userInfo:@{ @"status": stB, @"raw": statusB, @"path": pathB,
+                                 @"title": @"7月的翼", @"artist": @"Artist B",
+                                 @"trackKey": [NSString stringWithFormat:@"%@|7月的翼|Artist B|", pathB] }];
+      RLPPlaybackStatus *lastSt = [npBar valueForKey:@"lastStatus"];
+      ck([lastSt.currentPath isEqualToString:pathB] &&
+         [barNpTitle.stringValue isEqualToString:@"7月的翼"] &&
+         [[npBar valueForKey:@"coverPath"] isEqualToString:pathB],
+         "S5b 底栏状态更新通知同一轮内立即同步刷新播放页");
+
+      [npBar viewDidDisappear];
+      syncSpy.fixtures[@"/api/status"] = statusA;
+      syncSpy.fixtures[@"/api/meta"] = metaA;
+      syncSpy.fixtures[@"/api/lyrics"] = lyrA;
+      syncSpy.fixtures[@"/api/queue"] = queueA;
+      [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusDidUpdateNotification"
+          object:nil userInfo:@{ @"status": stA, @"raw": statusA, @"path": pathA,
+                                 @"title": @"SCOPE", @"artist": @"Artist A",
+                                 @"trackKey": [NSString stringWithFormat:@"%@|SCOPE|Artist A|", pathA] }];
+      const BOOL clearedWhileClosed =
+          [barNpTitle.stringValue isEqualToString:@"SCOPE"] &&
+          [npBar valueForKey:@"coverPath"] == nil &&
+          barNpCover.image == nil &&
+          [(NSArray *)[npBar valueForKey:@"lyricLines"] count] == 0 &&
+          [[npBar valueForKey:@"needsTrackReload"] boolValue];
+      [npBar activate];
+      ck(clearedWhileClosed && [[npBar valueForKey:@"coverPath"] isEqualToString:pathA] && barNpCover.image != nil,
+         "S5c 关闭播放页期间底栏切歌立即清空旧曲、重开 activate 立即重载新曲");
+      [npBar stopPolling];
+  }
+
+  [npSync stopPolling];
   method_setImplementation(sharedM, origSharedImp);
   spy = prevSpy;
  }
