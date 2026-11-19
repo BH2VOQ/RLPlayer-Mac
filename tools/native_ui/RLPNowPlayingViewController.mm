@@ -19,6 +19,76 @@
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
 
+static NSString *RLPNPStatusString(id value) {
+    if (![value isKindOfClass:[NSString class]]) return @"";
+    return [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSString *RLPNPStatusTitle(NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[@"title", @"trackTitle", @"song"]) {
+        NSString *v = RLPNPStatusString(json[k]);
+        if (v.length) return v;
+    }
+    id track = json[@"track"];
+    if ([track isKindOfClass:[NSDictionary class]]) {
+        NSString *v = RLPNPStatusString(((NSDictionary *)track)[@"title"]);
+        if (v.length) return v;
+    }
+    return @"";
+}
+
+static NSString *RLPNPStatusArtist(NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[@"artist", @"trackArtist"]) {
+        NSString *v = RLPNPStatusString(json[k]);
+        if (v.length) return v;
+    }
+    id track = json[@"track"];
+    if ([track isKindOfClass:[NSDictionary class]]) {
+        NSString *v = RLPNPStatusString(((NSDictionary *)track)[@"artist"]);
+        if (v.length) return v;
+    }
+    return @"";
+}
+
+static NSString *RLPNPStatusTrackId(NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[@"trackKey", @"trackId", @"track_id", @"cueIndex", @"index"]) {
+        id v = json[k];
+        if ([v isKindOfClass:[NSString class]]) {
+            NSString *s = RLPNPStatusString(v);
+            if (s.length) return s;
+        } else if ([v isKindOfClass:[NSNumber class]]) {
+            return [(NSNumber *)v stringValue];
+        }
+    }
+    return @"";
+}
+
+static NSString *RLPNPMakeTrackKey(RLPPlaybackStatus * _Nullable st, NSDictionary * _Nullable json) {
+    NSString *path = st.currentPath ?: @"";
+    NSString *title = RLPNPStatusTitle(json);
+    NSString *artist = RLPNPStatusArtist(json);
+    NSString *tid = RLPNPStatusTrackId(json);
+    if (!path.length && !title.length && !artist.length && !tid.length) return @"";
+    if (!title.length && !artist.length && !tid.length) return path;
+    return [NSString stringWithFormat:@"%@|%@|%@|%@", path, title, artist, tid];
+}
+
+static NSDictionary * _Nullable RLPNPMatchingRawJSON(RLPPlaybackStatus * _Nullable st, NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *jPath = @"";
+    for (NSString *k in @[@"current", @"currentPath", @"path", @"file"]) {
+        if ([json[k] isKindOfClass:[NSString class]]) {
+            jPath = json[k];
+            break;
+        }
+    }
+    if (![jPath isEqualToString:(st.currentPath ?: @"")]) return nil;
+    return json;
+}
+
 @interface RLPKnowledgeView (NPDetails)
 - (void)renderMetaFixture:(NSDictionary *)fixture;
 - (void)loadDrawerContext:(NSDictionary *)context;
@@ -98,6 +168,11 @@
 - (void)styleCoverActionButton:(NSButton *)button;
 - (CGFloat)coverButtonIdealWidth:(NSButton *)button;
 - (void)updatePanelToggleStates;
+- (void)applyStatus:(RLPPlaybackStatus *)status;
+- (void)applyStatus:(RLPPlaybackStatus *)status rawJSON:(nullable NSDictionary *)json;
+- (void)reload;
+- (void)refreshForced:(BOOL)forced;
+- (void)loadMetaAndKnowledgeForPath:(NSString *)path;
 @end
 // Web #npPage uses top-left coordinates and covers the entire window content.
 @interface RLPNPCanvas : NSView
@@ -2192,9 +2267,18 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, strong) NSMutableArray<NSString *> *comparePaths;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *compareChecks;
 @property (nonatomic, assign) BOOL layingOutWebPlayback;
+@property (nonatomic, strong, nullable) RLPPlaybackStatus *lastStatus;
+@property (nonatomic, copy) NSString *trackKey;
+@property (nonatomic, copy) NSString *statusTitle;
+@property (nonatomic, copy) NSString *statusArtist;
+@property (nonatomic, assign) NSUInteger trackGeneration;
+@property (nonatomic, assign) NSUInteger metaSeq;
+@property (nonatomic, assign) NSUInteger trackReloadSeq;
+@property (nonatomic, assign) BOOL needsTrackReload;
 @end
 
 @implementation RLPNowPlayingViewController
+@synthesize currentPath = _currentPath;
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"正在播放")];
@@ -2441,6 +2525,12 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onExternalSettingsChanged:) name:RLPSettingsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onNowPlayingEscape:)
                                                  name:@"RLPNowPlayingEscapeNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPlaybackActionStartedNotification:)
+                                                 name:RLPPlaybackActionStartedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPlaybackActionCompletedNotification:)
+                                                 name:@"RLPPlaybackActionCompletedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPlaybackBarStatusNotification:)
+                                                 name:@"RLPPlaybackStatusDidUpdateNotification" object:nil];
     self.lyricRows=[NSMutableArray array];self.lyricLines=@[];self.lyricActiveIndex=-1;
     // web `#npLyric` 空态是**两行**：主行 14pt(clamp) `没有歌词` + 副行 12px `--mut2` 说明。
     // 旧码单行 `没有歌词 · 同名 LRC…` + maximumNumberOfLines=1 ⟹ 副文案被截断、字号也不对。
@@ -3380,6 +3470,8 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     NSString *body = [RLPLyrics aiRequestBodyTask:task lang:lang sourceLang:nil lines:texts];
 
     NSString *reqPath = [self.currentPath copy];
+    NSString *reqKey = [self.trackKey copy] ?: @"";
+    const NSUInteger gen = self.trackGeneration;
     const NSUInteger aiSeq = ++self.lyricAiSeq;
     self.lyricAiBusy = YES;
     RLPToast([task isEqualToString:@"translate"] ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"));
@@ -3387,7 +3479,9 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     [[RLPCoreClient shared] postJSON:@"/api/lyrics/ai" body:body completion:^(NSDictionary * _Nullable j) {
         __typeof__(self) s = w;
         if (!s) return;
-        if (aiSeq != s.lyricAiSeq || !reqPath.length || ![s.currentPath isEqualToString:reqPath]) return;
+        if (gen != s.trackGeneration || aiSeq != s.lyricAiSeq ||
+            !reqPath.length || ![s.currentPath isEqualToString:reqPath] ||
+            ![reqKey isEqualToString:(s.trackKey ?: @"")]) return;
         s.lyricAiBusy = NO;
         NSString *err = nil;
         NSArray<RLPLyricLine *> *applied = [RLPLyrics linesFromAiResponse:j appliedTo:base error:&err];
@@ -3554,7 +3648,15 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     // 只发 /api/pause?on=0（no-op），与 web playOrPause 的"重播"行为不一致。
     RLPPlaybackToggle(self.webStatus.playing, self.webStatus.paused, self.webStatus.currentPath);
 }
-- (void)onStop:(id)s {[[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:nil];}
+- (void)onStop:(id)s {
+    (void)s;
+    const uint64_t epoch = RLPBeginPlaybackAction();
+    [[RLPCoreClient shared] postJSON:@"/api/stop" body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        if (epoch != RLPPlaybackActionEpoch()) return;
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackActionCompletedNotification" object:nil];
+    }];
+}
 - (void)onCycleMode:(id)s {self.playbackMode=(self.playbackMode+1)%4;[[RLPCoreClient shared] postJSON:[NSString stringWithFormat:@"/api/playmode?mode=%ld",(long)self.playbackMode] body:nil completion:nil];[self applyPlayModeUI];}
 
 /// web applyRep(v)：0 顺序 / 1 列表循环 / 2 单曲循环 / 3 随机。
@@ -4572,16 +4674,24 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         }
     }
     const BOOL wasPolling = self.polling;
+    const NSUInteger reloadBefore = self.trackReloadSeq;
     [self startPolling];
-    if (wasPolling) [self anlRefreshAutoSettingIfStale];
+    if (wasPolling) {
+        [self anlRefreshAutoSettingIfStale];
+        [self reload];
+    }
+    const BOOL reloadedDuringActivate = (self.trackReloadSeq != reloadBefore);
     // 模式（循环/随机）是**全局**状态：页面重新打开时必须重读一次。
     // refresh 只在「换曲」分支里拉 /api/queue，所以「关掉正在播放页 → 在别处改成单曲循环
     // → 再打开」以前显示的还是旧档位（审计 C 项）。首次进入（还没有 currentPath）由
     // refresh 的换曲分支负责，这里不重复发请求。
-    if(self.currentPath.length)[self refreshPlayMode];
-    // 重新进入页面：同曲已有包络时不重复请求（loadWaveformForPath 内部幂等）。
-    if(self.currentPath.length)[self loadWaveformForPath:self.currentPath];
-    if(self.polling&&self.currentPath.length)[self loadLyricsForPath:self.currentPath];
+    if (self.currentPath.length) [self refreshPlayMode];
+    // 重新进入页面：同曲已有包络时不重复请求（loadWaveformForPath 内部幂等）；
+    // 若本轮 activate 已经通过 reload/切曲发出整套请求或仍在等切曲重载，不重复重打一遍。
+    if (!reloadedDuringActivate && !self.needsTrackReload && self.currentPath.length) {
+        [self loadWaveformForPath:self.currentPath];
+        if (self.polling) [self loadLyricsForPath:self.currentPath];
+    }
 }
 
 - (void)viewDidDisappear {
@@ -4627,7 +4737,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         (void)timer;
         [weakSelf refresh];
     }];
-    [self refresh];
+    [self reload];
 }
 
 - (void)stopPolling {
@@ -4640,83 +4750,286 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self applyMetaChipVisibility];   // 芯片可见性跟着 live 态重算（行高随之收缩）
 }
 
+- (void)setCurrentPath:(NSString *)currentPath {
+    NSString *next = currentPath ?: @"";
+    if ([(_currentPath ?: @"") isEqualToString:next]) {
+        _currentPath = [next copy];
+        return;
+    }
+    _currentPath = [next copy];
+    self.statusTitle = @"";
+    self.statusArtist = @"";
+    self.trackKey = next;
+    self.trackGeneration += 1;
+    self.metaSeq += 1;
+    self.needsTrackReload = NO;
+}
+
+- (void)onPlaybackActionStartedNotification:(NSNotification *)note {
+    (void)note;
+    ++self.statusEpoch;
+    self.statusInFlight = NO;
+}
+
+- (void)onPlaybackActionCompletedNotification:(NSNotification *)note {
+    (void)note;
+    if (!self.polling) return;
+    [self reload];
+}
+
+- (void)onPlaybackBarStatusNotification:(NSNotification *)note {
+    NSDictionary *info = note.userInfo;
+    if (!info) return;
+    RLPPlaybackStatus *st = [info[@"status"] isKindOfClass:[RLPPlaybackStatus class]]
+        ? (RLPPlaybackStatus *)info[@"status"] : nil;
+    NSDictionary *raw = [info[@"raw"] isKindOfClass:[NSDictionary class]]
+        ? (NSDictionary *)info[@"raw"] : nil;
+    if (!st) {
+        NSString *p = [info[@"path"] isKindOfClass:[NSString class]] ? info[@"path"] : @"";
+        st = [RLPPlaybackStatus statusFromJSON:(raw ?: @{ @"current": p })];
+    }
+    if (!st) return;
+
+    NSString *path = st.currentPath ?: @"";
+    NSString *stTitle = [info[@"title"] isKindOfClass:[NSString class]]
+        ? info[@"title"] : RLPNPStatusTitle(raw);
+    NSString *stArtist = [info[@"artist"] isKindOfClass:[NSString class]]
+        ? info[@"artist"] : RLPNPStatusArtist(raw);
+    NSString *newKey = ([info[@"trackKey"] isKindOfClass:[NSString class]] && [(NSString *)info[@"trackKey"] length])
+        ? info[@"trackKey"] : RLPNPMakeTrackKey(st, raw);
+    const BOOL trackChanged = ![newKey isEqualToString:(self.trackKey ?: @"")] ||
+                              ![path isEqualToString:(self.currentPath ?: @"")];
+
+    if (self.anlDisappeared || (!self.polling && ![RLPCoreClient shared].started)) {
+        self.webStatus = st;
+        self.lastStatus = st;
+        if (trackChanged) {
+            [self resetTrackUIForTrackKey:newKey path:path title:stTitle artist:stArtist];
+            self.needsTrackReload = (path.length > 0 || newKey.length > 0);
+        }
+        return;
+    }
+
+    if (self.polling || trackChanged) {
+        [self applyStatus:st rawJSON:raw];
+    }
+}
+
+- (void)resetTrackUIForTrackKey:(NSString *)trackKey
+                           path:(NSString *)path
+                          title:(NSString *)stTitle
+                         artist:(NSString *)stArtist {
+    NSString *nextPath = path ?: @"";
+    NSString *nextKey = trackKey ?: @"";
+    NSString *nextTitle = stTitle ?: @"";
+    NSString *nextArtist = stArtist ?: @"";
+
+    [self willChangeValueForKey:@"currentPath"];
+    _currentPath = [nextPath copy];
+    [self didChangeValueForKey:@"currentPath"];
+    self.trackKey = nextKey;
+    self.statusTitle = nextTitle;
+    self.statusArtist = nextArtist;
+
+    self.trackGeneration += 1;
+    self.metaSeq += 1;
+    self.coverSeq += 1;
+    self.lyricSeq += 1;
+    self.waveformSeq += 1;
+
+    [self.lyricRetryTimer invalidate];
+    self.lyricRetryTimer = nil;
+    self.lyricRetry = 0;
+    self.lyricManualUntil = 0;
+    self.originalLyricLines = nil;
+    self.lyricAiApplied = NO;
+    self.lyricAiBusy = NO;
+    ++self.lyricAiSeq;
+
+    self.trackMetadata = @{};
+    self.favorite = NO;
+    self.favoriteButton.title = @"♡";
+    [self renderMetaChipsFromMeta:nil];
+    [self applyCoverSourceGate];
+
+    NSString *fallbackTitle = nextPath.length
+        ? nextPath.lastPathComponent.stringByDeletingPathExtension
+        : ((self.webStatus.playing || self.lastStatus.playing) ? RLPTr(@"未命名曲目") : RLPTr(@"未播放"));
+    self.titleLabel2.stringValue = nextTitle.length ? nextTitle : fallbackTitle;
+    self.artistLabel2.stringValue = nextArtist;
+
+    self.metaLabel.stringValue = @"";
+    self.metaLabel.toolTip = nil;
+    self.nextTrackVisible = NO;
+    self.metaLabel.hidden = YES;
+
+    if (!self.kindLabel.attributedStringValue.length ||
+        ![self.kindLabel.attributedStringValue.string isEqualToString:RLPTr(@"正在播放")]) {
+        RLPSetKernedText(self.kindLabel, RLPTr(@"正在播放"), 1.6);
+    }
+
+    // 切曲/停止：立刻清掉旧曲主封面、coverPath 标识、整页模糊背景与旧歌词。
+    self.coverPath = nil;
+    self.cover.image = nil;
+    self.webCanvas.blurredCover = nil;
+    self.webCanvas.needsDisplay = YES;
+
+    self.lyricPath = nil;
+    self.lyricLines = @[];
+    self.lyricActiveIndex = -1;
+    [self rebuildLyricRows];
+    if (nextPath.length && ![nextPath hasPrefix:@"http://"] && ![nextPath hasPrefix:@"https://"]) {
+        [self setLyricsPlaceholder:@"歌词加载中…"
+                            detail:@"正在等后台补全（首次播放新曲目时可能要几秒）"];
+    } else {
+        [self setLyricsPlaceholder:@"没有歌词"
+                            detail:@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全（可在设置-元数据补全关闭）"];
+    }
+
+    // 切歌：旧世代在飞的 summary 作废，并立刻重绘右栏和已打开的数据抽屉，绝不残留上一首文本。
+    [self railInvalidateForTrackChange];
+    [self.railAlbumInflight removeAllObjects];
+    [self renderRailMetadata];
+    [self syncOpenDrawerIfNeeded];
+
+    // 波形清空（即使同路径切元信息也重新按新 trackKey 复位）。
+    self.waveformPath = nil;
+    self.waveformSelection = nil;
+    [self.waveformView clearWaveform];
+
+    // 分析状态清空并在必要时通知后端取消上一首分析。
+    const BOOL cancelPrevious = self.anlBusy;
+    [self anlClearPendingAnalysis];
+    self.anlHealth = nil;
+    self.anlPath = nil;
+    self.anlError = nil;
+    self.anlCached = NO;
+    self.anlSeq += 1;
+    self.anlBusy = NO;
+    self.anlAutoDonePath = nil;
+    self.anlPendingTickPath = nil;
+    self.anlPendingTickPlaying = NO;
+    self.anlPendingTickPaused = NO;
+    [self anlOpenLevel:RLPAnlLevelCollapsed];
+    if (cancelPrevious && !self.anlCancelInFlight) {
+        [self anlCancelServer];
+    }
+    if (self.isViewLoaded) {
+        [self.knowledge loadKind:@"track" name:(nextTitle ?: @"") artist:(nextArtist.length ? nextArtist : nil)];
+        if (self.webCanvas.bounds.size.width > 0) [self layoutWebPlayback];
+    }
+}
+
 - (void)refresh {
-    if(self.statusInFlight)return;self.statusInFlight=YES;const NSUInteger epoch=self.statusEpoch;const uint64_t actionEpoch=RLPPlaybackActionEpoch();
+    [self refreshForced:NO];
+}
+
+- (void)reload {
+    [self refreshForced:YES];
+}
+
+- (void)refreshForced:(BOOL)forced {
+    if (!forced && self.statusInFlight) return;
+    const NSUInteger epoch = forced ? (++self.statusEpoch) : self.statusEpoch;
+    self.statusInFlight = YES;
+    const uint64_t actionEpoch = RLPPlaybackActionEpoch();
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        if (epoch==self_.statusEpoch) self_.statusInFlight=NO;
-        if (epoch!=self_.statusEpoch || actionEpoch!=RLPPlaybackActionEpoch()) return;
+        if (epoch == self_.statusEpoch) self_.statusInFlight = NO;
+        if (epoch != self_.statusEpoch || actionEpoch != RLPPlaybackActionEpoch()) return;
         RLPPlaybackStatus *st = [RLPPlaybackStatus statusFromJSON:json];
         if (!st) return;
-        NSString *path = st.currentPath ?: @"";
-        self_.webStatus=st;
-        // 既有 0.4 s 的 /api/status 轮询只把播放头搬过去：波形只在切曲时取，这里绝不重发 /api/waveform。
-        [self_ updateWaveformPlayheadForStatus:st];
-        self_.webControls.posLabel.stringValue=RLPFmtDuration(st.position);self_.webControls.durLabel.stringValue=RLPFmtDuration(st.duration);
-        if(!self_.webControls.seek.dragging)self_.webControls.seek.doubleValue=st.duration>0?st.position/st.duration:0;
-        const BOOL rawLocked = ([json[@"rawVolumeLocked"] respondsToSelector:@selector(boolValue)] && [json[@"rawVolumeLocked"] boolValue]) ||
-                               ([json[@"volumeWritable"] respondsToSelector:@selector(boolValue)] && ![json[@"volumeWritable"] boolValue]);
-        [self_.webControls applyVolumeLockedState:rawLocked];
-        if (rawLocked) {
-            self_.webControls.volumeWritePending = NO;
-            ++self_.webControls.volumeWriteSeq;
-            self_.webControls.confirmedVolumeDb = 0.0;
-            self_.webControls.hasConfirmedVolume = YES;
-            [self_.webControls updateVolumeUiForDb:0.0];
-        } else if (!self_.webControls.volKnob.dragging && !self_.webControls.volume.dragging && !self_.webControls.volumeWritePending && isfinite(st.volumeDb)) {
-            const double clamped = RLPVolClampDb(st.volumeDb);
-            self_.webControls.confirmedVolumeDb = clamped;
-            self_.webControls.hasConfirmedVolume = YES;
-            [self_.webControls updateVolumeUiForDb:clamped];
-        }
-        self_.webControls.playBtn.image=[NSImage imageWithSystemSymbolName:st.playing&&!st.paused?@"pause.fill":@"play.fill" accessibilityDescription:@"播放 / 暂停"];
-        self_.webControls.playBtn.contentTintColor=NSColor.whiteColor;
-        [self_ updateLyricPosition:st.position];
-        if(!self_.trackMetadata.count || ![path isEqualToString:self_.currentPath?:@""])self_.titleLabel2.stringValue=path.length?path.lastPathComponent.stringByDeletingPathExtension:RLPTr(@"未播放");
-        // web 整页**不把后端 error 写进副标题**（那会把艺术家信息顶掉，变成"艺术家=解码失败"）。
-        // 原生保留可见反馈：走全局去重 toast（与底栏/同步播放动作共用同一状态）。
-        self_.lastStatusError = st.error;
-        RLPReportPlaybackStatusErrorForTrack(st.error, st.currentPath);
-        if (![path isEqualToString:self_.currentPath ?: @""]) {
-            BOOL cancelPrevious=self_.anlBusy;
-            self_.currentPath = path;self_.trackMetadata=@{};self_.artistLabel2.stringValue=@"";self_.metaLabel.stringValue=@"";
-            self_.nextTrackVisible=NO;self_.metaLabel.hidden=YES;   // 换歌先清「下一首」，不等新队列返回
-            [self_ refreshQueueContext];[self_ refreshFavorite];
-            // 切曲/停止先把「正在播放 · CODEC / kHz / bit」复位成纯「正在播放」：
-            // web renderNp 每帧都用 curMeta 重算（curMeta 清空 ⟹ 只剩「正在播放」）；
-            // 旧码只在 /api/meta 回来时覆盖 ⟹ 停止后仍挂着上一首的格式串（用户可见的假信息）。
-            if (!self_.kindLabel.attributedStringValue.length || ![self_.kindLabel.attributedStringValue.string isEqualToString:RLPTr(@"正在播放")])
-                RLPSetKernedText(self_.kindLabel, RLPTr(@"正在播放"), 1.6);
-            // 切歌：旧世代在飞的 summary 必须作废（迟到响应不能贴到新曲/新专辑的卡上）。
-            [self_ railInvalidateForTrackChange];
-            [self_ loadLyricsForPath:path];
-            [self_ loadCoverForPath:path];
-            [self_ loadMetaAndKnowledgeForPath:path];
-            // U2 包3：切曲/首次进入取一次波形（GET /api/waveform?file=…&bins=512）。
-            [self_ loadWaveformForPath:path];
-            // 切歌：清掉上一首的结果、待发队列与层级。
-            [self_ anlClearPendingAnalysis];
-            self_.anlHealth = nil;
-            self_.anlPath = nil;
-            self_.anlError = nil;
-            self_.anlCached = NO;
-            self_.anlSeq++;                 // 让上一首的在途回调作废
-            self_.anlBusy = NO;
-            self_.anlAutoDonePath = nil;
-            [self_ anlOpenLevel:RLPAnlLevelCollapsed];
-            // 切歌要让**服务器**也停下上一首的分析（/api/anl/cancel，与 web 版 anlTick 同语义：
-            // 否则 CPU 继续烧在没人看的结果上）；异步 cancel 完成前不发新分析，避免新请求撞上旧 cancel。
-            if (cancelPrevious && !self_.anlCancelInFlight) {
-                [self_ anlCancelServer];
-            }
-        }
-        // 每轮都跑一次"该不该自动分析"的判定（与 web 版 anlTick 同口径）。
-        // ⚠️ 这里绝不无条件发 /api/health：那是整曲解码 + FFT 的重活。
-        // 只有「autoanl=1 且正在播放 且 本地文件 且 无缓存 且 没在跑 且 本曲还没自动跑过」才发一次。
-        [self_ anlAutoTickForPath:path playing:st.playing paused:st.paused];
+        [self_ applyStatus:st rawJSON:json];
     }];
+}
+
+- (void)applyStatus:(RLPPlaybackStatus *)st {
+    [self applyStatus:st rawJSON:nil];
+}
+
+- (void)applyStatus:(RLPPlaybackStatus *)st rawJSON:(nullable NSDictionary *)json {
+    if (!st) return;
+    NSDictionary *raw = RLPNPMatchingRawJSON(st, json);
+    NSString *path = st.currentPath ?: @"";
+    NSString *stTitle = RLPNPStatusTitle(raw);
+    NSString *stArtist = RLPNPStatusArtist(raw);
+    NSString *newKey = RLPNPMakeTrackKey(st, raw);
+
+    const BOOL keyChanged = ![newKey isEqualToString:(self.trackKey ?: @"")];
+    const BOOL pathChanged = ![path isEqualToString:(self.currentPath ?: @"")];
+    const BOOL trackChanged = keyChanged || pathChanged;
+    const BOOL shouldReloadTrack = trackChanged || (self.needsTrackReload && (path.length > 0 || newKey.length > 0));
+
+    self.webStatus = st;
+    self.lastStatus = st;
+    // 既有 0.4 s 的 /api/status 轮询只把播放头搬过去：波形只在切曲时取，这里绝不重发 /api/waveform。
+    [self updateWaveformPlayheadForStatus:st];
+    self.webControls.posLabel.stringValue = RLPFmtDuration(st.position);
+    self.webControls.durLabel.stringValue = RLPFmtDuration(st.duration);
+    if (!self.webControls.seek.dragging) {
+        self.webControls.seek.doubleValue = st.duration > 0 ? st.position / st.duration : 0;
+    }
+    if (raw) {
+        const BOOL rawLocked = ([raw[@"rawVolumeLocked"] respondsToSelector:@selector(boolValue)] && [raw[@"rawVolumeLocked"] boolValue]) ||
+                               ([raw[@"volumeWritable"] respondsToSelector:@selector(boolValue)] && ![raw[@"volumeWritable"] boolValue]);
+        [self.webControls applyVolumeLockedState:rawLocked];
+        if (rawLocked) {
+            self.webControls.volumeWritePending = NO;
+            ++self.webControls.volumeWriteSeq;
+            self.webControls.confirmedVolumeDb = 0.0;
+            self.webControls.hasConfirmedVolume = YES;
+            [self.webControls updateVolumeUiForDb:0.0];
+        } else if (!self.webControls.volKnob.dragging && !self.webControls.volume.dragging && !self.webControls.volumeWritePending && isfinite(st.volumeDb)) {
+            const double clamped = RLPVolClampDb(st.volumeDb);
+            self.webControls.confirmedVolumeDb = clamped;
+            self.webControls.hasConfirmedVolume = YES;
+            [self.webControls updateVolumeUiForDb:clamped];
+        }
+    } else if (!self.webControls.volKnob.dragging && !self.webControls.volume.dragging && !self.webControls.volumeWritePending && isfinite(st.volumeDb)) {
+        const double clamped = RLPVolClampDb(st.volumeDb);
+        self.webControls.confirmedVolumeDb = clamped;
+        self.webControls.hasConfirmedVolume = YES;
+        [self.webControls updateVolumeUiForDb:clamped];
+    }
+    self.webControls.playBtn.image = [NSImage imageWithSystemSymbolName:(st.playing && !st.paused ? @"pause.fill" : @"play.fill")
+                                                accessibilityDescription:@"播放 / 暂停"];
+    self.webControls.playBtn.contentTintColor = NSColor.whiteColor;
+    [self updateLyricPosition:st.position];
+
+    // web 整页**不把后端 error 写进副标题**（那会把艺术家信息顶掉，变成"艺术家=解码失败"）。
+    // 原生保留可见反馈：走全局去重 toast（与底栏/同步播放动作共用同一状态）。
+    self.lastStatusError = st.error;
+    RLPReportPlaybackStatusErrorForTrack(st.error, st.currentPath);
+
+    if (shouldReloadTrack) {
+        self.needsTrackReload = NO;
+        self.trackReloadSeq += 1;
+        if (trackChanged) {
+            [self resetTrackUIForTrackKey:newKey path:path title:stTitle artist:stArtist];
+        } else {
+            if (stTitle.length) self.statusTitle = stTitle;
+            if (stArtist.length) self.statusArtist = stArtist;
+            self.trackGeneration += 1;
+            self.metaSeq += 1;
+        }
+        [self refreshQueueContext];
+        [self refreshFavorite];
+        [self loadLyricsForPath:path];
+        [self loadCoverForPath:path];
+        [self loadMetaAndKnowledgeForPath:path];
+        // U2 包3：切曲/首次进入取一次波形（GET /api/waveform?file=…&bins=512）。
+        [self loadWaveformForPath:path];
+    } else if (!self.trackMetadata.count) {
+        NSString *fallbackTitle = path.length
+            ? path.lastPathComponent.stringByDeletingPathExtension
+            : (st.playing ? RLPTr(@"未命名曲目") : RLPTr(@"未播放"));
+        self.titleLabel2.stringValue = stTitle.length ? stTitle
+            : (self.statusTitle.length ? self.statusTitle : fallbackTitle);
+    }
+    // 每轮都跑一次"该不该自动分析"的判定（与 web 版 anlTick 同口径）。
+    [self anlAutoTickForPath:path playing:st.playing paused:st.paused];
 }
 
 #pragma mark - U2 包3：波形（/api/waveform 取数 + /api/status 搬播放头 + 点击 seek）
@@ -4735,6 +5048,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     if ([path isEqualToString:self.waveformPath ?: @""] && self.waveformView.peaks.count) return;
     const NSUInteger seq = ++self.waveformSeq;
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
     self.waveformPath = path;
     self.waveformSelection = nil;
     [self.waveformView clearWaveform];       // 旧曲包络不能留在新曲上（新数据回来前只画基线）
@@ -4742,7 +5057,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     __weak __typeof__(self) ws = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) s = ws;
-        if (!s || seq != s.waveformSeq || ![path isEqualToString:s.waveformPath ?: @""]) return;
+        if (!s || gen != s.trackGeneration || seq != s.waveformSeq ||
+            ![tk isEqualToString:(s.trackKey ?: @"")] ||
+            ![path isEqualToString:s.waveformPath ?: @""]) return;
         NSArray *peaks = [json[@"peaks"] isKindOfClass:[NSArray class]] ? json[@"peaks"] : nil;
         if (!peaks.count) return;            // 解码失败/超限：保持空态，同一首不再打后端
         NSArray *rms = [json[@"rms"] isKindOfClass:[NSArray class]] ? json[@"rms"] : nil;
@@ -4850,12 +5167,16 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)loadLyricsForPath:(NSString *)path {
-    const NSUInteger seq=++self.lyricSeq;[self.lyricRetryTimer invalidate];self.lyricRetryTimer=nil;
-    self.originalLyricLines=nil;
-    self.lyricAiApplied=NO;
-    self.lyricAiBusy=NO;
+    const NSUInteger seq = ++self.lyricSeq;
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
+    [self.lyricRetryTimer invalidate];
+    self.lyricRetryTimer = nil;
+    self.originalLyricLines = nil;
+    self.lyricAiApplied = NO;
+    self.lyricAiBusy = NO;
     ++self.lyricAiSeq;
-    if(!path.length||[path hasPrefix:@"http://"]||[path hasPrefix:@"https://"]){
+    if (!path.length || [path hasPrefix:@"http://"] || [path hasPrefix:@"https://"]) {
         [self applyLyricText:@"" forPath:path];
         // web `renderNpLyric()` 对"无歌词"只有一种两行空态（网络曲目也一样）；右侧抽屉才另有
         // 「网络曲目暂无歌词」。旧码把抽屉文案搬到整页，属于超集/错位。
@@ -4866,49 +5187,81 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     // 切曲（或首次取词）：上一首的歌词行不得留到新曲——新词回来前给加载态，而不是把旧歌的词
     // 挂在新曲标题下（evidence/native-4-playback-diff.md #61「切曲：…歌词…全量复位」）。
     // 同曲重进页面（lyricPath 已是本曲）不清：保留已显示的词，后台照常重取一次。
-    if([path isEqualToString:self.currentPath?:@""] && (!self.lyricPath.length||![self.lyricPath isEqualToString:path])){
-        self.lyricManualUntil=0;                    // 换歌清掉上一首的手动滚动保护（web loadLyrics 同口径）
+    if ([path isEqualToString:(self.currentPath ?: @"")] && (!self.lyricPath.length || ![self.lyricPath isEqualToString:path])) {
+        self.lyricManualUntil = 0;                    // 换歌清掉上一首的手动滚动保护（web loadLyrics 同口径）
         [self applyLyricText:@"" forPath:path];     // 清行 + AI 态（同时把 lyricPath 记为本曲）
         [self setLyricsPlaceholder:@"歌词加载中…"
                             detail:@"正在等后台补全（首次播放新曲目时可能要几秒）"];
     }
-    self.lyricRetry=0;[self fetchLyricPath:path sequence:seq];
+    self.lyricRetry = 0;
+    [self fetchLyricPath:path sequence:seq generation:gen trackKey:tk];
 }
+
 - (void)fetchLyricPath:(NSString *)path sequence:(NSUInteger)seq {
-    __weak __typeof__(self) ws=self;
-    [[RLPCoreClient shared] getJSON:[@"/api/lyrics?file=" stringByAppendingString:RLPEnc(path)] completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||seq!=s.lyricSeq||![s.currentPath isEqual:path])return;
-        NSString *lrc=[j[@"lrc"] isKindOfClass:NSString.class]?j[@"lrc"]:@"";[s applyLyricText:lrc forPath:path];
-        if(!j){s.lyricsEmpty.stringValue=RLPTr(@"歌词加载失败");return;}
-        const NSInteger waits[]={1,2,3,5,8,13};
-        if(!s.lyricLines.count&&s.lyricRetry<6){
+    [self fetchLyricPath:path sequence:seq generation:self.trackGeneration trackKey:(self.trackKey ?: @"")];
+}
+
+- (void)fetchLyricPath:(NSString *)path sequence:(NSUInteger)seq generation:(NSUInteger)gen trackKey:(NSString *)tk {
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:[@"/api/lyrics?file=" stringByAppendingString:RLPEnc(path)] completion:^(NSDictionary *j) {
+        __typeof__(self) s = ws;
+        if (!s || gen != s.trackGeneration || seq != s.lyricSeq ||
+            ![tk isEqualToString:(s.trackKey ?: @"")] ||
+            ![(s.currentPath ?: @"") isEqualToString:(path ?: @"")]) return;
+        NSString *lrc = [j[@"lrc"] isKindOfClass:NSString.class] ? j[@"lrc"] : @"";
+        [s applyLyricText:lrc forPath:path];
+        if (!j) {
+            [s setLyricsPlaceholder:@"歌词加载失败" detail:@""];
+            return;
+        }
+        const NSInteger waits[] = {1, 2, 3, 5, 8, 13};
+        if (!s.lyricLines.count && s.lyricRetry < 6) {
             [s setLyricsPlaceholder:@"歌词加载中…"
                              detail:@"正在等后台补全（首次播放新曲目时可能要几秒）"];
-            NSInteger delay=waits[s.lyricRetry++];s.lyricRetryTimer=[NSTimer scheduledTimerWithTimeInterval:delay repeats:NO block:^(NSTimer *t){__typeof__(self) n=ws;if(n&&seq==n.lyricSeq&&n.polling)[n fetchLyricPath:path sequence:seq];}];}
+            NSInteger delay = waits[s.lyricRetry++];
+            s.lyricRetryTimer = [NSTimer scheduledTimerWithTimeInterval:delay repeats:NO block:^(NSTimer *t) {
+                (void)t;
+                __typeof__(self) n = ws;
+                if (n && gen == n.trackGeneration && seq == n.lyricSeq &&
+                    [tk isEqualToString:(n.trackKey ?: @"")] &&
+                    [(n.currentPath ?: @"") isEqualToString:(path ?: @"")] && n.polling) {
+                    [n fetchLyricPath:path sequence:seq generation:gen trackKey:tk];
+                }
+            }];
+        }
     }];
 }
 
 /// 按**文件路径**取封面：/api/cover?file=… 是既有端点（与 web 版单曲页同一个），
 /// 内部走「内嵌图 → 同目录图 → 所属专辑封面」三级兜底，因此不需要先解析专辑 key。
-/// 用单调递增的请求序号丢弃过期结果：快速切歌时慢请求回来不能盖掉新封面。
+/// 用单调递增的请求序号 + 曲目世代/键丢弃过期结果：快速切歌时慢请求回来不能盖掉新封面。
 - (void)loadCoverForPath:(NSString *)path {
     if (!path.length) {
-        self.coverSeq++;self.coverPath=nil;self.cover.image = nil;self.webCanvas.blurredCover=nil;self.webCanvas.needsDisplay=YES;
+        self.coverSeq++;
+        self.coverPath = nil;
+        self.cover.image = nil;
+        self.webCanvas.blurredCover = nil;
+        self.webCanvas.needsDisplay = YES;
         return;
     }
     const NSUInteger seq = ++self.coverSeq;
-    // 切曲：上一首的主封面不得留到新曲——新图回来前留空白底板，而不是把旧专辑图挂在新曲标题下
-    // （evidence/native-4-playback-diff.md #61「切曲：…封面…全量复位」）。
-    // 整页模糊背景先保留：它是装饰性氛围（web #npbg 同样等新 meta 才换），清空会让整页背景闪一下；
-    // 新图回来时 updateBlurredCover 用 coverSeq 作废旧任务并换成新背景。
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
+    // 切曲：上一首的主封面、coverPath 与模糊背景不得留到新曲——新图回来前清干净。
     // 同曲重取（手动设置/恢复自动）保留旧主封面到新图回来，避免闪白。
     if (!self.coverPath.length || ![self.coverPath isEqualToString:path]) {
+        self.coverPath = nil;
         self.cover.image = nil;
+        self.webCanvas.blurredCover = nil;
+        self.webCanvas.needsDisplay = YES;
     }
     NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.coverSeq) return;   // 过期结果直接丢
+        if (!self_ || seq != self_.coverSeq || gen != self_.trackGeneration ||
+            ![tk isEqualToString:(self_.trackKey ?: @"")] ||
+            ![path isEqualToString:(self_.currentPath ?: @"")]) return;   // 过期/跨世代结果直接丢
         self_.cover.image = data.length ? [[NSImage alloc] initWithData:data] : nil;
         self_.coverPath = path;                         // 本图已属于本曲（下次切曲据此清）
         [self_ updateBlurredCover];
@@ -4931,30 +5284,46 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)loadMetaAndKnowledgeForPath:(NSString *)path {
     if (!path.length) {
-        self.trackMetadata=@{};[self railInvalidateForTrackChange];[self renderMetaChipsFromMeta:nil];[self renderRailMetadata];
-        [self.knowledge loadKind:@"track" name:@"" artist:nil];
+        self.metaSeq += 1;
+        self.trackMetadata = @{};
+        [self railInvalidateForTrackChange];
+        [self.railAlbumInflight removeAllObjects];
+        [self renderMetaChipsFromMeta:nil];
+        [self applyCoverSourceGate];
+        [self renderRailMetadata];
+        [self syncOpenDrawerIfNeeded];
+        [self.knowledge loadKind:@"track"
+                            name:(self.statusTitle ?: @"")
+                          artist:(self.statusArtist.length ? self.statusArtist : nil)];
         return;
     }
+    const NSUInteger gen = self.trackGeneration;
+    const NSUInteger mSeq = ++self.metaSeq;
+    NSString *tk = [self.trackKey copy] ?: @"";
     NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        // 异步回来时可能已切歌：路径不一致就丢弃
-        if (![path isEqualToString:self_.currentPath ?: @""]) return;
+        // 异步回来时可能已切歌（包括 A→B→A 切回同路径、或同路径元信息键变化）：世代/键/路径任一不一致即丢弃
+        if (gen != self_.trackGeneration || mSeq != self_.metaSeq ||
+            ![tk isEqualToString:(self_.trackKey ?: @"")] ||
+            ![path isEqualToString:(self_.currentPath ?: @"")]) return;
         NSString *title = [json[@"title"] isKindOfClass:[NSString class]] ? json[@"title"] : @"";
         NSString *artist = [json[@"artist"] isKindOfClass:[NSString class]] ? json[@"artist"] : @"";
-        if (!title.length) title = path.lastPathComponent.stringByDeletingPathExtension;
+        if (!title.length) title = self_.statusTitle.length ? self_.statusTitle : path.lastPathComponent.stringByDeletingPathExtension;
         if (title.length) self_.titleLabel2.stringValue = title;
-        self_.trackMetadata=json?:@{};
+        if (!artist.length && self_.statusArtist.length) artist = self_.statusArtist;
+        self_.trackMetadata = json ?: @{};
         [self_ renderMetaChipsFromMeta:json];
         // v3.3.11：只有 coverSource == manual 才显示「自动」封面按钮（否则无东西可恢复）。
         [self_ applyCoverSourceGate];
-        NSString *album=[json[@"album"] isKindOfClass:NSString.class]?json[@"album"]:@"";
-        self_.artistLabel2.stringValue=[NSString stringWithFormat:@"%@%@%@",artist,album.length?@" · ":@"",album];
-        NSMutableArray *format=[NSMutableArray array];if([json[@"codec"] isKindOfClass:NSString.class])[format addObject:[json[@"codec"] uppercaseString]];
-        if([json[@"sampleRate"] doubleValue]>0)[format addObject:[NSString stringWithFormat:@"%g kHz",[json[@"sampleRate"] doubleValue]/1000]];
-        if([json[@"bits"] integerValue]>0)[format addObject:[NSString stringWithFormat:@"%ld bit",(long)[json[@"bits"] integerValue]]];
+        NSString *album = [json[@"album"] isKindOfClass:NSString.class] ? json[@"album"] : @"";
+        self_.artistLabel2.stringValue = [NSString stringWithFormat:@"%@%@%@", artist, album.length ? @" · " : @"", album];
+        NSMutableArray *format = [NSMutableArray array];
+        if ([json[@"codec"] isKindOfClass:NSString.class]) [format addObject:[json[@"codec"] uppercaseString]];
+        if ([json[@"sampleRate"] doubleValue] > 0) [format addObject:[NSString stringWithFormat:@"%g kHz", [json[@"sampleRate"] doubleValue] / 1000]];
+        if ([json[@"bits"] integerValue] > 0) [format addObject:[NSString stringWithFormat:@"%ld bit", (long)[json[@"bits"] integerValue]]];
         // web npPlayingKindText：**有格式字段才拼** " · CODEC / kHz / bit"，一个都没有就只回「正在播放」。
         // 旧码无条件拼分隔符 ⟹ /api/meta 缺 codec/sampleRate/bits 时显示「正在播放 · 」（尾部悬挂）。
         RLPSetKernedText(self_.kindLabel,
@@ -5092,9 +5461,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 - (void)onFav:(id)sender {
     if (!self.currentPath.length) { RLPToast(RLPTr(@"没有正在播放的曲目")); return; }
     BOOL on=!self.favorite;NSString *favoritePath=[self.currentPath copy];
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(self.currentPath),on?1:0];
     [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
-        if(![favoritePath isEqualToString:self.currentPath])return;
+        if(gen != self.trackGeneration || ![tk isEqualToString:(self.trackKey ?: @"")] || ![favoritePath isEqualToString:self.currentPath])return;
         if (json && [json[@"ok"] boolValue]) {self.favorite=on;self.favoriteButton.title=on?@"♥":@"♡";RLPToast(RLPTr(on?@"已收藏":@"已取消收藏"));[[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self];}
         else RLPToast(RLPTr(@"收藏失败"));
     }];
@@ -5372,6 +5743,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 - (void)anlDispatchHealthForPath:(NSString *)path force:(BOOL)force seq:(NSUInteger)seq {
     if (!RLPAnlIsLocalPath(path) || ![path isEqualToString:self.currentPath ?: @""]) return;
     NSString *targetPath = [path copy];
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
     // web 的右键「音质体检」用 /api/track/health，单曲页用 /api/health —— 后端是同一个
     // handler（rtaweb 的 aliasing），两个名字都真存在。这里按 web 的体检入口名走，
     // 让两端在日志/诊断里看到同一个路径。
@@ -5379,7 +5752,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.anlSeq || ![targetPath isEqualToString:self_.currentPath ?: @""]) return;    // 过期/切歌结果直接丢
+        if (!self_ || gen != self_.trackGeneration || seq != self_.anlSeq ||
+            ![tk isEqualToString:(self_.trackKey ?: @"")] ||
+            ![targetPath isEqualToString:self_.currentPath ?: @""]) return;    // 过期/切歌结果直接丢
         self_.anlBusy = NO;
         NSDictionary *dict = [json isKindOfClass:[NSDictionary class]] ? json : nil;
         const BOOL isCancelled = dict &&
@@ -5549,14 +5924,20 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 - (void)updateBlurredCover {
     NSImage *image=self.cover.image;if(!image){self.webCanvas.blurredCover=nil;self.webCanvas.needsDisplay=YES;return;}
-    NSData *data=image.TIFFRepresentation;if(!data)return;NSUInteger seq=self.coverSeq;BOOL light=[RLPTheme current].isLight;__weak __typeof__(self) ws=self;
+    NSData *data=image.TIFFRepresentation;if(!data)return;
+    NSUInteger seq=self.coverSeq;NSUInteger gen=self.trackGeneration;NSString *expectedCoverPath=[self.coverPath copy];
+    BOOL light=[RLPTheme current].isLight;__weak __typeof__(self) ws=self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{
         CIImage *ci=[CIImage imageWithData:data];if(!ci)return;CGRect rect=ci.extent;
         CIFilter *blur=[CIFilter filterWithName:@"CIGaussianBlur"];[blur setValue:[ci imageByClampingToExtent] forKey:kCIInputImageKey];[blur setValue:@64 forKey:kCIInputRadiusKey];
         CIFilter *color=[CIFilter filterWithName:@"CIColorControls"];[color setValue:[blur.outputImage imageByCroppingToRect:rect] forKey:kCIInputImageKey];[color setValue:light?@1.05:@1.15 forKey:kCIInputSaturationKey];
         CIFilter *exposure=[CIFilter filterWithName:@"CIExposureAdjust"];[exposure setValue:color.outputImage forKey:kCIInputImageKey];[exposure setValue:@(log2(light?1.12:.38)) forKey:kCIInputEVKey];
         CIContext *ctx=[CIContext contextWithOptions:nil];CGImageRef cg=[ctx createCGImage:exposure.outputImage fromRect:rect];if(!cg)return;NSImage *result=[[NSImage alloc] initWithCGImage:cg size:image.size];CGImageRelease(cg);
-        dispatch_async(dispatch_get_main_queue(),^{__typeof__(self) s=ws;if(!s||seq!=s.coverSeq||light!=[RLPTheme current].isLight)return;s.webCanvas.blurredCover=result;s.webCanvas.needsDisplay=YES;});
+        dispatch_async(dispatch_get_main_queue(),^{
+            __typeof__(self) s=ws;
+            if(!s||seq!=s.coverSeq||gen!=s.trackGeneration||light!=[RLPTheme current].isLight||(expectedCoverPath.length&&![expectedCoverPath isEqualToString:(s.coverPath?:@"")]))return;
+            s.webCanvas.blurredCover=result;s.webCanvas.needsDisplay=YES;
+        });
     }});
 }
 - (void)onExternalFavoritesChanged:(NSNotification *)note {
@@ -5566,8 +5947,15 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)refreshFavorite {
-    NSString *path=self.currentPath;if(!path.length)return;__weak __typeof__(self) ws=self;
-    [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s||![path isEqual:s.currentPath])return;NSArray *items=[j[@"files"] isKindOfClass:NSArray.class]?j[@"files"]:([j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[]);s.favorite=NO;for(id item in items){NSString *p=[item isKindOfClass:NSString.class]?item:([item isKindOfClass:NSDictionary.class]?item[@"file"]:nil);if([RLPNPFavKey(p) isEqual:RLPNPFavKey(path)])s.favorite=YES;}s.favoriteButton.title=s.favorite?@"♥":@"♡";}];
+    NSString *path=self.currentPath;if(!path.length)return;
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
+    __weak __typeof__(self) ws=self;
+    [[RLPCoreClient shared] getJSON:@"/api/fav/list" completion:^(NSDictionary *j){
+        __typeof__(self) s=ws;
+        if(!s||gen!=s.trackGeneration||![tk isEqualToString:(s.trackKey?:@"")]||![path isEqual:s.currentPath])return;
+        NSArray *items=[j[@"files"] isKindOfClass:NSArray.class]?j[@"files"]:([j[@"items"] isKindOfClass:NSArray.class]?j[@"items"]:@[]);s.favorite=NO;for(id item in items){NSString *p=[item isKindOfClass:NSString.class]?item:([item isKindOfClass:NSDictionary.class]?item[@"file"]:nil);if([RLPNPFavKey(p) isEqual:RLPNPFavKey(path)])s.favorite=YES;}s.favoriteButton.title=s.favorite?@"♥":@"♡";
+    }];
 }
 /// 从 /api/queue 快照里取 mode 并刷新循环/随机芯片（web applyRep(v)）。
 - (void)applyPlayModeFromJSON:(NSDictionary *)j {
@@ -5587,9 +5975,12 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)refreshQueueContext {
-    NSString *path=self.currentPath;__weak __typeof__(self) ws=self;
+    NSString *path=self.currentPath ?: @"";
+    const NSUInteger gen = self.trackGeneration;
+    NSString *tk = [self.trackKey copy] ?: @"";
+    __weak __typeof__(self) ws=self;
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary *j){__typeof__(self) s=ws;
-        if(!s||![path isEqual:s.currentPath])return;
+        if(!s||gen!=s.trackGeneration||![tk isEqualToString:(s.trackKey?:@"")]||![path isEqualToString:(s.currentPath?:@"")])return;
         if(![j isKindOfClass:[NSDictionary class]]){[s applyQueueSnapshot:nil];return;}
         [s applyPlayModeFromJSON:j];
         [s applyQueueSnapshot:j];

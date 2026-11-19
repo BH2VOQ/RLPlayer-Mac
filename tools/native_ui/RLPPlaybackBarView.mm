@@ -18,6 +18,76 @@
 #import "RLPSupport.h"   // RLPTr / RLPToast / RLPPostJSON（播放模式按钮用）
 #import "RLPSignalChain.h"   // 底栏「信号链」弹层（与工作台同一份纯函数）
 
+static NSString *RLPBarStatusTrimmedString(id value) {
+    if (![value isKindOfClass:[NSString class]]) return @"";
+    return [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSString *RLPBarStatusTitle(NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[@"title", @"trackTitle", @"song"]) {
+        NSString *v = RLPBarStatusTrimmedString(json[k]);
+        if (v.length) return v;
+    }
+    id track = json[@"track"];
+    if ([track isKindOfClass:[NSDictionary class]]) {
+        NSString *v = RLPBarStatusTrimmedString(((NSDictionary *)track)[@"title"]);
+        if (v.length) return v;
+    }
+    return @"";
+}
+
+static NSString *RLPBarStatusArtist(NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[@"artist", @"trackArtist"]) {
+        NSString *v = RLPBarStatusTrimmedString(json[k]);
+        if (v.length) return v;
+    }
+    id track = json[@"track"];
+    if ([track isKindOfClass:[NSDictionary class]]) {
+        NSString *v = RLPBarStatusTrimmedString(((NSDictionary *)track)[@"artist"]);
+        if (v.length) return v;
+    }
+    return @"";
+}
+
+static NSString *RLPBarStatusExplicitTrackId(NSDictionary * _Nullable json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in @[@"trackKey", @"trackId", @"track_id", @"cueIndex", @"index"]) {
+        id v = json[k];
+        if ([v isKindOfClass:[NSString class]]) {
+            NSString *s = RLPBarStatusTrimmedString(v);
+            if (s.length) return s;
+        } else if ([v isKindOfClass:[NSNumber class]]) {
+            return [(NSNumber *)v stringValue];
+        }
+    }
+    return @"";
+}
+
+static NSString *RLPBarMakeTrackKey(RLPPlaybackStatus * _Nullable st, NSDictionary * _Nullable json) {
+    NSString *path = st.currentPath ?: @"";
+    NSString *title = RLPBarStatusTitle(json);
+    NSString *artist = RLPBarStatusArtist(json);
+    NSString *tid = RLPBarStatusExplicitTrackId(json);
+    if (!path.length && !title.length && !artist.length && !tid.length) return @"";
+    if (!title.length && !artist.length && !tid.length) return path;
+    return [NSString stringWithFormat:@"%@|%@|%@|%@", path, title, artist, tid];
+}
+
+static NSDictionary * _Nullable RLPBarMatchingRawStatus(RLPPlaybackStatus *st, NSDictionary * _Nullable sd) {
+    if (![sd isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *sdPath = @"";
+    for (NSString *k in @[@"current", @"currentPath", @"path", @"file"]) {
+        if ([sd[k] isKindOfClass:[NSString class]]) {
+            sdPath = sd[k];
+            break;
+        }
+    }
+    if (![sdPath isEqualToString:(st.currentPath ?: @"")]) return nil;
+    return sd;
+}
+
 #pragma mark - 可拖动滑块（区分"用户正在拖"与"轮询回写"）
 
 @interface RLPCommitSlider : NSSlider
@@ -261,8 +331,14 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 @property (nonatomic, strong) NSTextField *bpBadge;        // BIT-PERFECT 绿色徽标
 @property (nonatomic, copy) NSString *coverPath;
 @property (nonatomic, assign) NSUInteger coverSeq;
+@property (nonatomic, copy) NSString *coverTrackKey;
 @property (nonatomic, copy) NSString *metaPath;
 @property (nonatomic, copy) NSString *metaTitle;
+@property (nonatomic, copy) NSString *metaTrackKey;
+@property (nonatomic, assign) NSUInteger metaSeq;
+@property (nonatomic, copy) NSString *trackKey;
+@property (nonatomic, copy) NSString *statusTitle;
+@property (nonatomic, copy) NSString *statusArtist;
 @property (nonatomic, copy) NSDictionary *statusDetails;
 @property (nonatomic, strong) NSTextField *gpuBadge;
 /// 磨砂玻璃层（第14项）。必须位于内容之下，frame 覆盖整条。
@@ -329,6 +405,10 @@ static void RLPSetBadgeText(NSTextField *label, NSString *text, NSColor *color, 
 - (void)commitSeekFrac:(double)frac;
 - (void)applyProgressDisplayForStatus:(RLPPlaybackStatus *)st dur:(double)dur;
 - (void)restoreProgressToConfirmedStatus;
+- (void)refreshMetaForTrackKey:(NSString *)trackKey
+                          path:(NSString *)path
+                   statusTitle:(NSString *)statusTitle
+                  statusArtist:(NSString *)statusArtist;
 @end
 
 static BOOL RLPBarTextFieldIsEditing(NSTextField *field) {
@@ -1349,35 +1429,45 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
 
 - (void)applyStatus:(RLPPlaybackStatus *)st {
     if (!st) return;
-    self.lastStatus = st;
+    NSDictionary *raw = RLPBarMatchingRawStatus(st, self.statusDetails);
+    if (!raw && self.statusDetails) self.statusDetails = nil;
+    NSString *path = st.currentPath ?: @"";
+    NSString *stTitle = RLPBarStatusTitle(raw);
+    NSString *stArtist = RLPBarStatusArtist(raw);
+    NSString *newKey = RLPBarMakeTrackKey(st, raw);
+    const BOOL trackChanged = ![newKey isEqualToString:(self.trackKey ?: @"")];
 
-    // 把位置/时长广播出去：右抽屉的歌词高亮靠它（web 用同一次状态轮询驱动 syncLyrics）。
-    // 用通知而不是相互持有：播放条不该知道抽屉存在。
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackTickNotification"
-        object:nil userInfo:@{ @"pos": @(st.position), @"dur": @(st.duration),
-                               @"path": st.currentPath ?: @"" }];
+    self.lastStatus = st;
+    self.trackKey = newKey;
+    self.statusTitle = stTitle;
+    self.statusArtist = stArtist;
+    if (trackChanged) {
+        self.metaTitle = @"";
+    }
 
     BOOL playing = st.playing && !st.paused;
     self.playBtn.image = [NSImage imageWithSystemSymbolName:(playing ? @"pause.fill" : @"play.fill")
                                    accessibilityDescription:RLPTr(@"播放 / 暂停")];
 
-    NSString *name = st.currentPath.lastPathComponent;
+    NSString *name = stTitle.length ? stTitle : path.lastPathComponent;
     if (name.length == 0) name = st.playing ? RLPTr(@"未命名曲目") : RLPTr(@"未播放");
-    self.titleLabel.stringValue = ([st.currentPath isEqualToString:self.metaPath] && self.metaTitle.length) ? self.metaTitle : name;
+    self.titleLabel.stringValue = ([newKey isEqualToString:(self.metaTrackKey ?: @"")] && self.metaTitle.length)
+        ? self.metaTitle : name;
 
     // 副标题 = 艺术家 · 专辑（web 底栏同口径）；bit-perfect 改用独立徽标显示。
     // 错误原文（RENDERFAIL 等）只进单曲页告警条与诊断包，绝不长期占据底栏副标题
     // （旧实现 st.error 非空就顶掉副标题，用户实测「第一次播放歌曲显示这个提示」）。
     self.subLabel.textColor = [RLPTheme current].mut;
-    [self refreshMetaForPath:st.currentPath];
+    [self refreshMetaForTrackKey:newKey path:path statusTitle:stTitle statusArtist:stArtist];
     if (st.error.length) self.subLabel.toolTip = st.error;
     else self.subLabel.toolTip = RLPTr(@"打开正在播放");
     RLPReportPlaybackStatusErrorForTrack(st.error, st.currentPath);
     [self refreshBadges];
-    // 封面：切歌才重新取（避免每 500ms 拉一次图）
-    if (![st.currentPath isEqualToString:self.coverPath ?: @""]) {
-        self.coverPath = st.currentPath;
-        [self loadCoverForPath:st.currentPath];
+    // 封面：切歌（包括同路径 metadata/trackKey 变化）才重新取，避免每 500ms 拉一次图
+    if (![newKey isEqualToString:(self.coverTrackKey ?: @"")] || ![path isEqualToString:(self.coverPath ?: @"")]) {
+        self.coverTrackKey = newKey;
+        self.coverPath = path;
+        [self loadCoverForPath:path];
     }
 
     double dur = st.duration > 0 ? st.duration : 0;
@@ -1428,39 +1518,96 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
             self.volDbField.stringValue = [NSString stringWithFormat:@"%.1f", clamped];
         }
     }
+
+    // 把位置/时长与完整曲目键广播出去：右抽屉的歌词高亮与播放页同轮切曲同步都靠它
+    // （用通知而不是相互持有，保持底栏与播放页低耦合）。
+    NSDictionary *noteInfo = @{
+        @"pos": @(st.position),
+        @"dur": @(st.duration),
+        @"path": path,
+        @"trackKey": newKey,
+        @"title": stTitle,
+        @"artist": stArtist,
+        @"status": st,
+        @"raw": raw ?: @{},
+        @"trackChanged": @(trackChanged),
+        @"source": self,
+    };
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackTickNotification"
+                                                        object:nil
+                                                      userInfo:noteInfo];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPlaybackStatusDidUpdateNotification"
+                                                        object:self
+                                                      userInfo:noteInfo];
 }
 
-/// 封面（/api/cover?file=…，与单曲页同一端点）；请求序号丢弃过期结果。
+/// 封面（/api/cover?file=…，与单曲页同一端点）；请求序号 + 当前封面键丢弃过期结果。
 - (void)loadCoverForPath:(NSString *)path {
-    if (!path.length) { ++self.coverSeq; self.coverView.image = nil; return; }
+    self.coverView.image = nil;
+    if (!path.length) { ++self.coverSeq; return; }
     const NSUInteger seq = ++self.coverSeq;
+    NSString *expectedPath = [path copy];
+    NSString *expectedKey = [self.coverTrackKey copy] ?: @"";
     NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.coverSeq) return;
+        if (!self_ || seq != self_.coverSeq ||
+            ![expectedPath isEqualToString:(self_.coverPath ?: @"")] ||
+            ![expectedKey isEqualToString:(self_.coverTrackKey ?: @"")]) return;
         self_.coverView.image = data.length ? [[NSImage alloc] initWithData:data] : nil;
     }];
 }
 
 /// 副标题：艺术家 · 专辑（/api/meta?file=…）。同曲不重复请求。
 - (void)refreshMetaForPath:(NSString *)path {
-    if (!path.length) { self.metaPath=@""; self.metaTitle=@""; self.subLabel.stringValue = @"—"; return; }
-    if ([path isEqualToString:self.metaPath ?: @""]) return;
-    self.metaPath = path;
-    self.metaTitle = @"";
-    self.subLabel.stringValue = @"—";
-    NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(path)];
+    NSString *p = path ?: @"";
+    NSString *tk = (self.trackKey.length && [p isEqualToString:(self.lastStatus.currentPath ?: @"")])
+        ? self.trackKey : p;
+    [self refreshMetaForTrackKey:tk
+                            path:p
+                     statusTitle:([p isEqualToString:(self.lastStatus.currentPath ?: @"")] ? (self.statusTitle ?: @"") : @"")
+                    statusArtist:([p isEqualToString:(self.lastStatus.currentPath ?: @"")] ? (self.statusArtist ?: @"") : @"")];
+}
+
+- (void)refreshMetaForTrackKey:(NSString *)trackKey
+                          path:(NSString *)path
+                   statusTitle:(NSString *)statusTitle
+                  statusArtist:(NSString *)statusArtist {
+    NSString *tk = trackKey ?: @"";
+    NSString *p = path ?: @"";
+    NSString *stTitle = statusTitle ?: @"";
+    NSString *stArtist = statusArtist ?: @"";
+    if (!p.length) {
+        ++self.metaSeq;
+        self.metaTrackKey = tk;
+        self.metaPath = @"";
+        self.metaTitle = stTitle;
+        self.subLabel.stringValue = stArtist.length ? stArtist : @"—";
+        return;
+    }
+    if ([tk isEqualToString:(self.metaTrackKey ?: @"")] && [p isEqualToString:(self.metaPath ?: @"")]) return;
+    const NSUInteger seq = ++self.metaSeq;
+    self.metaTrackKey = tk;
+    self.metaPath = p;
+    self.metaTitle = stTitle;
+    self.subLabel.stringValue = stArtist.length ? stArtist : @"—";
+    NSString *url = [NSString stringWithFormat:@"/api/meta?file=%@", RLPEnc(p)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || ![path isEqualToString:self_.metaPath ?: @""]) return;
-        self_.metaTitle = [json[@"title"] isKindOfClass:NSString.class] ? json[@"title"] : @"";
+        if (!self_ || seq != self_.metaSeq ||
+            ![tk isEqualToString:(self_.metaTrackKey ?: @"")] ||
+            ![p isEqualToString:(self_.metaPath ?: @"")]) return;
+        NSString *metaTitle = [json[@"title"] isKindOfClass:NSString.class] ? json[@"title"] : @"";
+        self_.metaTitle = metaTitle.length ? metaTitle : stTitle;
         if (self_.metaTitle.length) self_.titleLabel.stringValue = self_.metaTitle;
-        NSMutableArray<NSString *> *p = [NSMutableArray array];
-        if ([json[@"artist"] isKindOfClass:[NSString class]] && [json[@"artist"] length]) [p addObject:json[@"artist"]];
-        if ([json[@"album"] isKindOfClass:[NSString class]] && [json[@"album"] length]) [p addObject:json[@"album"]];
-        self_.subLabel.stringValue = p.count ? [p componentsJoinedByString:@" · "] : @"—";
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        NSString *artist = ([json[@"artist"] isKindOfClass:[NSString class]] && [json[@"artist"] length])
+            ? json[@"artist"] : stArtist;
+        if (artist.length) [parts addObject:artist];
+        if ([json[@"album"] isKindOfClass:[NSString class]] && [json[@"album"] length]) [parts addObject:json[@"album"]];
+        self_.subLabel.stringValue = parts.count ? [parts componentsJoinedByString:@" · "] : @"—";
     }];
 }
 
