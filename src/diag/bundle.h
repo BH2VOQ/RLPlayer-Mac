@@ -103,8 +103,12 @@ inline constexpr const char* kUiEventsName  = "uievents.jsonl";
 // ⟹ 条目 ≤ ~7.25 MiB，实测真实 ZIP ≤ 8 MiB。旧值 12 MiB 会生成 >8 MiB 的 zip，
 // 用户实机在"反馈附带诊断包"处被 8 MiB 闸门拦下（P0-2）。
 // 16 KiB 是"尾部还值得留"的下限（再小就只能看到半条日志，不如把预算让给别的条目）。
-inline constexpr std::size_t kDefaultBudgetBytes = 7680u * 1024u;  // 7.5 MiB
+// 用户硬要求：诊断包 ZIP < 8 MB（按十进制 8,000,000 字节，取两种口径中更严的）。
+// 7.3 MB 预算 + 256 KiB 元数据预留 + ZIP 目录开销仍留有余量；
+// 反馈后台上限 8 MiB 也覆盖此值。
+inline constexpr std::size_t kDefaultBudgetBytes = 7'300'000u;  // 7.3 MB (decimal)
 inline constexpr std::size_t kMetaReserveBytes   = 256u * 1024u;
+inline constexpr std::size_t kPackageMaxBytes    = 8'000'000u;  // 导出 ZIP 硬上限
 inline constexpr std::size_t kMinUsefulTailBytes = 16u * 1024u;
 
 // 条目类型只影响两件事：manifest 里的 kind 字符串，以及"裁剪后是否对齐到行首"。

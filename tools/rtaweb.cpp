@@ -15092,7 +15092,13 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             rta::net::webui_set_status(500);
             return "{\"ok\":false,\"code\":\"diag.package_incomplete\",\"error\":\"" + jesc(result.err.empty() ? "诊断包超过预算" : result.err) + "\"}";
         }
-        return rta::diag::zip_of(result);
+        const std::string z = rta::diag::zip_of(result);
+        if (z.size() >= rta::diag::kPackageMaxBytes) {
+            ct = "application/json; charset=utf-8";
+            rta::net::webui_set_status(500);
+            return "{\"ok\":false,\"code\":\"diag.package_too_large\",\"error\":\"诊断包超过 8 MB 硬上限\",\"size\":" + std::to_string((long long)z.size()) + "}";
+        }
+        return z;
     }
 
     // 2026-11-11：单文件 JSON 诊断（反馈后台上传同款；rtaweb 里也方便直接用脚本读，
@@ -15109,6 +15115,10 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         if (out.empty()) {
             rta::net::webui_set_status(500);
             return "{\"ok\":false,\"code\":\"diag.json_unavailable\",\"error\":\"诊断包无法序列化为 JSON\"}";
+        }
+        if (out.size() >= rta::diag::kPackageMaxBytes) {
+            rta::net::webui_set_status(500);
+            return "{\"ok\":false,\"code\":\"diag.package_too_large\",\"error\":\"诊断 JSON 超过 8 MB 硬上限\",\"size\":" + std::to_string((long long)out.size()) + "}";
         }
         return out;
     }
