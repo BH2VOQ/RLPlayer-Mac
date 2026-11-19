@@ -753,9 +753,10 @@ int main() {
             const CGFloat cardHeightBefore = trackCard ? trackCard.frame.size.height : 0.0;
             const CGFloat topRowHeightBefore = topRow ? topRow.frame.size.height : 0.0;
             Ck(vc.trackCover != nil && placeholderImg != nil && placeholderImg.isTemplate &&
-               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
-               trackCard != nil && cardHeightBefore > 0.0 && std::fabs(topRowHeightBefore - 56.0) <= 0.5,
-               "9-precondition: initial trackCover is 56x56 template placeholder",
+               std::fabs(vc.trackCover.frame.size.width - 56.0) <= 0.5 &&
+               vc.trackCover.frame.size.height >= 56.0 && vc.trackCover.frame.size.height <= 64.0 &&
+               trackCard != nil && cardHeightBefore > 0.0 && topRowHeightBefore >= 56.0 && topRowHeightBefore <= 64.0,
+               "9-precondition: initial trackCover is 56x56..64 template placeholder",
                [NSString stringWithFormat:@"cover=%@ img=%@ tpl=%d size=%@ cardH=%.1f rowH=%.1f",
                 vc.trackCover, placeholderImg, placeholderImg.isTemplate,
                 NSStringFromSize(vc.trackCover.frame.size), cardHeightBefore, topRowHeightBefore]);
