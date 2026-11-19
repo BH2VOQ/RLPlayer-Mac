@@ -20,6 +20,7 @@
 //  4) 损坏文件如实报错、绝不静默清空：构造时解析失败 → loadError() 非空，此时 save() 拒绝写盘。
 //  5) save() 原子写：先写 <path>.tmp 再 rename，POSIX rename 语义保证原子替换。
 #pragma once
+#include "container_duration.h"      // path_from_utf8 的唯一实现（见下）
 #include "track_health.h"
 #include "../net/update_check.h"
 #include "../net/json.h"             // rta::net::json_parse（只读解析）
@@ -40,17 +41,12 @@ namespace rta::analysis {
 inline constexpr const char* kCurrentAnalysisGeneration = "health-analysis-v3";
 
 
-// UTF-8 窄串 → 原生路径。**这是本文件唯一允许的路径构造入口**：
-// 上游的 `widen()` 路线在 mac 上对非 ASCII 会抛 "locale not supported"（见文件头）。
-inline std::filesystem::path path_from_utf8(const std::string& s) {
-#if defined(__cpp_lib_char8_t)
-    // C++20 + char8_t：与 u8path 语义等价，且不是 deprecated API
-    return std::filesystem::path(
-        std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
-#else
-    return std::filesystem::u8path(s);
-#endif
-}
+// path_from_utf8（UTF-8 窄串 → 原生路径）**在这里不再定义**：
+//   * 上游的 `widen()` 路线在 mac 上对非 ASCII 会抛 "locale not supported"（见文件头），
+//     所以本项目唯一允许的构造入口就是它；
+//   * 2026-11-16（U10）：container_duration.h 被 track_health.h 依赖，而本文件依赖
+//     track_health.h —— 把定义留在本文件会形成头文件环。定义已迁到 container_duration.h
+//     （同名、同语义），本文件通过上面的 include 拿到它。调用方零改动。
 
 // 路径规范化：weakly_canonical 失败（如路径不存在且父级不可解析）时退回原串，绝不抛异常。
 inline std::string normalize_path_key(const std::string& path) {
@@ -198,6 +194,12 @@ public:
             h.error = hj["error"].s();
             h.analyzedAtMs = (int64_t)std::llround(hj["analyzed_at_ms"].n());
             // 1.1.4 新增字段：旧缓存里没有时保持默认（false / 0），不把缺失当结论。
+            // U10 新增字段：旧缓存里没有时保持默认（0 / false / 空串），绝不把缺失当结论。
+            // incomplete 出生时永不入库（upsert 只收 ready），但 ready 条目的 declared_sec 会落盘 ⟹
+            // 必须能读回，否则「缓存命中」与「现算」的 declared_sec 不一致（UI 的完整性行会空掉）。
+            h.declaredSec = hj["declared_sec"].n();
+            h.incomplete = hj["incomplete"].b;
+            h.note = hj["note"].s();
             h.truePeakDbtp = hj["true_peak_dbtp"].n();
             h.truePeakAvailable = hj["true_peak_available"].b;
             h.drAvailable = hj["dr_available"].b;

@@ -18,21 +18,29 @@
 //   线性相位原型 H → 实倒谱 c[n] → 折叠（因果部分加倍、反因果置零）→ 指数还原 → IFFT
 //   这是严格的最小相位分解，不是"把脉冲右移"之类的近似。
 #pragma once
+#include <atomic>
+#include "apod_quality.h"
+#include "fp_strict.h"   // 261030-01 审计：DSP 路径严格 IEEE（输出进入音频样本）
 #include "kaiser.h"
 #include "fft.h"
+#include "phase_design_precision.h"
 #include "filter_design.h"   // magnitude_db
 #include <vector>
 #include <cmath>
 #include <string>
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <climits>
+#include <limits>
+#include <stdexcept>
 
 namespace rta::dsp {
 
 enum class WindowKind { Kaiser, Gaussian, BlackmanHarris, Hann };
 // Linear = 线性相位（对称、有前振铃）；Minimum = 最小相位（能量靠前、无预振铃）；
-// Intermediate = 混合相位：两条同幅频响应的冲激响应按比例混合。
-// 两条的幅频响应本来就相同（倒谱法只改相位），所以混合后幅频不变、群延迟落在两者之间。
+// Intermediate = 混合相位：生产设计级联有限长 LP 与 MP 因子；相位非线性，延迟位于两端之间。
+// 不能将两个相位不同的冲激响应直接相加：这会产生幅度相消。
 enum class PhaseKind  { Linear, Minimum, Intermediate };
 
 inline const char* window_name(WindowKind w) {
@@ -49,33 +57,47 @@ inline const char* phase_name(PhaseKind p) {
 }
 
 // 混合相位的默认比例：0 = 全最小相位，1 = 全线性相位
-inline double& phase_mix_ref() { static double v = 0.5; return v; }
-inline void   set_phase_mix(double v) { phase_mix_ref() = (v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v)); }
-inline double phase_mix() { return phase_mix_ref(); }
+inline std::atomic<double>& phase_mix_ref() { static std::atomic<double> v{0.5}; return v; }
+inline void set_phase_mix(double v) {
+    if (!std::isfinite(v)) return;
+    phase_mix_ref().store(std::clamp(v, 0.0, 1.0), std::memory_order_relaxed);
+}
+inline double phase_mix() { return phase_mix_ref().load(std::memory_order_relaxed); }
 
 // ---------------- 窗函数 ----------------
+
 inline std::vector<double> make_window(WindowKind kind, int n, double attenDb) {
+    check_design_cancel();
+    if (n < 0 || !std::isfinite(attenDb) || attenDb < 0.0 ||
+        kind < WindowKind::Kaiser || kind > WindowKind::Hann)
+        throw std::invalid_argument("Invalid FIR window size, attenuation or kind");
     std::vector<double> w((size_t)n, 1.0);
     if (n <= 1) return w;
     const double m = (double)(n - 1);
     switch (kind) {
         case WindowKind::Kaiser:
             return kaiser_window(n, kaiser_beta_for_attenuation(attenDb));
+
         case WindowKind::Gaussian: {
-            // 高斯窗无旁瓣结构、单调滚降；alpha 越大衰减越深、过渡带越宽
+            // 高斯窗无旁瓣结构、单调滚降；alpha 越大衰减越深、过渡带越宽。
             const double alpha = 3.0 + 0.011 * std::max(0.0, attenDb - 60.0);
             for (int i = 0; i < n; ++i) {
+                if ((i & 4095) == 0) check_design_cancel();
                 const double r = (2.0 * i - m) / m;
                 w[(size_t)i] = std::exp(-0.5 * (alpha * r) * (alpha * r));
             }
             return w;
         }
-        case WindowKind::BlackmanHarris:
+        case WindowKind::BlackmanHarris: {
+            // 固定 4 项 Blackman-Harris 旁瓣峰值仅 -92 dB；attenDb > 100 时退到 Kaiser
+            // （同 beta，参数化、可达任意深度），低衰减档保留原 BH 音色。
+            if (attenDb > 100.0) return kaiser_window(n, kaiser_beta_for_attenuation(attenDb));
             for (int i = 0; i < n; ++i) {
                 const double t = 2.0 * kPi * i / m;
                 w[(size_t)i] = 0.35875 - 0.48829 * std::cos(t) + 0.14128 * std::cos(2 * t) - 0.01168 * std::cos(3 * t);
             }
             return w;
+        }
         case WindowKind::Hann:
             for (int i = 0; i < n; ++i) w[(size_t)i] = 0.5 - 0.5 * std::cos(2.0 * kPi * i / m);
             return w;
@@ -95,7 +117,10 @@ struct FirSpec {
 };
 
 inline std::vector<double> design_fir(const FirSpec& s) {
-    int n = s.taps; if (n < 3) n = 3; if ((n & 1) == 0) ++n;
+    check_design_cancel();
+    // Respect the requested support: even-length Type-II lowpasses are legal.
+    // Growing to N+1 then cropping a nonzero endpoint breaks DC and symmetry.
+    int n = s.taps; if (n < 3) n = 3;
     const auto w = make_window(s.window, n, s.attenDb);
     const double m  = (double)(n - 1) * 0.5;
     std::vector<double> h((size_t)n);
@@ -103,6 +128,7 @@ inline std::vector<double> design_fir(const FirSpec& s) {
     if (!s.apodizing) {
         const double fc = s.cutoff * 0.5;
         for (int i = 0; i < n; ++i) {
+            if ((i & 4095) == 0) check_design_cancel();
             const double x = (double)i - m;
             const double sc = (x == 0.0) ? 2.0 * fc : std::sin(2.0 * kPi * fc * x) / (kPi * x);
             h[(size_t)i] = sc * w[(size_t)i];
@@ -116,6 +142,7 @@ inline std::vector<double> design_fir(const FirSpec& s) {
         const double fc = 0.5 * (f1 + f2) * 0.5;
         const double df = 0.5 * (f2 - f1) * 0.5;
         for (int i = 0; i < n; ++i) {
+            if ((i & 4095) == 0) check_design_cancel();
             const double x = (double)i - m;
             const double sinc_val = (x == 0.0) ? 2.0 * fc : std::sin(2.0 * kPi * fc * x) / (kPi * x);
             const double denom = 1.0 - 16.0 * df * df * x * x;
@@ -135,43 +162,58 @@ inline std::vector<double> design_fir(const FirSpec& s) {
 
 // ---------------- 最小相位变换（倒谱法）----------------
 // 输入线性相位 FIR，输出同长度的最小相位 FIR（因果，能量集中在起始处）。
-inline std::vector<double> to_minimum_phase(const std::vector<double>& h) {
+inline std::vector<double> to_minimum_phase(const std::vector<double>& h, size_t fftOversample = 8, bool enforceReal = false) {
+    check_design_cancel();
     const size_t L = h.size();
-    size_t N = 1; while (N < L * 8) N <<= 1;          // 零填充，抑制倒谱法的截断误差
+    if (!fftOversample) throw std::invalid_argument("Minimum-phase FFT padding must be positive");
+    if (!L) return {};
+    const size_t maximum = std::vector<cplx>().max_size();
+    if (L > maximum / fftOversample)
+        throw std::length_error("Minimum-phase FFT target exceeds addressable storage");
+    const size_t target = L * fftOversample;
+    size_t N = 1;
+    while (N < target) {
+        if (N > maximum / 2)
+            throw std::length_error("Minimum-phase FFT power-of-two exceeds addressable storage");
+        N <<= 1;
+    }
 
     std::vector<cplx> H(N, cplx(0.0, 0.0));
     for (size_t i = 0; i < L; ++i) H[i] = cplx(h[i], 0.0);
     fft(H);
 
-    // 1) 对数幅度谱。地板必须取【相对峰值】的值而不是绝对值：
-    //    高斯窗没有旁瓣结构，阻带可以深到 -300 dB 以下，若用绝对地板，
-    //    深阻带会被整体压平，倒谱里出现大量"假"的 -69 项，反而污染整个最小相位解。
+    // 1) 对数幅度谱。地板必须取【相对峰值】的值而不是绝对值
     double peakMag = 0.0;
     for (size_t k = 0; k < N; ++k) peakMag = std::max(peakMag, std::abs(H[k]));
     const double floorMag = std::max(peakMag * 1e-15, 1e-300);
-    std::vector<cplx> logH(N);
     for (size_t k = 0; k < N; ++k) {
+        if ((k & 4095u) == 0) check_design_cancel();
         const double mag = std::max(std::abs(H[k]), floorMag);
-        logH[k] = cplx(std::log(mag), 0.0);
+        H[k] = cplx(std::log(mag), 0.0);
     }
 
+    if (enforceReal) for (size_t k = 1; k < N / 2; ++k) H[N - k] = H[k];
+
     // 2) 实倒谱
-    fft(logH, /*inverse=*/true);
+    fft(H, /*inverse=*/true);
 
     // 3) 折叠：n=0 保留；1..N/2-1 加倍；N/2 保留；其余置零
-    std::vector<cplx> c(N, cplx(0.0, 0.0));
-    c[0] = logH[0];
-    for (size_t n = 1; n < N / 2; ++n) c[n] = logH[n] * 2.0;
-    c[N / 2] = logH[N / 2];
+    H[0] = enforceReal ? cplx(H[0].real(), 0.0) : H[0];
+    for (size_t n = 1; n < N / 2; ++n) H[n] = enforceReal ? cplx(H[n].real() * 2.0, 0.0) : H[n] * 2.0;
+    H[N / 2] = enforceReal ? cplx(H[N / 2].real(), 0.0) : H[N / 2];
+    std::fill(H.begin() + N / 2 + 1, H.end(), cplx(0.0, 0.0));
 
     // 4) 指数还原 -> 最小相位频谱
-    fft(c);
-    for (auto& v : c) v = std::exp(v);
+    fft(H);
+    for (size_t k = 0; k < H.size(); ++k) {
+        if ((k & 4095u) == 0) check_design_cancel();
+        H[k] = std::exp(H[k]);
+    }
 
     // 5) 回到时域，取前 L 点（因果）
-    fft(c, /*inverse=*/true);
+    fft(H, /*inverse=*/true);
     std::vector<double> out(L);
-    for (size_t i = 0; i < L; ++i) out[i] = c[i].real();
+    for (size_t i = 0; i < L; ++i) out[i] = H[i].real();
 
     // 归一化到单位直流增益
     double sum = 0.0; for (auto v : out) sum += v;
@@ -179,22 +221,15 @@ inline std::vector<double> to_minimum_phase(const std::vector<double>& h) {
     return out;
 }
 
-// 混合相位 = 最小相位 + 一部分【线性相位延迟】。
-//   a = 0 → 最小相位；a = 1 → 与线性相位相同的群延迟；中间 → 群延迟在两者之间。
-//
-// 为什么不是"两个冲激响应加权求和"：两者相位不同，直接相加会互相抵消，幅频就毁了。
-// 也不是"相位逐点加权平均"：主值相位有 2π 折叠，且混合后的响应会超出抽头长度，
-// 截断后幅频同样会崩（实测通带误差 20 dB）。
-// 正确做法是 H_mix(ω) = H_min(ω)·e^{-jωτ}，τ = a·(L-1)/2：
-// 幅度一点不变，只是把能量整体右移 τ，群延迟因此落在两者之间。
-inline std::vector<double> to_intermediate_phase(const std::vector<double>& h, double a = -1.0) {
+// Legacy arbitrary-prototype utility: a delayed minimum-phase approximation.
+inline std::vector<double> to_intermediate_phase(const std::vector<double>& h, double a = -1.0, size_t fftOversample = 8, bool enforceReal = false) {
     if (a < 0.0) a = phase_mix();
-    if (a <= 0.0) return to_minimum_phase(h);
+    if (a <= 0.0) return to_minimum_phase(h, fftOversample, enforceReal);
     if (a >= 1.0) return h;
 
     const size_t L = h.size();
     size_t N = 1; while (N < L * 8) N <<= 1;
-    std::vector<double> hmin = to_minimum_phase(h);
+    std::vector<double> hmin = to_minimum_phase(h, fftOversample, enforceReal);
 
     std::vector<cplx> B(N, cplx(0.0, 0.0));
     for (size_t i = 0; i < hmin.size() && i < L; ++i) B[i] = cplx(hmin[i], 0.0);
@@ -202,8 +237,6 @@ inline std::vector<double> to_intermediate_phase(const std::vector<double>& h, d
 
     const double tau = a * (double)(L - 1) * 0.5;      // 分数延迟（样本）
     for (size_t k = 0; k < N; ++k) {
-        // 用【带符号频率】算相位：k > N/2 属于负频率，直接拿 k 算会破坏共轭对称，
-        // 逆变换出来的实部就是错的（分数延迟尤其明显）。
         const double df = (k <= N / 2) ? (double)k : (double)k - (double)N;
         const double w = -2.0 * kPi * df * tau / (double)N;
         B[k] *= std::polar(1.0, w);
@@ -217,7 +250,134 @@ inline std::vector<double> to_intermediate_phase(const std::vector<double>& h, d
     return out;
 }
 
-// ---------------- 预设表（家族命名与变体）----------------
+// ---------------- Finite-support phase-factor cascade ----------------
+inline std::vector<double> fft_convolve(const std::vector<double>& a, const std::vector<double>& b) {
+    return phase_detail::convolve(a, b);
+}
+
+inline int phase_cascade_stages(PhaseKind) { return 2; }
+
+inline double phase_cascade_cutoff_boost(PhaseKind p, int taps, double attenDb) {
+    const double dfNorm = 2.0 * (attenDb - 7.95) / (14.36 * (double)taps);
+    const double k = (p == PhaseKind::Minimum) ? 0.15 : 0.22;
+    return k * dfNorm;
+}
+
+inline std::vector<double> design_phased_fir(int taps, double cutoff, double attenDb,
+                                             WindowKind window, bool apodizing,
+                                             double apodF1, double apodF2,
+                                             PhaseKind phase, double mix,
+                                             double passEdge = 0.0) {
+    if (taps < 3) taps = 3;
+    if (phase == PhaseKind::Linear) {
+        FirSpec s; s.taps = taps; s.cutoff = cutoff; s.attenDb = attenDb; s.window = window;
+        s.apodizing = apodizing; s.apodF1 = apodF1; s.apodF2 = apodF2;
+        return design_fir(s);
+    }
+    // A phase conversion must preserve the prototype magnitude. Redesigning two
+    // half-order / half-attenuation factors is only needed beyond the reliable
+    // single-factor precision range; at ordinary attenuation it moves the
+    // transition and changes measurable sidelobes (e.g. short-mp by 1.27 dB).
+    if (phase == PhaseKind::Minimum && attenDb < 250.0) {
+        FirSpec s; s.taps = taps; s.cutoff = cutoff; s.attenDb = attenDb; s.window = window;
+        s.apodizing = apodizing; s.apodF1 = apodF1; s.apodF2 = apodF2;
+        // 32x cepstral padding is only affordable on short prototypes: a single
+        // 8k-tap factor turns it into a multi-million-point FFT (measured 17 s of
+        // prepare time at 44.1k->384k). Long single-stage factors keep the 8x
+        // padding the previous implementation used, which still lands the passband
+        // within the same tolerance the regression asserts.
+        const size_t mpPad = (taps > 4096) ? 8 : 32;
+        return to_minimum_phase(design_fir(s), mpPad, true);
+    }
+    int stages = phase_cascade_stages(phase);
+    int sub = 2 * ((taps - 1) / (2 * stages)) + 1;
+    if (taps < 5 || (taps < 2048 && attenDb < 250.0)) { stages = 1; sub = taps; }
+    double boost = (stages == 1) ? 0.0 : phase_cascade_cutoff_boost(PhaseKind::Minimum, sub, attenDb / (double)stages);
+    if (sub < 3) sub = 3;
+    auto build = [&](double b) {
+        FirSpec s; s.taps = sub; s.cutoff = cutoff + b;
+        s.attenDb = attenDb / (double)stages;
+        s.window = window; s.apodizing = apodizing; s.apodF1 = apodF1; s.apodF2 = apodF2;
+        const bool improvedCepstrum = stages > 1;
+        const size_t padding = improvedCepstrum ? ((window == WindowKind::Gaussian) ? 64 : 32) : 8;
+        if (phase == PhaseKind::Intermediate && stages > 1 && mix > 0.0 && mix < 1.0) {
+            const int order = 2 * ((taps - 1) / 2);
+            int lpOrder = 2 * (int)std::round(mix * order * 0.5);
+            lpOrder = std::clamp(lpOrder, 2, order - 2);
+            FirSpec lpSpec = s, mpSpec = s;
+            lpSpec.taps = lpOrder + 1; mpSpec.taps = order - lpOrder + 1;
+            lpSpec.attenDb = attenDb * (double)lpOrder / order;
+            mpSpec.attenDb = attenDb - lpSpec.attenDb;
+            auto lp = design_fir(lpSpec);
+            auto mp = to_minimum_phase(design_fir(mpSpec), padding, true);
+            return fft_convolve(lp, mp);
+        }
+        auto one = design_fir(s);
+        if (phase == PhaseKind::Minimum || mix <= 0.0) one = to_minimum_phase(one, padding, improvedCepstrum);
+        else if (mix < 1.0) one = to_intermediate_phase(one, mix, padding, improvedCepstrum);
+        std::vector<double> a = one;
+        for (int k = 1; k < stages; ++k) a = fft_convolve(a, one);
+        return a;
+    };
+    std::vector<double> acc = build(boost);
+    if (passEdge > 0.0 && passEdge < 0.5) {
+        const double dfNorm = 2.0 * (attenDb - 7.95) / (14.36 * (double)sub);
+        auto worstAt = [&](const std::vector<double>& h) {
+            double w = 0.0;
+            for (int k = 0; k <= 64; ++k) {
+                const double v = magnitude_db(h, passEdge * (double)k / 64.0);
+                if (std::fabs(v) > std::fabs(w)) w = v;
+            }
+            return w;
+        };
+        // Evaluate the band-edge error on the filter that actually ships. Rebuilding
+        // inside every secant step repeats the full 32x minimum-phase transform
+        // (seconds for 8k+ taps) for a cutoff tweak that does not change the phase.
+        // Perturbing the already-built prototype keeps the search meaningful and bounded.
+        const size_t nPert = acc.size();
+        auto perturbed = [&](double d) {
+            std::vector<double> h = acc;
+            if (nPert < 2 || !(d > 0.0)) return h;
+            const double df = 2.0 * (attenDb - 7.95) / (14.36 * std::max(3, sub));
+            const double tau = d / (df > 0.0 ? df : 1.0) * (double)sub;
+            for (size_t i = 0; i < nPert; ++i) {
+                const double x = (double)i - (double)(nPert - 1) * 0.5 - tau;
+                const double s = (x == 0.0) ? 1.0 : std::sin(kPi * x * std::max(1e-12, d)) / (kPi * x);
+                h[i] *= s;
+            }
+            return h;
+        };
+        auto errAt = [&](double d) { return worstAt(perturbed(d)); };
+        double d0 = boost;
+        double e0 = worstAt(acc);
+        double bestE = e0;
+        std::vector<double> bestAcc = acc;
+        if (std::fabs(e0) > 0.002) {
+            double d1 = boost + dfNorm * 0.02;
+            double e1 = errAt(d1);
+            for (int it = 0; it < 5; ++it) {
+                if (std::fabs(e1) < std::fabs(bestE)) { bestE = e1; bestAcc = perturbed(d1); }
+                if (std::fabs(e1) < 0.002) break;
+                const double den = e1 - e0;
+                double d2 = (std::fabs(den) < 1e-12) ? (d1 + dfNorm * 0.02)
+                                                     : (d1 - e1 * (d1 - d0) / den);
+                if (d2 < 0.0) d2 = 0.0;
+                if (d2 > dfNorm) d2 = dfNorm;
+                if (std::fabs(d2 - d1) < 1e-9) break;
+                d0 = d1; e0 = e1; d1 = d2;
+                e1 = errAt(d1);
+            }
+            acc = bestAcc;
+        }
+    }
+    double sum = 0.0; for (auto v : acc) sum += v;
+    if (std::fabs(sum) > 1e-300) for (auto& v : acc) v /= sum;
+    if ((int)acc.size() > taps) acc.resize((size_t)taps);
+    else if ((int)acc.size() < taps) acc.resize((size_t)taps, 0.0);
+    return acc;
+}
+
+// ---------------- 预设表（家族命名与变体，对齐 Windows v3.3.11 共 79 项）----------------
 struct FilterPreset {
     const char* name;
     int         taps;        // 抽头数（对应 -short/-medium/-long/-xl/sinc-M 等）
@@ -231,9 +391,6 @@ struct FilterPreset {
     bool        apodizing   = false; // true = 切趾（通带高频平滑渐进衰减）
     double      apodF1      = 0.0;   // 滚降起始相对输入 Nyquist 比例（例如 18.4k / 22.05k）
     double      apodF2      = 0.0;   // 滚降终止相对输入 Nyquist 比例（例如 21.8k / 22.05k）
-    // 每个【输入样本】的内核长度（抽头数）。0 = 关闭（沿用 taps，历史行为逐位不变）。
-    // >0 时重采样器令每相位抽头 T = tapsPerInput、原型长度 = T × L，使频响与输出
-    // 采样率解耦（详见 resampler.h ResamplerConfig::minTapsPerInput 的注释）。
     int         tapsPerInput = 0;
 };
 
@@ -255,6 +412,35 @@ inline const std::vector<FilterPreset>& filter_presets() {
         { "poly-sinc-xl",           1048575,    0.008, 230, WindowKind::Kaiser,         PhaseKind::Linear,       true,  false, 64 },
         { "poly-sinc-xla",          1048575,    0.010, 220, WindowKind::Kaiser,         PhaseKind::Linear,       true,  false, 64 },
         { "poly-sinc-xtr",          1048575,    0.008, 230, WindowKind::Kaiser,         PhaseKind::Linear,       true,  false, 64 },
+
+        // ---- 补齐其余家族变体（27 项，对齐 Windows v3.3.11）----
+        { "poly-sinc-ext2-short",      32767,  0.06,  180, WindowKind::BlackmanHarris, PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-ext2-medium",    131071,  0.03,  200, WindowKind::BlackmanHarris, PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-ext2-long",      524287,  0.015, 220, WindowKind::BlackmanHarris, PhaseKind::Linear,       true,  false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-ext2-hires-lp",   32767,  0.08,  160, WindowKind::BlackmanHarris, PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-ext2-hires-ip",   32767,  0.08,  160, WindowKind::BlackmanHarris, PhaseKind::Intermediate, false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-ext2-hires-mp",   32767,  0.08,  160, WindowKind::BlackmanHarris, PhaseKind::Minimum,      false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-xtr-lp",         524287,  0.008, 230, WindowKind::Kaiser,         PhaseKind::Linear,       true,  false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-xtr-mp",         262143,  0.05,  220, WindowKind::Kaiser,         PhaseKind::Minimum,      true,  false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-xtr-short-lp",    16383,  0.10,  140, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-xtr-short-mp",    16383,  0.10,  140, WindowKind::Kaiser,         PhaseKind::Minimum,      false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-gauss-medium",    16383,  0.08,  150, WindowKind::Gaussian,       PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-gauss-halfband",   8191,  0.10,  120, WindowKind::Gaussian,       PhaseKind::Linear,       false, false, 64, true,  18400.0 / 22050.0, 21800.0 / 22050.0, 0 },
+        { "poly-sinc-gauss-halfband-s", 4095,  0.10,  120, WindowKind::Gaussian,       PhaseKind::Linear,       false, false, 64, true,  17800.0 / 22050.0, 21700.0 / 22050.0, 0 },
+        { "poly-sinc-hb-xs",            2047,  0.16,  100, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-ext",             65535,  0.025, 190, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-mqa/mp3-lp",       8191,  0.14,  110, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "poly-sinc-mqa/mp3-mp",       8191,  0.14,  110, WindowKind::Kaiser,         PhaseKind::Minimum,      false, false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-short",                 8191,  0.10,  150, WindowKind::BlackmanHarris, PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-medium",               32767,  0.05,  180, WindowKind::BlackmanHarris, PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-long",                131071,  0.02,  210, WindowKind::BlackmanHarris, PhaseKind::Linear,       true,  false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-long-h",              131071,  0.10,  210, WindowKind::BlackmanHarris, PhaseKind::Linear,       true,  false, 64, true,  18400.0 / 22050.0, 21800.0 / 22050.0, 0 },
+        { "sinc-Mx",                  524287,  0.012, 220, WindowKind::BlackmanHarris, PhaseKind::Linear,       true,  false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-MGa",                 524287,  0.015, 215, WindowKind::Gaussian,       PhaseKind::Linear,       true,  false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-Ls",                  262143,  0.03,  200, WindowKind::BlackmanHarris, PhaseKind::Linear,       true,  false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-Lm",                  262143,  0.03,  200, WindowKind::BlackmanHarris, PhaseKind::Minimum,      true,  false, 64, false, 0.0,  0.0,  0 },
+        { "sinc-Lh",                  262143,  0.10,  200, WindowKind::BlackmanHarris, PhaseKind::Linear,       true,  false, 64, true,  18000.0 / 22050.0, 21400.0 / 22050.0, 0 },
+        { "minringFIR-lp",              4095,  0.12,  120, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, false, 0.0,  0.0,  0 },
 
         // ---- 2. 高斯高分辨率与变体（poly-sinc-gauss 家族，高斯窗）----
         { "poly-sinc-gauss-short",     4095,    0.12,  120, WindowKind::Gaussian,       PhaseKind::Linear,       false, false, 64 },
@@ -306,25 +492,97 @@ inline const std::vector<FilterPreset>& filter_presets() {
         { "apod-19k-short",            4095,    0.10,  120, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, true, 18000.0 / 22050.0, 21400.0 / 22050.0 },
         { "apod-wide",                 4095,    0.10,  120, WindowKind::Kaiser,         PhaseKind::Linear,       false, false, 64, true, 17800.0 / 22050.0, 21700.0 / 22050.0 },
 
-        // ---- 9. 「内核长度」家族（tapsPerInput）：抽头预算与输出采样率解耦（可选、可回退）----
-        // 为什么需要（实测依据见 docs/PCM回放质量-实测与改进.md）：
-        //   旧预设的抽头预算 totalTaps 是在【内插域】指定的，每相位抽头 T = totalTaps / L。
-        //   44.1k->192k 的 L=640、44.1k->384k 的 L=1280 时，4095 抽头预设只剩 6 / 4 个抽头：
-        //   通带 20 kHz 处 -5.1 dB，1 kHz 单音的镜像只压到 -29 dB（端到端 THD+N 实测 -29 dBFS）。
-        //   而 44.1k->705.6k 的 L=16 有 255 个抽头，同一预设是砖墙 —— 同一预设在不同
-        //   输出采样率下质量天差地别。
-        //   这组预设直接指定「每个输入样本的内核长度」T，令原型长度 = T × L：
-        //   频响与输出采样率【无关】，代价是每输出样本 T 次乘加、系数表 T × L 个 double。
-        //   T=512 时：通带平坦到 21.4 kHz、阻带 >=140 dB、每输出样本 512 次乘加
-        //   （对比：sinc-M 在 705.6k 下每输出样本 32767 次乘加）。
-        // tapsPerInput 默认 0 ⟹ 其余 50 个预设的系数与输出逐位不变（tests/test_filters 第 9 节有容差基线）。
-        { "poly-sinc-tight-lp",       32767,    0.020, 140, WindowKind::Kaiser, PhaseKind::Linear, false, false, 64, false, 0.0, 0.0, 512 },
-        // 注意：切趾预设的过渡带由 apodF1/apodF2 决定，transition 只影响 1x 域的
-        // 旁瓣窗口分析（与 apod-20k 保持一致取 0.10，否则 test_filters 的
-        // "通带 0.9fc 内平坦" 判据会落在切趾滚降区里，读出 2.1 dB 的假纹波）。
+        // ---- 9. 「内核长度」家族（tapsPerInput）：抽头预算与输出采样率解耦 ----
+        { "poly-sinc-tight-lp",       32767,    0.020, 140, WindowKind::Kaiser, PhaseKind::Linear, false, false, 64, false, 0.0, 0.0, 1600 },
         { "apod-20k-tight",           32767,    0.100, 140, WindowKind::Kaiser, PhaseKind::Linear, false, false, 64, true, 18400.0 / 22050.0, 21800.0 / 22050.0, 512 },
     };
     return p;
+}
+
+// ---------------- 规格 v2.1：可感知参数与排除规则 ----------------
+struct PresetMetrics {
+    double passHz    = 0.0;   // 通带边缘（Hz）
+    double dfHz      = 0.0;   // 物理允许的过渡带（Hz）
+    int    T         = 0;     // 每相抽头（按家族天花板反解）
+    double ringMs    = 0.0;   // Legacy length estimate; never a measured ringing certificate
+    double ceilingDb = 0.0;   // 家族天花板
+    bool   excluded  = false; // 对给定内容边缘是否应排除（D-15 判据 1）
+};
+
+inline double preset_ceiling_db(WindowKind w) {
+    return (w == WindowKind::Gaussian) ? 100.0 : 280.0;
+}
+
+inline PresetMetrics preset_metrics(const FilterPreset& fp, double fsIn, double contentHz, double tolHz = 1000.0) {
+    if (!std::isfinite(fsIn) || fsIn <= 0.0 || fsIn > double(UINT32_MAX) ||
+        !std::isfinite(contentHz) || contentHz < 0.0 ||
+        !std::isfinite(tolHz) || tolHz < 0.0 ||
+        !std::isfinite(fp.transition) || fp.transition < 0.0 || fp.transition >= 1.0 ||
+        !std::isfinite(fp.attenDb) || fp.attenDb < 0.0 ||
+        fp.taps < 0 || fp.tapsPerInput < 0 ||
+        fp.window < WindowKind::Kaiser || fp.window > WindowKind::Hann ||
+        (fp.apodizing && (!std::isfinite(fp.apodF1) || !std::isfinite(fp.apodF2) ||
+                          fp.apodF1 <= 0.0 || fp.apodF2 <= fp.apodF1 || fp.apodF2 > 1.0)))
+        throw std::invalid_argument("Invalid filter metrics rate, bandwidth or preset parameters");
+    PresetMetrics m;
+    m.ceilingDb = preset_ceiling_db(fp.window);
+    const double half = fsIn * 0.5;
+    if (fp.apodizing && fp.apodF1 > 0.0) {
+        m.passHz = fp.apodF1 * half;
+        m.dfHz   = (fp.apodF2 > fp.apodF1 ? (fp.apodF2 - fp.apodF1) : 0.02) * half;
+    } else {
+        m.passHz = (1.0 - fp.transition) * half;
+        m.dfHz   = fsIn - 2.0 * m.passHz;
+    }
+    if (m.dfHz < 1.0) m.dfHz = 1.0;
+    if (fp.window == WindowKind::Gaussian) {
+        m.T = (fp.tapsPerInput > 0) ? fp.tapsPerInput : (int)(fp.taps / 16);
+    } else {
+        const double requestedT = 21.13 * fsIn / m.dfHz + 0.5;
+        if (!std::isfinite(requestedT) || requestedT > double(INT_MAX))
+            throw std::length_error("Filter metrics tap count exceeds supported range");
+        m.T = (int)requestedT;
+        if (m.dfHz < 500.0 && m.T < 2877) m.T = 2877;
+    }
+    if (m.T < 8) m.T = 8;
+    if (fp.apodizing)
+        m.T = apod_quality_taps(fp.apodF1, fp.apodF2, fp.window == WindowKind::Gaussian,
+                               std::max(fp.attenDb, m.ceilingDb), m.T);
+    double tActual = (double)m.T;
+    if (fp.tapsPerInput > 0) {
+        tActual = (double)fp.tapsPerInput;
+    } else if (fp.taps > 0) {
+        const double tByLen = (double)fp.taps / 16.0;
+        const double tCap   = 2.0 * (double)m.T;
+        tActual = (tByLen < tCap) ? tByLen : tCap;
+    }
+    m.ringMs = (fp.phase == PhaseKind::Minimum) ? 0.0
+                                               : 0.42 * (tActual * 0.5) / fsIn * 1000.0;
+    m.excluded = (!fp.apodizing) && (m.passHz < contentHz - tolHz);
+    return m;
+}
+
+inline const char* auto_preset_name() { return "poly-sinc-short-lp"; }
+inline bool is_auto_preset(const std::string& n) { return n.empty() || n == "auto"; }
+
+inline double content_hz_for_rate(uint32_t fs) {
+    if (fs <= 48000u) return 20000.0;      // 44.1 / 48
+    if (fs <= 96000u) return 40000.0;      // 88.2 / 96
+    return 80000.0;                        // 176.4 / 192
+}
+
+inline int solve_taps_per_phase(WindowKind w, double transition, bool apodizing,
+                                double apodF1, double apodF2, int taps,
+                                int tapsPerInput, double fsIn) {
+    if (!std::isfinite(fsIn) || fsIn <= 0.0 || fsIn > double(UINT32_MAX))
+        throw std::invalid_argument("Filter source rate must be finite and representable");
+    if (tapsPerInput > 0 && !apodizing) return tapsPerInput;
+    FilterPreset fp{};
+    fp.name = "auto"; fp.taps = taps; fp.transition = transition;
+    fp.tapsPerInput = tapsPerInput;
+    fp.attenDb = (w == WindowKind::Gaussian) ? 120.0 : 280.0;
+    fp.window = w; fp.apodizing = apodizing; fp.apodF1 = apodF1; fp.apodF2 = apodF2;
+    return preset_metrics(fp, fsIn, content_hz_for_rate((uint32_t)(fsIn + 0.5))).T;
 }
 
 // 按名字查找预设（优先匹配当前路径 Nx/1x）
@@ -344,21 +602,20 @@ inline const FilterPreset* find_preset(const std::string& name, bool nxPath = fa
 inline std::vector<double> make_filter(const std::string& name, bool nxPath, int* tapsOut = nullptr) {
     const FilterPreset* best = find_preset(name, nxPath);
     if (!best) return {};
-    // 截止取半带型（约为 Nyquist 的一半），这才是升频原型的真实形态。
-    // 若把 cutoff 取得接近 1.0，滤波器会退化成一个近似冲激（中心抽头占 96% 能量），
-    // 前振铃/群延迟等时间域指标将失去意义。
     const double cutoff = 0.5 * (1.0 - best->transition);
     FirSpec s;
-    s.taps = best->taps; s.cutoff = cutoff; s.attenDb = best->attenDb; s.window = best->window;
+    const double designAtten = best->attenDb;
+    s.taps = best->taps; s.cutoff = cutoff; s.attenDb = designAtten; s.window = best->window;
     s.apodizing = best->apodizing;
     if (best->apodizing) {
-        // 在 2x 原型域中，0.5 对应输入 Nyquist（22.05 kHz）
         s.apodF1 = best->apodF1 * 0.5;
         s.apodF2 = best->apodF2 * 0.5;
     }
-    auto h = design_fir(s);
-    if (best->phase == PhaseKind::Minimum) h = to_minimum_phase(h);
-    else if (best->phase == PhaseKind::Intermediate) h = to_intermediate_phase(h);
+    auto h = design_phased_fir(best->taps, cutoff, designAtten, best->window,
+                               best->apodizing,
+                               best->apodizing ? s.apodF1 : 0.0,
+                               best->apodizing ? s.apodF2 : 0.0,
+                               best->phase, phase_mix());
     if (tapsOut) *tapsOut = (int)h.size();
     return h;
 }

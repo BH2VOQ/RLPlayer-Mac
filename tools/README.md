@@ -100,7 +100,7 @@ person 实体统一生效；艺术家详情页已在下方展示词条简介时�
 （R1 左右共用同一条 `.npseg` 规则且右栏只有一个外框、R2 点档位改 `data-detail` 与 `p1` 换行、
 R3 两档 `.nprailcard.clientHeight` 不变且栏头/`#npSummHint` 不被顶出、R4 `NP_DATA.cache` 引用不变、
 R5 localStorage 持久化）。触发方式不变：隔离实例起在 19152（`backend=null`/`volume=-120`）→
-`POST /api/selftest/request` → **DSH 侧边栏**打开 `http://127.0.0.1:19152/` → 读
+`POST /api/selftest/request` → **ego**（`ego_navigate`）打开 `http://127.0.0.1:19152/` → 读
 `<state>/selftest-last.json`。验收记录见 `docs/beta11-acceptance.md`（`docs/*.md` 不入库）。
 
 **2026-10-28 新增的三个工具**都在 `make_app_mac.sh` 的打包链上或与之配套：

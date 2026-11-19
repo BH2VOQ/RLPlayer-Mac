@@ -210,7 +210,9 @@ int main(int argc, char** argv) {
             }
         }
         if (hit) ++nCached;
-        if (h.status != "ready") ++nErr;
+        // U10：incomplete 不是错误（指标照给，只是结论只覆盖已存在的那一段）；
+        // 但也绝不入缓存（上游同口径），所以上面的 upsert 仍然只收 ready。
+        if (h.status != "ready" && h.status != "incomplete") ++nErr;
 
         if (jsonOut) {
             std::string line = "{\"path\":\"" + detail::json_escape(job.path) + "\"";
@@ -223,16 +225,18 @@ int main(int argc, char** argv) {
             printf("%s\n", line.c_str());
         } else {
             char cut[32];
-            if (h.status == "ready") {
+            if (h.status == "ready" || h.status == "incomplete") {
                 if (h.cutoffHz > 0.0) std::snprintf(cut, sizeof(cut), "%.1fk", h.cutoffHz / 1000.0);
                 else std::snprintf(cut, sizeof(cut), "-");
                 char sus[32];
                 if (h.losslessSuspected) std::snprintf(sus, sizeof(sus), "是(%.2f)", h.confidence);
                 else std::snprintf(sus, sizeof(sus), "否");
-                printf("%s\n    DR %6.2f | LUFS %7.2f | LRA %5.2f | Peak %7.2f | 截止 %-7s | 疑似假无损 %-9s | 24bit假 %-3s | 状态 ready | 分析 %.0f ms%s\n",
+                printf("%s\n    DR %6.2f | LUFS %7.2f | LRA %5.2f | Peak %7.2f | 截止 %-7s | 疑似假无损 %-9s | 24bit假 %-3s | 状态 %s | 分析 %.0f ms%s\n",
                        first_n(job.path, 100).c_str(),
                        h.drDb, h.lufs, h.lra, h.peakDbfs, cut, sus,
-                       h.fake24bit ? "是" : "否", ms, hit ? "（缓存）" : "");
+                       h.fake24bit ? "是" : "否", h.status.c_str(), ms, hit ? "（缓存）" : "");
+                // 半截文件的人话提示原样打出来（不写死文案：note 是判据的一部分）
+                if (h.incomplete && !h.note.empty()) printf("    ⚠ %s\n", first_n(h.note, 400).c_str());
             } else {
                 printf("%s\n    状态 error | %s\n", first_n(job.path, 100).c_str(),
                        first_n(h.error, 200).c_str());

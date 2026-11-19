@@ -160,6 +160,7 @@ inline std::string http_status_text(int code) {
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 413: return "Payload Too Large";
+        case 422: return "Unprocessable Entity";   // U12：SDM 拐点准入拒绝（422 而非 400：值合法但不被策略接受）
         case 431: return "Request Header Fields Too Large";
         case 500: return "Internal Server Error";
         case 503: return "Service Unavailable";

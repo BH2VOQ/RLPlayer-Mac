@@ -83,6 +83,11 @@ struct OutSink {
     // RENDERFAIL 遥测：最近一次 GetBuffer 的 HRESULT（-999 = 从未调过）。
     // 各后端按需覆盖；mock sink 可以返回固定值。
     virtual long long last_gb_hr() const { return -999; }
+    // 设备渲染回调次数（-1 = 该后端不报）。RENDERFAIL 靠它区分
+    // 「设备一次都没来拉」与「拉了但数据不足」。
+    virtual long long render_callbacks() const { return -1; }
+    // 零回调时的一次性自愈：停掉再启动输出单元。返回 true = 已重新启动。
+    virtual bool restart_io() { return false; }
     // 「写不进去」的成因分解（2026-10-22 反馈 20261022-02）：w0 是个混在一起的数，
     // 分不清「设备缓冲恒满」和「我们喂不上」。默认返回 -1 = 后端不支持该统计。
     // ★ 计数契约（与 rta::audio::ZeroAttrib::classify 同一份判据，平台无关）：
@@ -261,6 +266,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
     size_t pendFrames = 0;
     size_t played = h.played ? h.played->load() : 0; // preserve caller's resume/seek position
     int timeouts = 0;
+    bool ioRestarted = false;   // 零回调自愈只做一次，绝不无限重启
     // 「这一串连续写不进去」的起点（timeouts 0→1 时记）。
     // ★ 2026-10-25 真 BUG 修复：RENDERFAIL 文案里的秒数原先写成 timeouts*20/1000，
     //   而 20ms 只是【旧时序】的轮询上限。现默认 fastFeed=true，等待上限是 per/2
@@ -636,13 +642,23 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
             // 96k/per=960时每轮只等5ms，夹具墙钟约1.005s，不是旧注释的约0.5s。
             // 阈值与计数逻辑不变；日志时长取实测墙钟，不按次数×20ms估算。
             if (++timeouts > 200) {
+                // 回调次数 < 2 ⟹ 输出单元没有持续被驱动。
+                // 现场（Pocket Master，2026-11-16）恰好是「首回调后停流」= 1 次，
+                // 所以条件从「==0」扩到「<2」；仍只重启一次，且不改变失败判据。
+                const long long cbs = sink.render_callbacks();
+                if (!ioRestarted && cbs >= 0 && cbs < 2 && sink.restart_io()) {
+                    ioRestarted = true;
+                    timeouts = 0;
+                    timeoutT0 = tAfter;
+                    if (h.log) h.log(std::string("IO_RESTART 设备只发生 ") + std::to_string(cbs) +
+                                     " 次渲染回调，已重启输出单元并继续（仅一次）");
+                } else {
                 std::ostringstream fs;
                 // 时长取【实测墙钟】（tAfter - timeoutT0），不再用「次数 x 20ms」估算：
                 // fastFeed 下一轮只等 per/2，两者能差 4 倍。次数本身仍如实带上。
                 fs.setf(std::ios::fixed); fs.precision(2);
                 fs << "RENDERFAIL 设备流 " << (tAfter - timeoutT0) << " 秒未接受数据"
                    << "（连续 " << timeouts << " 轮未写入）"
-                   << "（疑似虚拟声卡/独占模式不可用）"
                    << " w0=" << h.dbgW0->load() << " wr=" << h.dbgWr->load();
                 // 与 STAT 同一口径：把「写不进去」的成因一并带出（不支持计数的后端省略）。
                 // w0 本身混着「缓冲满」「喂不上一个周期」「可用空间不足一个周期」三种互斥成因，
@@ -657,17 +673,18 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                    << " device=\"" << h.deviceLabel << "\""
                    << " id=" << (h.deviceIdDesc.empty() ? "(默认)" : h.deviceIdDesc);
                 if (h.fallbackEligible)
-                    fs << "。设备独占流持续不接受数据,已自动回退 WASAPI 共享模式(非 bit-perfect)。";
+                    fs << "。设备独占流停止消费数据，将尝试 CoreAudio 共享模式（非 bit-perfect）。";
                 else if (h.dop)
                     fs << "。DoP/DSD 不能回退共享模式(共享会重采样破坏 DoP 载波),请改用独占可用的设备。";
                 else if (h.onShared)
                     fs << "。共享模式也未接受数据(设备/系统混音异常),请检查音频设备状态,或改用独占模式。";
                 else
-                    fs << "。建议在设置中切换「WASAPI 共享」(兼容虚拟机/独占不可用,非 bit-perfect)或改用独占。";
+                    fs << "。建议在设置中切换「CoreAudio 共享」（非 bit-perfect）或改用独占。";
                 h.failMsg = fs.str();
                 h.renderFail = true;
                 if (h.log) h.log(h.failMsg);
                 break;
+                }
             }
         }
 
@@ -741,7 +758,7 @@ inline void render_loop(OutSink& sink, RenderHost& h) {
                         // 所以处置建议不同 —— 优先怀疑缓冲/周期配置与实时优先级，而非设备不可用。
                         ss << "。设备流仍在工作但供给不足："
                               "请把设置里的缓冲调大（如 100ms→200ms），关闭其它独占该设备的程序，"
-                              "或在设置中切换 WASAPI 共享以绕开独占周期约束。";
+                              "或在设置中切换 CoreAudio 共享以绕开独占周期约束。";
                         h.failMsg = ss.str();
                         h.failThroughput = got;
                         h.renderFail = true;

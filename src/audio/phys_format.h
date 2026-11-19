@@ -102,17 +102,31 @@ inline PhysPick pick_physical_format(const std::vector<PhysFormat>& avail,
                 bestExact = f.bits; exactPick = f;
             }
         } else if (f.bits > srcBits) {
-            if (bestAbove < 0 || f.bits < bestAbove) { bestAbove = f.bits; abovePick = f; }
+            if (bestAbove < 0 || f.bits < bestAbove ||
+                (f.bits == bestAbove && f.nonMixable && !abovePick.nonMixable)) {
+                bestAbove = f.bits; abovePick = f;
+            }
         }
     }
     if (!sawRate) {
+        std::string availRates;
+        for (const PhysFormat& f : avail) {
+            if (f.rate == 0) continue;
+            const std::string token = std::to_string(f.rate);
+            if (availRates.find(token) != std::string::npos) continue;   // 档位去重（近似足够）
+            if (!availRates.empty()) availRates += "/";
+            availRates += token;
+        }
         r.why = "设备物理层没有 " + std::to_string(srcRate) +
-                " Hz 这一档（锁物理格式才能避免 HAL 重采样，此处不做静默转换）";
+                " Hz 这一档（锁物理格式才能避免 HAL 重采样，此处不做静默转换；可用档位：" +
+                (availRates.empty() ? std::string("未知") : availRates) + " Hz）";
         return r;
     }
     if (!sawIntAtRate) {
         r.floatOnly = sawFloatAtRate;
-        r.why = "端点物理层只有浮点格式（float32），不存在整数逐位直通通路";
+        r.why = sawFloatAtRate
+                    ? "端点物理层只有浮点格式（float32），不存在整数逐位直通通路"
+                    : "设备在此采样率下没有有效位深的整数物理格式（位深 <= 0），无法确认整数逐位直通通路";
         return r;
     }
     if (bestExact > 0) {

@@ -17,6 +17,7 @@
 //   4) 本地 HTTP 供源 Range 语义与 token 防遍历逻辑（纯函数，可离线测）。
 #pragma once
 #include "net/http_client.h"
+#include <atomic>
 #include <string>
 #include <vector>
 #include <map>
@@ -975,16 +976,43 @@ inline bool validate_stream_token(const std::string& requestPath, const std::str
     return tokenInPath == expectedToken;
 }
 
+// 流 token：**必须真的随机**，不能是"拿时间当种子的 LCG"。
+//
+// 2026-11-13 真 BUG（由 flaky test 暴露）：
+//   旧实现只用 `high_resolution_clock` 的计数当种子。两次连续调用落在同一时钟刻度时
+//   （macOS 上实测会发生），种子相同 ⟹ **token 完全相同**。
+//   后果有两层：
+//     ① 测试偶发红（"两次生成的 token 不相同"）——本轮由它发现；
+//     ② 更要紧的是**安全**：这些 token 是 UPnP/HTTP 供源的访问凭据
+//        （/stream/<token>.wav）。可预测的凭据等于没有凭据；同一秒内起两个会话还会撞 token。
+//
+// 修法：优先用系统 CSPRNG（arc4random，macOS/BSD 自带、无失败模式、线程安全）。
+// 非 BSD 平台退回 "时钟 + pid + 计数器 + 对象地址" 混合，保证两次调用不可能同源。
 inline std::string generate_random_token(size_t hexLength = 16) {
     static const char hexChars[] = "0123456789abcdef";
     std::string tok;
     tok.reserve(hexLength);
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    // 每个 hex 字符独立取一个随机字节的低 4 位（arc4random 无需播种、无状态）
+    for (size_t i = 0; i < hexLength; ++i) tok += hexChars[arc4random() & 0x0F];
+    return tok;
+#else
+    static std::atomic<uint64_t> counter{0};
     uint64_t seed = (uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    seed ^= ((uint64_t)::getpid() << 32);
+    seed ^= counter.fetch_add(1) * 0x9E3779B97F4A7C15ULL;
+    seed ^= (uint64_t)(uintptr_t)&counter;      // ASLR 提供的额外熵
     for (size_t i = 0; i < hexLength; ++i) {
-        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
-        tok += hexChars[(seed >> 32) & 0x0F];
+        // splitmix64：比原 LCG 的高低混合更均匀
+        seed += 0x9E3779B97F4A7C15ULL;
+        uint64_t z = seed;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        tok += hexChars[(z >> 32) & 0x0F];
     }
     return tok;
+#endif
 }
 
 } // namespace rta::net

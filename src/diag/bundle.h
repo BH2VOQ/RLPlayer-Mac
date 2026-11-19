@@ -97,10 +97,18 @@ inline constexpr const char* kDiagName      = "diag.json";
 inline constexpr const char* kEventsName    = "events.jsonl";
 inline constexpr const char* kUiEventsName  = "uievents.jsonl";
 
-// 12 MB = ROADMAP D6 的整包目标；256 KiB 预留给 manifest/checksums/report；
+// 反馈通道的硬上限是解码后 8 MiB（后台/页面两边同一闸门，见 feedback_api.h）。
+// 诊断包 ZIP 用 STORE（不压缩，见 src/net/zipstore.h），所以**预算必须给
+// manifest/checksums/report 和 ZIP 目录留出余量**：7.5 MiB 预算 + 256 KiB 元数据预留
+// ⟹ 条目 ≤ ~7.25 MiB，实测真实 ZIP ≤ 8 MiB。旧值 12 MiB 会生成 >8 MiB 的 zip，
+// 用户实机在"反馈附带诊断包"处被 8 MiB 闸门拦下（P0-2）。
 // 16 KiB 是"尾部还值得留"的下限（再小就只能看到半条日志，不如把预算让给别的条目）。
-inline constexpr std::size_t kDefaultBudgetBytes = 12u * 1024u * 1024u;
+// 用户硬要求：诊断包 ZIP < 8 MB（按十进制 8,000,000 字节，取两种口径中更严的）。
+// 7.3 MB 预算 + 256 KiB 元数据预留 + ZIP 目录开销仍留有余量；
+// 反馈后台上限 8 MiB 也覆盖此值。
+inline constexpr std::size_t kDefaultBudgetBytes = 7'300'000u;  // 7.3 MB (decimal)
 inline constexpr std::size_t kMetaReserveBytes   = 256u * 1024u;
+inline constexpr std::size_t kPackageMaxBytes    = 8'000'000u;  // 导出 ZIP 硬上限
 inline constexpr std::size_t kMinUsefulTailBytes = 16u * 1024u;
 
 // 条目类型只影响两件事：manifest 里的 kind 字符串，以及"裁剪后是否对齐到行首"。
@@ -703,6 +711,308 @@ inline std::string zip_of(const AssembleResult& r) {
         z.push_back(std::move(e));
     }
     return rta::zip::build(z);
+}
+
+// ============================ 单文件 JSON 表示 ==============================
+// 后台要求 diag 字段 = base64(JSON 文本)，解码后 ≤8 MiB；收包/页面两边都按 UTF-8 解码。
+// ZIP 是给人**下下来**的，JSON 是给**页面直接读**的 —— 同一份内容，两种封装。
+//
+// 为什么这层要自己做"严格 JSON 校验"而不是直接信 rta::net::json_parse：
+//   net/json.h 是给 Subsonic 响应写的**宽容**解析器 —— 它不报错、不检查是否吃完整段输入，
+//   "{\"a\":1," 这种截断文本在它眼里只是"字段少了一个"。若照此判断就把它原样嵌进输出，
+//   产出的是一个连后台页面都解析不了的坏包，而且**没有任何地方会报错**。
+//   所以这里只回答一个问题："这段文本是不是一个完整的合法 JSON 对象"。答否 ⇒ 返回空串，
+//   让调用方（rtaweb）明确拒绝上传。宁可没有 JSON，也不产出坏 JSON。
+namespace detail {
+
+// 从 i 开始的一个 UTF-8 序列是否合法；合法返回字节数（1..4），非法返回 0。
+// 判据按 RFC 3629：拒绝过长编码、UTF-16 代理区、> U+10FFFF。
+inline std::size_t utf8_seq_len(const std::string& s, std::size_t i) {
+    const unsigned char c = (unsigned char)s[i];
+    if (c < 0x80) return 1;
+    std::size_t need = 0;
+    unsigned cp = 0;
+    if (c >= 0xC2 && c <= 0xDF)      { need = 1; cp = c & 0x1Fu; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0Fu; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07u; }
+    else return 0;
+    if (i + need >= s.size()) return 0;
+    for (std::size_t k = 1; k <= need; ++k) {
+        const unsigned char cc = (unsigned char)s[i + k];
+        if ((cc & 0xC0u) != 0x80u) return 0;
+        cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    if (need == 2 && cp < 0x800u) return 0;            // 过长编码
+    if (need == 3 && cp < 0x10000u) return 0;
+    if (cp >= 0xD800u && cp <= 0xDFFFu) return 0;      // 代理区（UTF-8 里不允许）
+    if (cp > 0x10FFFFu) return 0;
+    return need + 1;
+}
+
+// 把非法 UTF-8 序列换成 U+FFFD（EF BF BD），保证输出的每个字符都是合法 UTF-8。
+// 逐字节替换（而不是"吞掉整段坏区"）：坏字节原来是几段看不出，1:1 替换能让"这里丢了东西"
+// 在页面上看得见，而不会连带吞掉紧随其后的正常字符。
+// changed=true 表示确实动过字节 —— 调用方据此把条目名写进 sanitized。
+inline std::string utf8_scrub(const std::string& s, bool& changed) {
+    std::size_t bad_at = std::string::npos;
+    for (std::size_t i = 0; i < s.size();) {
+        const std::size_t n = utf8_seq_len(s, i);
+        if (n == 0) { bad_at = i; break; }
+        i += n;
+    }
+    if (bad_at == std::string::npos) { changed = false; return s; }   // 常见情形：原样返回，不复制
+
+    changed = true;
+    std::string o;
+    o.reserve(s.size() + 8);
+    o.append(s, 0, bad_at);
+    for (std::size_t i = bad_at; i < s.size();) {
+        const std::size_t n = utf8_seq_len(s, i);
+        if (n == 0) { o += "\xEF\xBF\xBD"; ++i; }
+        else { o.append(s, i, n); i += n; }
+    }
+    return o;
+}
+
+// 严格 JSON 语法校验（只有对象算通过）。返回 true ⇒ 这段文本可以被**原样**嵌进输出，
+// 不会让输出变成坏 JSON；同时保证其中每个字节都是合法 UTF-8。
+struct JsonCheck {
+    const std::string& s;
+    std::size_t p = 0;
+    static constexpr int kMaxDepth = 200;   // 防畸形输入把递归打爆（manifest 只有 3~4 层）
+
+    explicit JsonCheck(const std::string& t) : s(t) {}
+
+    void ws() {
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) ++p;
+    }
+    bool lit(const char* w, std::size_t n) {
+        if (p + n > s.size()) return false;
+        if (s.compare(p, n, w, n) != 0) return false;
+        p += n;
+        return true;
+    }
+    static int hexval(char h) {
+        if (h >= '0' && h <= '9') return h - '0';
+        if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+        if (h >= 'A' && h <= 'F') return h - 'A' + 10;
+        return -1;
+    }
+    bool hex4(unsigned& out) {
+        if (p + 4 > s.size()) return false;
+        unsigned v = 0;
+        for (int i = 0; i < 4; ++i) {
+            const int d = hexval(s[p + (std::size_t)i]);
+            if (d < 0) return false;
+            v = (v << 4) | (unsigned)d;
+        }
+        p += 4;
+        out = v;
+        return true;
+    }
+    bool string_() {
+        if (p >= s.size() || s[p] != '"') return false;
+        ++p;
+        while (p < s.size()) {
+            const unsigned char c = (unsigned char)s[p];
+            if (c == '"') { ++p; return true; }
+            if (c < 0x20) return false;                     // 裸控制字符在 JSON 里非法
+            if (c == '\\') {
+                ++p;
+                if (p >= s.size()) return false;
+                const char e = s[p++];
+                if (e == '"' || e == '\\' || e == '/' || e == 'b' || e == 'f' ||
+                    e == 'n' || e == 'r' || e == 't') continue;
+                if (e != 'u') return false;
+                unsigned cp = 0;
+                if (!hex4(cp)) return false;
+                if (cp >= 0xDC00u && cp <= 0xDFFFu) return false;     // 孤立低代理
+                if (cp >= 0xD800u && cp <= 0xDBFFu) {                 // 高代理必须成对
+                    if (p + 2 > s.size() || s[p] != '\\' || s[p + 1] != 'u') return false;
+                    p += 2;
+                    unsigned lo = 0;
+                    if (!hex4(lo)) return false;
+                    if (lo < 0xDC00u || lo > 0xDFFFu) return false;
+                }
+                continue;
+            }
+            if (c >= 0x80) {                                  // 多字节：必须是完整合法序列
+                const std::size_t n = utf8_seq_len(s, p);
+                if (n == 0) return false;
+                p += n;
+                continue;
+            }
+            ++p;
+        }
+        return false;                                          // 没闭合
+    }
+    bool number_() {
+        const std::size_t st = p;
+        if (p < s.size() && s[p] == '-') ++p;
+        if (p >= s.size()) return false;
+        if (s[p] == '0') { ++p; }
+        else if (s[p] >= '1' && s[p] <= '9') { while (p < s.size() && std::isdigit((unsigned char)s[p])) ++p; }
+        else return false;
+        if (p < s.size() && s[p] == '.') {
+            ++p;
+            if (p >= s.size() || !std::isdigit((unsigned char)s[p])) return false;
+            while (p < s.size() && std::isdigit((unsigned char)s[p])) ++p;
+        }
+        if (p < s.size() && (s[p] == 'e' || s[p] == 'E')) {
+            ++p;
+            if (p < s.size() && (s[p] == '+' || s[p] == '-')) ++p;
+            if (p >= s.size() || !std::isdigit((unsigned char)s[p])) return false;
+            while (p < s.size() && std::isdigit((unsigned char)s[p])) ++p;
+        }
+        return p > st;
+    }
+    bool value_(int depth) {
+        if (depth > kMaxDepth) return false;
+        ws();
+        if (p >= s.size()) return false;
+        const char c = s[p];
+        if (c == '{' || c == '[') return (c == '{') ? object_(depth + 1) : array_(depth + 1);
+        if (c == '"') return string_();
+        if (c == 't') return lit("true", 4);
+        if (c == 'f') return lit("false", 5);
+        if (c == 'n') return lit("null", 4);
+        return number_();
+    }
+    bool array_(int depth) {
+        if (p >= s.size() || s[p] != '[') return false;
+        ++p;
+        ws();
+        if (p < s.size() && s[p] == ']') { ++p; return true; }
+        for (;;) {
+            if (!value_(depth)) return false;
+            ws();
+            if (p < s.size() && s[p] == ',') { ++p; continue; }
+            if (p < s.size() && s[p] == ']') { ++p; return true; }
+            return false;
+        }
+    }
+    bool object_(int depth) {
+        if (p >= s.size() || s[p] != '{') return false;
+        ++p;
+        ws();
+        if (p < s.size() && s[p] == '}') { ++p; return true; }
+        for (;;) {
+            ws();
+            if (!string_()) return false;
+            ws();
+            if (p >= s.size() || s[p] != ':') return false;
+            ++p;
+            if (!value_(depth)) return false;
+            ws();
+            if (p < s.size() && s[p] == ',') { ++p; continue; }
+            if (p < s.size() && s[p] == '}') { ++p; return true; }
+            return false;
+        }
+    }
+    // 顶层：必须是对象，且不允许尾随垃圾（json_parse 会无视尾随内容，这里不行）。
+    bool top_object() {
+        ws();
+        if (p >= s.size() || s[p] != '{') return false;
+        if (!object_(0)) return false;
+        ws();
+        return p == s.size();
+    }
+};
+
+inline bool json_object_ok(const std::string& text) {
+    if (text.empty()) return false;
+    return JsonCheck(text).top_object();
+}
+
+// 整段是否每字节都属于合法 UTF-8 序列。用于"这些字段必须原样嵌入"的场合：
+// 与其悄悄清洗（那会破坏"checksums 与原文逐字节相等"这条判据），不如直接拒传。
+inline bool utf8_all_valid(const std::string& s) {
+    for (std::size_t i = 0; i < s.size();) {
+        const std::size_t n = utf8_seq_len(s, i);
+        if (n == 0) return false;
+        i += n;
+    }
+    return true;
+}
+
+}  // namespace detail
+
+// 把一次组装好的诊断包表达成**单文件 JSON**（后台 diag 字段 = base64(本函数返回值)）。
+//
+// 键名与顺序固定，便于收包端/页面按行读：
+//   schema / format / case_id / created_utc / manifest(对象，原文嵌入) / checksums(原文) /
+//   files{条目名→原文, manifest.json, checksums.txt} / sanitized[]
+//
+// 与 zip_of 的关系：**同一个 r 的两种封装**，files 的键集合与 ZIP 条目一一对应。
+// 纯函数：只读 r，不碰文件、时间、随机数、全局状态（所以同一份 r 调两次逐字节相同）。
+//
+// ---------------------------- 什么时候返回空串（调用方据此拒传）----------------------------
+// 规格只写了一条：manifest 本身不是合法 JSON ⇒ 空串。但"输出必须是合法 UTF-8 / JSON"这条
+// 硬约束会把另外几种输入也判死 —— 它们不是内容坏了，而是**这个包无法被无损表达**：
+//   ① manifest_json 不是完整合法的 JSON 对象（截断 / 尾随垃圾 / 含非法 UTF-8）；
+//   ② 某条目**名**不是合法 UTF-8。名字同时出现在 manifest.entries 与 checksums.txt 里，
+//      而这两处要求原文嵌入 / 逐字节相等 ⇒ 洗了名字，checksums 就不再等于原文；
+//      不洗，输出就不是合法 UTF-8。两条判据不可能同时满足，只能拒传。
+//      （按 assemble 的白名单，条目名本就是固定 ASCII 文件名，正常路径走不到这里。）
+//   ③ case_id / created_utc / checksums_txt 含非法 UTF-8 —— 同理：它们是元信息，
+//      编造一个洗过的值比明确报错危害大得多。
+//   ④ 条目名重复，或与 manifest.json / checksums.txt 撞名 —— 输出里会出现重复键
+//      （严格解析器取后一个，等于悄悄丢条目）。assemble 已禁止这些，这里是防御。
+//
+// ---------------------------- UTF-8 安全（唯一允许"改内容"的地方）----------------------------
+// 条目**内容**里的非法序列换成 U+FFFD（EF BF BD），被清洗过的条目名记进 sanitized[]。
+// 为什么内容能洗、名字不能洗：内容是**字节载荷**（日志里混进半个字符很常见），为一个坏字节
+// 丢掉整包诊断证据的代价远大于一个替换符；而名字是**结构**，它参与 checksums，动一个字节
+// 就自证不了了。于是：坏内容 ⇒ 清洗 + 显式标注；坏结构 ⇒ 整包拒传。两种处理都不静默。
+inline std::string bundle_json(const AssembleResult& r) {
+    if (!detail::json_object_ok(r.manifest_json)) return std::string();
+    if (!detail::utf8_all_valid(r.case_id)) return std::string();
+    if (!detail::utf8_all_valid(r.created_utc)) return std::string();
+    if (!detail::utf8_all_valid(r.checksums_txt)) return std::string();
+
+    // 键值对按"ZIP 里的内容"收集：先是各 payload 条目，再 manifest.json，最后 checksums.txt。
+    std::vector<std::pair<std::string, std::string>> files;
+    files.reserve(r.entries.size() + 2);
+    std::vector<std::string> sanitized;
+
+    for (const auto& m : r.entries) {
+        if (!detail::utf8_all_valid(m.rec.name)) return std::string();   // 见 ②
+        bool changed = false;
+        std::string val = detail::utf8_scrub(m.data, changed);
+        for (const auto& f : files) if (f.first == m.rec.name) return std::string();  // 重名
+        if (m.rec.name == kManifestName || m.rec.name == kChecksumsName) return std::string();
+        if (changed) sanitized.push_back(m.rec.name);
+        files.emplace_back(m.rec.name, std::move(val));
+    }
+    files.emplace_back(kManifestName, r.manifest_json);
+    files.emplace_back(kChecksumsName, r.checksums_txt);
+
+    std::string o;
+    o.reserve(r.entries_bytes + r.manifest_json.size() + r.checksums_txt.size() + 512 +
+              (files.size() * 64));
+    o += "{\"schema\":\"";
+    o += kBundleSchema;
+    o += "\",\"format\":\"json\",\"case_id\":\"";
+    o += json_escape(r.case_id);
+    o += "\",\"created_utc\":\"";
+    o += json_escape(r.created_utc);
+    o += "\",\"manifest\":";
+    o += r.manifest_json;          // 原文嵌入（已严格校验），不再包一层字符串
+    o += ",\"checksums\":\"";
+    o += json_escape(r.checksums_txt);
+    o += "\",\"files\":{";
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        if (i) o += ",";
+        o += "\"";
+        o += json_escape(files[i].first);
+        o += "\":\"";
+        o += json_escape(files[i].second);
+        o += "\"";
+    }
+    o += "},\"sanitized\":";
+    o += detail::json_array(sanitized);
+    o += "}";
+    return o;
 }
 
 inline bool write_bundle_dir(const std::string& dir, const AssembleResult& r, std::string& err) {

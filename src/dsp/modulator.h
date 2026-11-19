@@ -459,17 +459,23 @@ public:
             levels_ = cfg_.levels < 2 ? 2 : cfg_.levels;
         }
 
-        effectiveOrder_ = cfg_.order;
-        if (effectiveOrder_ >= 7 && levels_ == 2) {
-            if (cfg_.family == ModulatorFamily::Chebyshev) {
-                effectiveOrder_ = 5;
-                steppedDown_ = true;
+        // 2026-11-17（DSP 对抗分析已证实）：旧构造器直接取 cfg_.order，未做钳位。
+        // order<=0 让 (size_t)order 下溢、order>7 让 process() 的环路越过 NTF 系数长度
+        // （EC 家族 synthesize_ntf 内部钳到 8，系数与缓冲区不匹配）⟹ 越界读。
+        // 与播放管线共用 stable_sdm_order 收敛，保留原有的两条具体降阶理由。
+        const int requestedOrder = cfg_.order;
+        effectiveOrder_ = stable_sdm_order(requestedOrder, cfg_.fs, levels_, cfg_.family);
+        if (effectiveOrder_ != requestedOrder) {
+            steppedDown_ = true;
+            if (requestedOrder >= 7 && levels_ == 2 && cfg_.family == ModulatorFamily::Chebyshev) {
                 stepDownReason_ = "1-bit 模式下 7 阶 Chebyshev NTF 极点阻尼比过低（Q≈130），小信号下闭环极点易移出单位圆形成极限环，自动降为 5 阶保护";
-            } else if (cfg_.fs < 5.6e6) {
-                effectiveOrder_ = 5;
-                steppedDown_ = true;
+            } else if (requestedOrder >= 7 && levels_ == 2 && cfg_.fs < 5.6e6) {
                 stepDownReason_ = "采样率 (" + std::to_string((int)(cfg_.fs / 1000.0)) +
                                   " kHz) 不足 5.6 MHz，7 阶 1-bit 环路易饱和，自动降为 5 阶保护";
+            } else {
+                stepDownReason_ = "阶数 " + std::to_string(requestedOrder) +
+                                  " 在该采样率/电平下不可用，已钳位为 " + std::to_string(effectiveOrder_) +
+                                  "（见 stable_sdm_order）";
             }
         }
 
@@ -483,7 +489,16 @@ public:
             ntf_ = synthesize_ntf(effectiveOrder_, cfg_.fs, 20000.0, cfg_.ntfHinf);
             hinfUsed_ = ntf_hinf_lin(ntf_);
         } else {
-            ntf_ = design_ntf_poly(effectiveOrder_, cfg_.cutoffHz, cfg_.fs);
+            // 7 阶 1-bit Butterworth 在 DSD256/512 下若仍用 100 kHz 固定拐点，
+            // H∞ 降至 1.13/1.06 且极点贴近单位圆 (0.988/0.994)，-60 dBFS 小信号
+            // 易陷低频极限环突波；按 DSD128 实测稳定拐点比例 (100k/5.6448M) 保持
+            // H∞ ≈ 1.284 下限，消除小信号噪声突波。
+            double fc = cfg_.cutoffHz;
+            if (levels_ == 2 && effectiveOrder_ >= 7 && cfg_.fs > 5644800.0) {
+                const double fcFloor = 100000.0 * (cfg_.fs / 5644800.0);
+                if (fc < fcFloor) fc = fcFloor;
+            }
+            ntf_ = design_ntf_poly(effectiveOrder_, fc, cfg_.fs);
         }
 
         const size_t sz = (size_t)effectiveOrder_ + 1;
@@ -540,10 +555,13 @@ public:
         { uint64_t ub = 0; std::memcpy(&ub, &u, sizeof(ub));
           if (!mod_finite_bits_u64(ub)) { u = 0.0; ++nonFinite_; } }
 
-        // 环路限幅器：允许内部瞬时过冲，绝不发散
-        const double uLim = 1.5;
-        if (u >  uLim) { u =  uLim; ++overload_; }
-        if (u < -uLim) { u = -uLim; ++overload_; }
+        // 环路限幅器：允许内部瞬时过冲，绝不发散。
+        // DSD5@DSD64 在 0.62 稳定边界下正常内部状态峰值可达 ~1.70，1.5 会误触稳态限幅；
+        // 1.80 避开正常稳态过冲同时仍能在满幅/越界瞬态时可靠保护且距 eMax=2.5 有足够余量。
+        const double uLim = 1.8;
+        bool over = false;
+        if (u >  uLim) { u =  uLim; over = true; }
+        if (u < -uLim) { u = -uLim; over = true; }
 
         // ★ 抖动注入点（2026-10-25 修复，探针实测定位）：
         // 抖动必须加在【比较器输入】（去相关量化噪声、打散空闲音），但必须从
@@ -567,9 +585,10 @@ public:
             // 就该让幅度按 1/√ 缩放。1-bit 的 dithScale 恒为 1.0 ⟹ **1-bit 族数字完全不变**。
             dith = cfg_.ditherLsb * step * ((double)(rngNext() >> 11) / 9007199254740992.0 - 0.5);
             u += dith;
-            if (u >  uLim) { u =  uLim; ++overload_; }
-            if (u < -uLim) { u = -uLim; ++overload_; }
+            if (u >  uLim) { u =  uLim; over = true; }
+            if (u < -uLim) { u = -uLim; over = true; }
         }
+        if (over) ++overload_;
 
         double y;
         if (levels_ == 2) {

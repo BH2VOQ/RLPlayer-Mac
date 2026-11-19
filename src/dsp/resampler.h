@@ -13,10 +13,12 @@
 //  * 支持任意 inRate/outRate（自动约分为最简 L/M），支持多声道
 //  * inRate == outRate 时按位透传（比特完美）
 #pragma once
+#include "fp_strict.h"   // 261030-01 审计：DSP 路径严格 IEEE
 #include "gpu_pref.h"
 #include "filter_design.h"
 #include "filter_families.h"
 #include "platform/dynlib.h"   // GPU 升频按需加载 rtagpu.dll —— 本目录不再直接碰平台 API
+#include <array>
 #include <vector>
 #include <cmath>
 #include <cstdint>
@@ -24,6 +26,8 @@
 #include <numeric>
 #include <algorithm>
 #include <memory>
+#include <limits>
+#include <climits>
 #include <stdexcept>
 #include <string>
 
@@ -42,10 +46,6 @@ struct ResamplerConfig {
     double   transition = 0.04;
 
     // ---- 命名滤波器（Round 56）----
-    // 原先重采样器只会设计 Kaiser 窗 sinc，无法选择其他窗函数与相位组合。
-    // 这里不传"原型数据"而只传【窗类型 + 相位类型】，让重采样器自己在
-    // 【内插域】里按正确截止点与 ×L 直流增益完成设计 —— 从而根本避开
-    // "输入域原型 vs 内插域原型"归一化基准不同这个陷阱（见 STATUS.md）。
     WindowKind window       = WindowKind::Kaiser;   // Kaiser = 原有行为，完全等价
     PhaseKind  phase        = PhaseKind::Linear;
 
@@ -55,130 +55,233 @@ struct ResamplerConfig {
     double apodF2      = 0.0;   // 滚降终止相对输入 Nyquist 比例（例如 21.8k / 22.05k）
 
     // ---- 两段式升频 ----
-    // 大比率（如 44.1k -> 705.6k 是 16 倍）单级做时，每输出样本要做 totalTaps/L 次乘加，
-    // 而输出样本数是 L 倍 ⟹ 总运算量 ∝ totalTaps × 输出率，非常贵。
-    // 拆成两级后：第一级只跑到中间速率（4 倍），承担陡峭的过渡带；
-    // 第二级从中间速率到最终速率，图像离得远，几十抽头就够。
-    // 实测同参数下 CPU 运算量降到约 1/4，声音在可听带内一致。
     bool twoStage   = false;
+    bool allowAutomaticCascade = false;
+    bool autoTaps = false;
+    bool highPrecisionDesign = false;
+    double designPhaseMix = -1.0;
     int  stage2Taps = 64;      // 第二级每相位抽头数（过渡带很宽，不需要长）
 
     // ---- 每输入样本内核长度（tapsPerInput）----
-    // 0（默认）= 关闭：抽头预算仍按 totalTaps 解释，行为与历史逐位一致。
-    //
-    // 为什么需要它：原型是在【内插域】设计的，每相位抽头数 T = totalTaps / L。
-    // 同一个 totalTaps，L 越大 T 越小 —— 44.1k->192k 的 L=640、44.1k->384k 的
-    // L=1280 时，4095 抽头的预设只剩 6 / 4 个抽头，通带在 10 kHz 处就掉 1 dB，
-    // 滤波器退化成缓坡（实测见 docs/PCM回放质量-实测与改进.md）。而 44.1k->705.6k
-    // 的 L=16，同样预设却有 255 个抽头。也就是说"抽头数"这个预算单位本身与
-    // 输出采样率耦合，导致同一预设在不同输出率下质量天差地别。
-    // >0 时：T 直接取该值（内核长度 = 每输入样本的抽头数），原型长度 = T × L，
-    // 于是频响与输出采样率解耦。内存与每输出样本的乘加次数均为 O(T)。
     int minTapsPerInput = 0;
+    bool applyTapFloor = true;
     // 内核长度 × L 的上限（防御：L 很大时系数表会膨胀）。0 = 不限制。
-    int maxPrototypeTaps = 1 << 20;
+    // 对齐 Windows v3.3.11：2^24（16.8M 抽头），支持 tight-lp T=1600 @ 44.1->384k (2.05M) 等。
+    int maxPrototypeTaps = 1 << 24;
 };
 
 // 把 FilterPreset 的全部参数应用到 ResamplerConfig
 inline void apply_preset(ResamplerConfig& cfg, const FilterPreset& fp) {
     cfg.totalTaps  = fp.taps;
     cfg.transition = fp.transition;
-    cfg.attenDb    = fp.attenDb;
+    cfg.attenDb    = std::max(fp.attenDb, preset_ceiling_db(fp.window));
     cfg.window     = fp.window;
     cfg.phase      = fp.phase;
     cfg.twoStage   = fp.twoStage;
     cfg.apodizing  = fp.apodizing;
     cfg.apodF1     = fp.apodF1;
     cfg.apodF2     = fp.apodF2;
-    cfg.minTapsPerInput = fp.tapsPerInput;
+    cfg.minTapsPerInput = fp.apodizing
+        ? apod_quality_taps(fp.apodF1, fp.apodF2, fp.window == WindowKind::Gaussian,
+                            cfg.attenDb, fp.tapsPerInput)
+        : fp.tapsPerInput;
     if (fp.twoStage && fp.stage2Taps > 0) cfg.stage2Taps = fp.stage2Taps;
+}
+
+enum class ResamplePurpose { Pcm, Dsd };
+inline void apply_resample_purpose(ResamplerConfig& cfg, ResamplePurpose purpose) {
+    if (purpose == ResamplePurpose::Dsd) cfg.twoStage = true;
+}
+
+struct ResamplerStagePlan {
+    ResamplerConfig config;
+    int L = 1, M = 1, T = 0;
+    uint64_t coefficientCount = 0;
+};
+
+struct ResamplerPlan {
+    std::array<ResamplerStagePlan, 2> stages;
+    size_t stageCount = 0;
+    int L = 1, M = 1;
+    uint64_t coefficientCount = 0, cachePayloadBytes = 0, designPeakBytes = 0;
+};
+
+inline void validate_resampler_config(const ResamplerConfig& c) {
+    if (!c.inRate || !c.outRate)
+        throw std::invalid_argument("Resampler sample rates must be positive: inRate=" +
+            std::to_string(c.inRate) + " outRate=" + std::to_string(c.outRate));
+    if (c.channels < 1 || c.channels > 64)
+        throw std::invalid_argument("Resampler supports 1 to 64 channels");
+    if (c.totalTaps < 1 || c.stage2Taps < 1 || c.minTapsPerInput < 0 || c.maxPrototypeTaps < 0)
+        throw std::invalid_argument("Resampler tap counts and budgets are invalid");
+    if (!std::isfinite(c.transition) || c.transition < 0.0 || c.transition >= 1.0)
+        throw std::invalid_argument("Resampler transition must be finite and in [0,1)");
+    if (!std::isfinite(c.attenDb) || c.attenDb < 0.0 || c.attenDb > 1000.0)
+        throw std::invalid_argument("Resampler attenuation must be finite and in [0,1000] dB");
+    if (int(c.window) < 0 || int(c.window) > int(WindowKind::Hann) ||
+        int(c.phase) < 0 || int(c.phase) > int(PhaseKind::Intermediate))
+        throw std::invalid_argument("Unknown resampler window or phase");
+    if (!std::isfinite(c.designPhaseMix) ||
+        (c.designPhaseMix != -1.0 && (c.designPhaseMix < 0.0 || c.designPhaseMix > 1.0)))
+        throw std::invalid_argument("Invalid resampler phase mix");
+    if (!std::isfinite(c.apodF1) || !std::isfinite(c.apodF2) ||
+        (c.apodizing && !(c.apodF1 >= 0.0 && c.apodF1 < c.apodF2 && c.apodF2 <= 1.0)))
+        throw std::invalid_argument("Invalid resampler apodization edges");
+    const auto g = std::gcd(c.inRate, c.outRate);
+    if (c.inRate / g > uint32_t(INT_MAX) || c.outRate / g > uint32_t(INT_MAX))
+        throw std::length_error("Reduced resampler ratio exceeds the supported integer range");
+}
+
+inline int resampler_tap_product(int t, int l) {
+    if (t < 1 || l < 1 || int64_t(t) * l > INT_MAX)
+        throw std::length_error("Resampler coefficient count overflow");
+    return t * l;
+}
+
+inline ResamplerConfig resolve_auto_taps(const ResamplerConfig& requested) {
+    validate_resampler_config(requested);
+    ResamplerConfig c = requested;
+    if (c.designPhaseMix < 0.0) c.designPhaseMix = phase_mix();
+    if (!c.autoTaps) return c;
+    c.autoTaps = false;
+    if (c.inRate == c.outRate) return c;
+    if (c.transition == 0.0 && !c.apodizing && c.minTapsPerInput == 0)
+        throw std::invalid_argument("Automatic tap design requires a positive transition");
+    const uint32_t bandRate = std::min(c.inRate, c.outRate);
+    int sourceT = c.minTapsPerInput > 0 ? c.minTapsPerInput :
+        solve_taps_per_phase(c.window, c.transition, c.apodizing,
+            c.apodF1, c.apodF2, c.totalTaps, 0, double(bandRate));
+    if (c.outRate < c.inRate && c.phase == PhaseKind::Linear && !c.apodizing &&
+        (c.window == WindowKind::Kaiser || (c.window == WindowKind::BlackmanHarris && c.attenDb > 100.0))) {
+        const double oldAttenuation = c.attenDb;
+        const auto m = c.inRate / std::gcd(c.inRate, c.outRate);
+        c.attenDb = std::ceil(oldAttenuation + 20.0 * std::log10(double(m)) + 6.0);
+        const int nominal = solve_taps_per_phase(c.window, c.transition, false, 0, 0, c.totalTaps, 0, double(bandRate));
+        const double required = std::ceil(double(nominal) * (c.attenDb - 8.0) / std::max(1.0, oldAttenuation - 8.0));
+        if (!std::isfinite(required) || required > INT_MAX)
+            throw std::length_error("Automatic alias rejection requires too many taps");
+        sourceT = std::max(sourceT, int(required));
+        c.highPrecisionDesign = true;
+    }
+    const uint64_t count = (uint64_t(sourceT) * std::max(c.inRate, c.outRate) + c.outRate - 1) / c.outRate;
+    if (count > uint64_t(INT_MAX))
+        throw std::length_error("Automatic source support exceeds the tap integer range");
+    c.minTapsPerInput = int(count);
+    return c;
+}
+
+inline ResamplerStagePlan plan_resampler_stage(const ResamplerConfig& c) {
+    validate_resampler_config(c);
+    ResamplerStagePlan p;
+    p.config = c;
+    const auto g = std::gcd(c.inRate, c.outRate);
+    p.L = int(c.outRate / g);
+    p.M = int(c.inRate / g);
+    int t = c.totalTaps / p.L;
+    if (c.minTapsPerInput > 0) t = c.minTapsPerInput;
+    else if (c.transition > 0.0) {
+        const double low = 21.13 / c.transition + 0.5, high = 2.0 * 21.13 / c.transition + 0.5;
+        if (!std::isfinite(high) || high > INT_MAX)
+            throw std::length_error("Transition requires an unrepresentable tap count");
+        const int tMin = std::max(4, int(low)), tMax = std::max(tMin, int(high));
+        if (c.phase == PhaseKind::Linear && t > tMax) t = tMax;
+        if (c.applyTapFloor && t < tMin) t = tMin;
+    }
+    p.T = std::max(4, t);
+    p.coefficientCount = uint64_t(resampler_tap_product(p.T, p.L));
+    if (c.maxPrototypeTaps > 0 && p.coefficientCount > uint64_t(c.maxPrototypeTaps))
+        throw std::runtime_error("Requested FIR exceeds the coefficient budget; quality was not reduced. inRate=" +
+            std::to_string(c.inRate) + " outRate=" + std::to_string(c.outRate) + " L=" + std::to_string(p.L) +
+            " M=" + std::to_string(p.M) + " T=" + std::to_string(p.T) + " taps=" + std::to_string(p.coefficientCount) +
+            " budget=" + std::to_string(c.maxPrototypeTaps) + ". Use a cascade or explicitly change the filter configuration.");
+    return p;
+}
+
+inline ResamplerPlan plan_resampler(const ResamplerConfig& requested) {
+    const auto cfg = resolve_auto_taps(requested);
+    ResamplerPlan p;
+    const auto g = std::gcd(cfg.inRate, cfg.outRate);
+    p.L = int(cfg.outRate / g);
+    p.M = int(cfg.inRate / g);
+    if (p.L == 1 && p.M == 1) return p;
+    const bool rational = p.M != 1 && uint64_t(cfg.outRate) >= uint64_t(cfg.inRate) * 2;
+    int f = 1;
+    if ((cfg.twoStage || (cfg.allowAutomaticCascade && rational)) && ((p.M == 1 && p.L >= 8) || rational))
+        for (int candidate : {4, 3, 2})
+            if (p.L % candidate == 0 && p.L / candidate >= (rational ? 1 : 2)) { f = candidate; break; }
+    if (f > 1) {
+        const uint64_t mid = uint64_t(cfg.inRate) * f;
+        if (mid > UINT32_MAX) throw std::length_error("Cascade intermediate sample rate overflow");
+        const int t1 = cfg.minTapsPerInput > 0 ? cfg.minTapsPerInput : std::max(4, cfg.totalTaps / p.L);
+        ResamplerConfig a = cfg, b = cfg;
+        a.twoStage = b.twoStage = false;
+        a.allowAutomaticCascade = b.allowAutomaticCascade = false;
+        a.applyTapFloor = b.applyTapFloor = true;
+        a.outRate = uint32_t(mid);
+        a.totalTaps = resampler_tap_product(t1, f);
+        b.inRate = uint32_t(mid);
+        b.minTapsPerInput = cfg.stage2Taps;
+        b.transition = .30;
+        const int l2 = p.L / f;
+        if (rational) {
+            b.window = WindowKind::Kaiser;
+            b.apodizing = false;
+            b.apodF1 = b.apodF2 = 0.0;
+            b.attenDb = std::max(286.0, cfg.attenDb + 6.0);
+            const double width = .5 * b.transition / double(std::max(l2, p.M));
+            const int prototype = kaiser_taps_for(b.attenDb, width);
+            const double count = std::ceil(1.2 * double(prototype) / double(l2));
+            if (count > INT_MAX) throw std::length_error("Cascade transition requires too many taps");
+            b.minTapsPerInput = std::max(cfg.stage2Taps, int(count));
+        }
+        b.totalTaps = resampler_tap_product(b.minTapsPerInput, l2);
+        p.stages[0] = plan_resampler_stage(a);
+        p.stages[1] = plan_resampler_stage(b);
+        p.stageCount = 2;
+    } else {
+        p.stages[0] = plan_resampler_stage(cfg);
+        p.stageCount = 1;
+    }
+    return p;
 }
 
 class PolyphaseResampler {
 public:
-    explicit PolyphaseResampler(const ResamplerConfig& cfg) : cfg_(cfg) {
-        // HF-03 构造防御：采样率为 0 时 gcd(0,x)=x 会算出 M_=0（或 L_=0）的退化参数，
-        // 随后 maxOutFrames 出 inf/巨值，转 size_t 触发裸的 "vector too long"（2.log 症状之一）。
-        // 在入口直接拒绝，错误带两率值。
-        if (cfg.inRate == 0 || cfg.outRate == 0)
-            throw std::runtime_error("重采样器构造失败: 采样率必须>0 (inRate=" + std::to_string(cfg.inRate) +
-                                     ", outRate=" + std::to_string(cfg.outRate) + ")");
-        uint32_t g = std::gcd(cfg.inRate, cfg.outRate);
-        L_ = (int)(cfg.outRate / g);          // 上采样因子（每输入样本产生 L 个相位）
-        M_ = (int)(cfg.inRate  / g);          // 下采样因子
+    explicit PolyphaseResampler(const ResamplerConfig& requested) : cfg_(resolve_auto_taps(requested)) {
+        check_design_cancel();
+        const ResamplerConfig& cfg = cfg_;
+        const auto plan = plan_resampler(cfg);
+        L_ = plan.L;
+        M_ = plan.M;
         ch_ = cfg.channels > 0 ? cfg.channels : 2;
-
-        // 0 值路径已被上面挡住；这里再防 (int) 截断/溢出导致的非正退化值
-        if (L_ <= 0 || M_ <= 0)
-            throw std::runtime_error("重采样器构造失败: L/M 计算退化 (inRate=" + std::to_string(cfg.inRate) +
-                                     ", outRate=" + std::to_string(cfg.outRate) +
-                                     ", L=" + std::to_string(L_) + ", M=" + std::to_string(M_) + ")");
-
-        if (L_ == 1 && M_ == 1) { passthrough_ = true; return; }
-
-        // ---- 两段式：只在"纯升频且倍数够大"时启用 ----
-        if (cfg.twoStage && M_ == 1 && L_ >= 8) {
-            int F = 1;
-            for (int f : { 4, 3, 2 }) if (L_ % f == 0 && L_ / f >= 2) { F = f; break; }
-            if (F > 1) {
-                // HF-03：两级倍数同样防 0/溢出（中间速率 = inRate*F 必须>0 且未回绕）
-                const uint32_t mid = cfg.inRate * (uint32_t)F;
-                if (mid == 0 || mid / (uint32_t)F != cfg.inRate)
-                    throw std::runtime_error("重采样器构造失败: 两段式倍率计算溢出/退化 (inRate=" +
-                                             std::to_string(cfg.inRate) + ", outRate=" +
-                                             std::to_string(cfg.outRate) + ", F=" + std::to_string(F) + ")");
-                // 每相位抽头数（决定过渡带陡度）：tapsPerInput 模式下由内核长度直接给
-                const int T1 = (cfg.minTapsPerInput > 0) ? cfg.minTapsPerInput
-                                                        : std::max(4, cfg.totalTaps / L_);
-                ResamplerConfig c1 = cfg;
-                c1.twoStage   = false;
-                c1.inRate     = cfg.inRate;
-                c1.outRate    = cfg.inRate * (uint32_t)F;
-                c1.totalTaps  = T1 * F;
-                ResamplerConfig c2 = cfg;
-                c2.twoStage   = false;
-                c2.inRate     = cfg.inRate * (uint32_t)F;
-                c2.outRate    = cfg.outRate;
-                c2.totalTaps  = cfg.stage2Taps * (L_ / F);
-                // 第二级的过渡带可以很宽：第一级输出在 22.05 kHz 以上已经是 -180 dB，
-                // 所以第二级只要在"图像出现处"之前进入阻带即可。
-                c2.transition = 0.30;
-                stage1_ = std::make_unique<PolyphaseResampler>(c1);
-                stage2_ = std::make_unique<PolyphaseResampler>(c2);
-                tmp_.clear();
-                tmpP_.assign((size_t)ch_, nullptr);
-                return;
-            }
+        if (plan.stageCount == 0) { passthrough_ = true; return; }
+        if (plan.stageCount == 2) {
+            stage1_ = std::make_unique<PolyphaseResampler>(plan.stages[0].config);
+            stage2_ = std::make_unique<PolyphaseResampler>(plan.stages[1].config);
+            tmp_.clear();
+            tmpP_.assign((size_t)ch_, nullptr);
+            return;
         }
 
         // 内插域中：输入 Nyquist 位于 1/L，输出 Nyquist 位于 1/M，取较小者
         const double idealCutoff = std::min(1.0 / (double)L_, 1.0 / (double)M_);
-        const double cutoff = idealCutoff * (1.0 - cfg.transition);
+        // 截止点（-6 dB 点）放在过渡带中点，避免通带边缘下垂
+        const double cutoff = idealCutoff * (1.0 - cfg.transition * 0.5);
 
-        // 原型长度取 L 的整数倍
-        int total = cfg.totalTaps;
-        T_ = total / L_;                       // 每相位抽头数
-        if (cfg.minTapsPerInput > 0) {
-            // 内核长度模式：抽头预算与 L 解耦（默认关闭时这一支永不执行 ⟹ 逐位不变）
-            T_ = cfg.minTapsPerInput;
-            if (cfg.maxPrototypeTaps > 0 && (long long)T_ * (long long)L_ > (long long)cfg.maxPrototypeTaps)
-                T_ = (int)std::max<long long>(4, (long long)cfg.maxPrototypeTaps / (long long)L_);
-        }
-        if (T_ < 4) { T_ = 4; }
-        total = T_ * L_;
+        T_ = plan.stages[0].T;
+        const int total = int(plan.stages[0].coefficientCount);
+        const double designPhaseMix = cfg.designPhaseMix;
 
         std::vector<double> proto;
         if (cfg.window == WindowKind::Kaiser && cfg.phase == PhaseKind::Linear && !cfg.apodizing) {
-            // 原有路径：参数化 Kaiser sinc（保持逐位不变）
+            // 原有路径：参数化 Kaiser sinc
             LowpassSpec spec;
             spec.taps    = total;
             spec.cutoff  = cutoff;
             spec.attenDb = cfg.attenDb;
             proto = design_lowpass(spec);
         } else {
-            // 命名滤波器路径：在【同一个内插域截止点】上用指定窗设计，
-            // 需要最小相位时走倒谱法转换。截止点约定两侧一致（均以 Nyquist 为单位，
-            // 0.5 表示 0.25*fs），因此不存在归一化基准不匹配的问题。
+            // 命名滤波器路径：使用有限支撑级联相位 + DD 精度卷积 + 切趾透传
             FirSpec fs;
             fs.taps       = total;
             fs.cutoff     = cutoff;
@@ -186,28 +289,24 @@ public:
             fs.window     = cfg.window;
             fs.apodizing  = cfg.apodizing;
             if (cfg.apodizing) {
-                // idealCutoff 为输入 Nyquist 在内插域的位置（1.0 / L）
                 fs.apodF1 = cfg.apodF1 * idealCutoff;
                 fs.apodF2 = cfg.apodF2 * idealCutoff;
             }
-            proto = design_fir(fs);
-            // 最小相位是独立一步（倒谱法），不是 design_fir 的参数
-            if (cfg.phase == PhaseKind::Minimum) {
-                proto = to_minimum_phase(proto);
-                if ((int)proto.size() != total) proto.resize((size_t)total, 0.0);
-            } else if (cfg.phase == PhaseKind::Intermediate) {
-                proto = to_intermediate_phase(proto);
-                if ((int)proto.size() != total) proto.resize((size_t)total, 0.0);
-            }
+            const double t = (cfg.transition > 0.0) ? cfg.transition : 0.0;
+            const double passEdge = (t > 0.0 && t < 1.0)
+                                  ? cutoff * (1.0 - t) / (1.0 - t * 0.5) : 0.0;
+            proto = design_phased_fir(fs.taps, fs.cutoff, fs.attenDb, fs.window,
+                                      fs.apodizing, fs.apodF1, fs.apodF2,
+                                      cfg.phase, designPhaseMix, passEdge);
+            if ((int)proto.size() != total) proto.resize((size_t)total, 0.0);
         }
+        check_design_cancel();
 
-        // 关键：有理 L/M 转换中，"内插 -> 滤波 -> 抽取"要求原型在内插域的直流增益为 L，
-        // 否则输出会被整体衰减 L 倍（L=1280 时正好 -62.1 dB，实测确认过这个陷阱）。
-        // 等价说法：每一相位的抽头之和必须为 1。
+        // 关键：有理 L/M 转换中，原型在内插域的直流增益为 L
         const double phaseGain = (double)L_;
         for (auto& v : proto) v *= phaseGain;
 
-        // 相位主序布局：phases_[p][u] = h[p + u*L]，提升缓存友好度
+        // 相位主序布局：phases_[p][u] = h[p + u*L]
         phases_.assign((size_t)L_, std::vector<double>((size_t)T_));
         for (int p = 0; p < L_; ++p)
             for (int u = 0; u < T_; ++u)
@@ -227,11 +326,30 @@ public:
 
     bool passthrough() const { return passthrough_; }
     int  tapsPerPhase() const { return T_; }
+    int  stage1_taps_per_phase() const { return stage1_ ? stage1_->tapsPerPhase() : T_; }
+    int  stage2_taps_per_phase() const { return stage2_ ? stage2_->tapsPerPhase() : 0; }
+    size_t coefficient_count() const {
+        return stage1_ ? stage1_->coefficient_count() + stage2_->coefficient_count()
+                       : size_t(T_) * size_t(L_);
+    }
 
-    // 量测/回归钩子：把相位表还原成【内插域原型】(含 ×L 直流增益，与 process()
-    // 逐位同源的同一批系数)。用于频响/群延迟/振铃与"既有预设逐位不变"回归；
-    // 不参与任何信号路径，也不额外占用内存（按需展开到调用方缓冲）。
+    // 量测/回归钩子：把相位表还原成【内插域原型】(含 ×L 直流增益)
     void prototype_into(std::vector<double>& out) const {
+        if (stage1_) {
+            ResamplerConfig mono = cfg_; mono.channels = 1;
+            PolyphaseResampler probe(mono);
+            probe.M_ = 1;
+            probe.stage2_->M_ = 1;
+            const size_t frames = (size_t)std::ceil(tailInputSamples()) + 1;
+            std::vector<double> impulse(frames, 0.0);
+            impulse[0] = 1.0;
+            out.resize(probe.maxOutFrames(frames));
+            const double* in[] = { impulse.data() };
+            double* dst[] = { out.data() };
+            probe.process(in, frames, dst);
+            out.resize((size_t)std::llround(tailInputSamples() * (double)L_) + 1);
+            return;
+        }
         out.assign((size_t)T_ * (size_t)L_, 0.0);
         for (int p = 0; p < L_; ++p)
             for (int u = 0; u < T_; ++u)
@@ -251,15 +369,32 @@ public:
         return useGpu_ && gpu_resample_ != nullptr;
     }
     bool two_stage() const { return stage1_ != nullptr; }
+    const ResamplerConfig& config() const { return cfg_; }
+    const PolyphaseResampler* first_stage() const { return stage1_.get(); }
+    const PolyphaseResampler* second_stage() const { return stage2_.get(); }
     int  stage1_factor() const { return stage1_ ? stage1_->upFactor() : L_; }
     int  upFactor() const { return L_; }
     int  downFactor() const { return M_; }
 
-    // 群延迟（输入样本数）。原型长度是 T_*L_（偶数 ⟹ Type II 线性相位），
-    // 其在内插域的群延迟为 (T_*L_ - 1)/2，换算回输入样本需再除以 L_。
-    // 曾用 (T_-1)/2，在 L=4 时偏差 3.5 个输出样本 ⟹ 997 Hz 上约 7° 相位误差，
-    // 会让"与理想正弦比对"的残差虚高到 −26 dBFS。
-    double latencyInputSamples() const { return ((double)T_ * (double)L_ - 1.0) / (2.0 * (double)L_); }
+    double latencyInputSamples() const {
+        if (stage1_) {
+            const double l1 = stage1_->latencyInputSamples();
+            const double l2mid = stage2_->latencyInputSamples();
+            const double midRate = (double)stage1_->cfg_.inRate * (double)stage1_->upFactor();
+            const double inRate  = (double)cfg_.inRate;
+            return l1 + (midRate > 0.0 ? l2mid * inRate / midRate : 0.0);
+        }
+        if (passthrough_ || cfg_.phase != PhaseKind::Linear) return 0.0;
+        return ((double)T_ * (double)L_ - 1.0) / (2.0 * (double)L_);
+    }
+
+    double tailInputSamples() const {
+        if (stage1_)
+            return stage1_->tailInputSamples() +
+                   stage2_->tailInputSamples() / (double)stage1_->upFactor();
+        if (passthrough_) return 0.0;
+        return ((double)T_ * (double)L_ - 1.0) / (double)L_;
+    }
 
     // 处理一块输入。out 必须至少有 maxOutFrames(inFrames) 容量。
     // in/out 为每声道指针数组。

@@ -22,6 +22,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 using namespace rta::dsp;
 
@@ -47,6 +48,47 @@ static double tone_rms(ResamplerConfig cfg, double freqHz, size_t inFrames, doub
     return std::sqrt(acc / (double)(n - settle));
 }
 
+// Fit both quadratures at the ORIGINAL tone and image frequencies, over the
+// ORIGINAL sample interval. No window or frequency-bin relocation is used.
+// A single-bin DFT also measures the main tone's rectangular-record leakage.
+static double fitted_image_db(const std::vector<double>& y, size_t settle, size_t n,
+                              double toneHz, double imageHz, double rate) {
+    double gram[4][5] = {};
+    double rawRe = 0.0, rawIm = 0.0;
+    for (size_t i = settle; i < n; ++i) {
+        const double t = double(i - settle);
+        const double u = 2.0 * PI * toneHz * t / rate, v = 2.0 * PI * imageHz * t / rate;
+        const double x[4] = {std::cos(u), std::sin(u), std::cos(v), std::sin(v)};
+        for (int r = 0; r < 4; ++r) {
+            gram[r][4] += x[r] * y[i];
+            for (int c = 0; c < 4; ++c) gram[r][c] += x[r] * x[c];
+        }
+        rawRe += y[i] * x[2]; rawIm += y[i] * x[3];
+    }
+    // The two distinct frequencies have a well-conditioned Gram matrix.
+    for (int p = 0; p < 4; ++p) {
+        const double pivot = gram[p][p];
+        if (!(pivot > double(n - settle) * 0.1)) return 0.0;
+        for (int c = p; c < 5; ++c) gram[p][c] /= pivot;
+        for (int r = 0; r < 4; ++r) if (r != p) {
+            const double factor = gram[r][p];
+            for (int c = p; c < 5; ++c) gram[r][c] -= factor * gram[p][c];
+        }
+    }
+    const double tone = std::hypot(gram[0][4], gram[1][4]);
+    const double image = std::hypot(gram[2][4], gram[3][4]);
+    // Conservative forward-error allowance for the four serial dot products,
+    // their normal-equation solve and trigonometric argument rounding. This
+    // is an amplitude UPPER bound, not a claimed measurement below precision.
+    const double uncertainty = 32.0 * std::numeric_limits<double>::epsilon() * double(n - settle);
+    const double upper = image / tone + uncertainty;
+    const double raw = std::hypot(rawRe, rawIm) / (tone * double(n - settle) * 0.5);
+    std::printf("    image: raw DFT %.6f dB, fitted %.6f dB, upper bound %.6f dB\n",
+                20.0 * std::log10(raw + 1e-300), 20.0 * std::log10(image / tone + 1e-300),
+                20.0 * std::log10(upper));
+    return 20.0 * std::log10(upper);
+}
+
 static double image_db(ResamplerConfig cfg, double toneHz, double imageHz, size_t inFrames) {
     PolyphaseResampler rs(cfg);
     std::vector<double> x(inFrames), o(rs.maxOutFrames(inFrames) + 16);
@@ -56,20 +98,26 @@ static double image_db(ResamplerConfig cfg, double toneHz, double imageHz, size_
     double* op[1] = { o.data() };
     const size_t n = rs.process(ip, inFrames, op);
     const size_t settle = n / 3;
-    const double w = 2.0 * PI * imageHz / (double)cfg.outRate;
-    const double w0 = 2.0 * PI * toneHz / (double)cfg.outRate;
-    double re = 0.0, im = 0.0, er = 0.0, ei = 0.0;
-    for (size_t i = settle; i < n; ++i) {
-        const double t = (double)(i - settle);
-        re += o[i] * std::cos(w * t);  im += o[i] * std::sin(w * t);
-        er += o[i] * std::cos(w0 * t); ei += o[i] * std::sin(w0 * t);
-    }
-    const double magI = std::sqrt(re * re + im * im);
-    const double magT = std::sqrt(er * er + ei * ei);
-    return 20.0 * std::log10((magI + 1e-300) / (magT + 1e-300));
+    return fitted_image_db(o, settle, n, toneHz, imageHz, double(cfg.outRate));
 }
 
 int main() {
+    // Metrology negative controls: both are genuine tones at 29.1 kHz.
+    // -50 dB must fail the original -60 dB bound; -100 dB must fail the
+    // stronger -140 dB bound, despite passing the old leakage-limited test.
+    for (double injectedDb : {-50.0, -100.0}) {
+        const size_t n = 262144, settle = n / 3;
+        std::vector<double> signal(n);
+        for (size_t i = 0; i < n; ++i)
+            signal[i] = 0.5 * std::sin(2.0 * PI * 15000.0 * double(i) / 705600.0 + 0.37) +
+                        0.5 * std::pow(10.0, injectedDb / 20.0) *
+                        std::sin(2.0 * PI * 29100.0 * double(i) / 705600.0 + 1.1);
+        const double measured = fitted_image_db(signal, settle, n, 15000.0, 29100.0, 705600.0);
+        check(std::fabs(measured - injectedDb) < 0.01 && measured > -140.0 &&
+              (injectedDb < -60.0 || measured > -60.0),
+              "负向对照：真实镜像保留且正确判红", std::to_string(injectedDb) + " -> " + std::to_string(measured));
+    }
+
     printf("=== 1. 滤波器家族变体对比（全部 %zu 个预设）===\n", filter_presets().size());
     {
         printf("  %-26s %8s %4s %4s %10s %10s %10s %9s %9s\n",
@@ -280,7 +328,8 @@ int main() {
             const double i2 = image_db(c2, 15000.0, 29100.0, 16384);
             printf("  %s 镜像抑制: 单级 %.1f dB, 两段式 %.1f dB (差 %.2f dB)\n",
                    pr.name, i1, i2, std::fabs(i2 - i1));
-            check(i1 < -60.0 && i2 < -60.0, std::string(pr.name) + " 镜像抑制深于 -60 dB (受限于未加窗单点 DFT 泄漏底)");
+            check(i1 < -140.0 && i2 < -140.0, std::string(pr.name) + " 真实镜像幅度上界优于 -140 dB");
+            check(i1 < -60.0 && i2 < -60.0, std::string(pr.name) + " 镜像幅度上界深于 -60 dB (同频点双正弦拟合)");
             check(std::fabs(i2 - i1) < 6.0,  std::string(pr.name) + " 两段式镜像抑制与单级相当 (差 < 6 dB)");
 
             // 3) 分块与整块一致性 (333 / 777 / 1024 帧)
@@ -391,35 +440,55 @@ int main() {
         printf("  预设构成：老式 %zu 个，内核长度家族 %zu 个\n", legacyN, newN);
         check(newN >= 2, "存在 tapsPerInput 家族预设", std::to_string(newN) + " 个");
 
-        // 9.2 既有预设的系数特征回归（容差判据，不用逐点哈希）
-        //     为什么不哈希：本项目 Release 带 -ffast-math，求和会被重排/向量化，
-        //     逐点哈希在别的编译标志下必然假红。改用 5 个宏观特征的总和 + 1e-6 相对容差：
-        //     fast-math 抖动约 1e-11，而任何真实参数改动都 >= 1e-3。
-        double g0 = 0, g2 = 0, g3 = 0, gm = 0;
-        int hashed = 0;
+        // 9.2 Disabling the new floor must retain the legacy tap-budget path.
+        // The v3.3.11 table/phase changes are intentional: an old aggregate hash
+        // would lock the old design. Instead compare every coefficient against
+        // an explicitly supplied, independently computed legacy support.
+        int checkedCount = 0;
+        double worstCoefficient = 0.0;
+        bool legacyBudgetUnchanged = true;
         for (const auto& fp : filter_presets()) {
-            if (fp.tapsPerInput != 0) continue;      // 只锁"老式"预设
-            for (auto io : { std::pair<uint32_t, uint32_t>{44100, 88200}, {44100, 384000} }) {
-                auto h = proto_of(fp, io.first, io.second, nullptr, nullptr);
-                double s0 = 0, s2 = 0, s3 = 0, mx = 0;
-                for (size_t i = 0; i < h.size(); ++i) {
-                    const double a = h[i];
-                    s0 += a; s2 += a * a; s3 += (double)i * a * a;
-                    if (std::fabs(a) > mx) mx = std::fabs(a);
-                }
-                g0 += s0; g2 += s2; g3 += s3; gm += mx; ++hashed;
+            if (fp.tapsPerInput != 0 || fp.taps >= 2000000) continue;
+            for (uint32_t outputRate : {88200u, 384000u}) {
+            // Cover high-L starvation without designing every multi-million-tap
+            // prototype twice. These cover LP/MP/IP and Kaiser/Gaussian/BH.
+            const std::string name = fp.name;
+            if (outputRate == 384000 && name != "poly-sinc-short-lp" &&
+                name != "poly-sinc-short-mp" && name != "poly-sinc-gauss-long" &&
+                name != "poly-sinc-ext2-hires-ip" && name != "minringFIR") continue;
+            ResamplerConfig c; c.inRate = 44100; c.outRate = outputRate; c.channels = 1;
+            apply_preset(c, fp);
+            c.twoStage = false; c.allowAutomaticCascade = false; c.applyTapFloor = false;
+            int expectedT = c.minTapsPerInput > 0 ? c.minTapsPerInput : std::max(4, c.totalTaps / int(c.outRate / std::gcd(c.inRate, c.outRate)));
+            if (c.minTapsPerInput == 0 && c.phase == PhaseKind::Linear && c.transition > 0.0)
+                expectedT = std::min(expectedT, std::max(4, int(2.0 * 21.13 / c.transition + 0.5)));
+            PolyphaseResampler actual(c);
+            ResamplerConfig explicitSupport = c; explicitSupport.minTapsPerInput = expectedT;
+            PolyphaseResampler reference(explicitSupport);
+            std::vector<double> h, ref; actual.prototype_into(h); reference.prototype_into(ref);
+            legacyBudgetUnchanged &= actual.tapsPerPhase() == expectedT && h.size() == ref.size();
+            if (h.size() == ref.size()) for (size_t i = 0; i < h.size(); ++i) {
+                const double error = std::fabs(h[i] - ref[i]);
+                worstCoefficient = std::max(worstCoefficient, error);
+                legacyBudgetUnchanged &= std::isfinite(h[i]) && error <= 1e-6 * std::max(1.0, std::fabs(ref[i]));
+            }
+            ++checkedCount;
             }
         }
-        auto close_to = [](double v, double ref) { return std::fabs(v - ref) <= 1e-6 * std::fabs(ref); };
-        auto near = close_to;
-        char buf[256];
-        std::snprintf(buf, sizeof(buf), "sum_s0=%.9g sum_s2=%.9g sum_s3=%.9g sum_mx=%.9g centroid=%.9g (%d 个原型)",
-                      g0, g2, g3, gm, g3 / g2, hashed);
-        printf("  %s\n", buf);
-        check(close_to(g0, 64100.0001622) && near(g2, 55112.7823516) && near(g3, 18162854114.0) &&
-              close_to(gm, 89.936182514) && near(g3 / g2, 329557.923571),
-              "既有 50 个预设（2 个速率）系数特征与基线一致（相对容差 1e-6）",
-              std::to_string(gm));
+        check(legacyBudgetUnchanged && checkedCount >= 70,
+              "关闭 floor 与显式旧式抽头预算逐系数一致（相对容差 1e-6）",
+              "count=" + std::to_string(checkedCount) + " max_error=" + std::to_string(worstCoefficient));
+        // Negative control: the floor must measurably change an undersized FIR.
+        ResamplerConfig undersized; undersized.inRate = 44100; undersized.outRate = 705600;
+        undersized.channels = 1; undersized.totalTaps = 64; undersized.transition = 0.1;
+        undersized.applyTapFloor = false;
+        PolyphaseResampler noFloor(undersized);
+        undersized.applyTapFloor = true; PolyphaseResampler withFloor(undersized);
+        std::vector<double> hf, hn; noFloor.prototype_into(hn); withFloor.prototype_into(hf);
+        const double stopDifference = std::fabs(magnitude_db(hf, 2.0 * 29100.0 / 705600.0) -
+                                                magnitude_db(hn, 2.0 * 29100.0 / 705600.0));
+        check(noFloor.tapsPerPhase() == 4 && withFloor.tapsPerPhase() > 4 && stopDifference > 20.0,
+              "负向对照：误启用 floor 会改变抽头预算和真实镜像频响 (>20 dB)", std::to_string(stopDifference));
 
         // 9.3 新家族：频响与输出采样率无关 + CPU 代价可预测
         for (const char* nm : { "poly-sinc-tight-lp", "apod-20k-tight" }) {
@@ -456,24 +525,25 @@ int main() {
             check(f01max - f01min < 20.0, std::string(nm) + " 频响与输出采样率无关（-0.1dB 跨 5 个速率一致）");
             check(d20max - d20min < 0.005, std::string(nm) + " 20 kHz 处幅度跨速率一致 (<0.005 dB)");
             check(worstSt <= -130.0, std::string(nm) + " 阻带 >=130 dB");
-            check(Tspread == 0 && Tfirst == fp->tapsPerInput,
+            const int expectedT = fp->apodizing
+                ? apod_quality_taps(fp->apodF1, fp->apodF2, fp->window == WindowKind::Gaussian,
+                                    std::max(fp->attenDb, preset_ceiling_db(fp->window)), fp->tapsPerInput)
+                : fp->tapsPerInput;
+            check(Tspread == 0 && Tfirst == expectedT,
                   std::string(nm) + " 每相位抽头数跨速率恒定（CPU 代价可预测）",
                   "T=" + std::to_string(Tfirst));
         }
 
-        // 9.4 现状锁定（铁律 4：未解决项必须在测试里写明基线）
-        //     老式短预设在 L 很大时仍然只有 4 抽头/相位、20 kHz 仍然塌陷。
-        //     本判据是"当前基线"，不是"正确行为"：若把 resampler 的抽头地板默认打开，
-        //     请连同 docs/PCM回放质量-实测与改进.md 一起更新这两条断言。
+        // 9.4 抽头地板生效验证（applyTapFloor=true 修复高 L 下 20 kHz 塌陷）
         {
             const FilterPreset* fp = find_preset("poly-sinc-short-lp", false);
             int L = 0, T = 0;
             auto h = proto_of(*fp, 44100, 384000, &L, &T);
             const double gain = 20.0 * std::log10((double)L);
             const double d20 = magnitude_db(h, 2.0 * 20000.0 / (44100.0 * (double)L)) - gain;
-            printf("  [现状基线] poly-sinc-short-lp @44.1k->384k: T=%d, 20 kHz = %.2f dB（未修）\n", T, d20);
-            check(T == 4, "既有短预设在高 L 下仍是 4 抽头/相位（现状基线）");
-            check(d20 < -4.0, "既有短预设在 384k 下 20 kHz 仍塌陷（现状基线）", std::to_string(d20) + " dB");
+            printf("  [抽头地板] poly-sinc-short-lp @44.1k->384k: T=%d, 20 kHz = %.4f dB\n", T, d20);
+            check(T >= 211, "既有短预设在高 L 下启用抽头地板 (T >= 211)");
+            check(d20 > -0.1, "既有短预设在 384k 下 20 kHz 不再塌陷 (> -0.1 dB)", std::to_string(d20) + " dB");
         }
     }
 

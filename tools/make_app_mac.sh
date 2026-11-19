@@ -24,15 +24,29 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${1:-$ROOT/build-mac}"
 OUT="$ROOT/dist-mac"
-APP="$OUT/RLPlayer.app"
 
-[[ -x "$BUILD/rlplayer_mac" ]] || { echo "!! rlplayer_mac 不存在，请先在 $BUILD 构建"; exit 1; }
+# 1.1.7.63：用户明确「默认开原生版 原生版是要替代 web 版的」。
+# 默认主可执行 = rlplayer_native、产物 RLPlayer.app；web 版只在显式 RL_WEB_APP=1 时
+# 出对照包 RLPlayer-Web.app。旧 RL_NATIVE_APP=1 用法保留（仍出 RLPlayer-Native.app），
+# 不删 web 可执行、不改进运行时逻辑，只改打包默认值。
+APP_BIN_NAME="rlplayer_native"
+APP_DIR_NAME="RLPlayer"
+if [[ -n "${RL_WEB_APP:-}" ]]; then
+  APP_BIN_NAME="rlplayer_mac"
+  APP_DIR_NAME="RLPlayer-Web"
+elif [[ -n "${RL_NATIVE_APP:-}" ]]; then
+  APP_DIR_NAME="RLPlayer-Native"
+fi
+# 只读自省入口（判据用）：打印本次会打包的主可执行名，不打包、不写文件。
+if [[ "${1:-}" == "--print-default-bin" ]]; then echo "$APP_BIN_NAME"; exit 0; fi
+[[ -x "$BUILD/$APP_BIN_NAME" ]] || { echo "!! $APP_BIN_NAME 不存在，请先在 $BUILD 构建"; exit 1; }
+APP="$OUT/$APP_DIR_NAME.app"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # 1) 主可执行 = 原生单进程 App
-cp "$BUILD/rlplayer_mac" "$APP/Contents/MacOS/RLPlayer"
+cp "$BUILD/$APP_BIN_NAME" "$APP/Contents/MacOS/RLPlayer"
 chmod +x "$APP/Contents/MacOS/RLPlayer"
 
 # 2) 数据（OPRA 耳机 EQ 索引；path_in_exe_dir 约定 = exe 同目录）

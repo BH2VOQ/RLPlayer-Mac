@@ -81,6 +81,11 @@ struct FakeDeadSink : rta::render::OutSink {
     long long last_pad() const override { return 9600; }          // 恒满（事故形态）
     long long last_gb_hr() const override { return -999; }        // 写入前就在 pad 检查处被拒
     const std::string& last_error() const override { return e_; }
+    long long render_callbacks() const override { return callbacks; }
+    bool restart_io() override { ++restarts; return restartOk; }
+    long long callbacks = 0;
+    int restarts = 0;
+    bool restartOk = false;
     std::string e_;
 };
 
@@ -291,11 +296,34 @@ int main() {
         ck(contains(m, "last_pad=9600"), "failMsg 含 last_pad（恒满 = 事故特征）", m);
         ck(contains(m, "GetBuffer HRESULT=-999"), "failMsg 含 GetBuffer HRESULT", m);
         ck(contains(m, "High Definition Audio Device") && contains(m, "a18ee6ff"), "failMsg 含设备名与端点 id", m);
-        ck(contains(m, "已自动回退"), "可回退时 failMsg 说明已回退共享", m);
+        ck(contains(m, "将尝试 CoreAudio 共享") && !contains(m, "已自动回退"), "渲染循环仅请求回退，不提前声称已完成", m);
         bool logged = false;
         for (const auto& s : b.logs) if (s.find("RENDERFAIL") != std::string::npos) logged = true;
         ck(logged, "RENDERFAIL 同步进了播放日志（play_log 钩子）");
         ck(b.w0.load() > 0, "w0 计数被循环递增", std::to_string(b.w0.load()));
+    }
+
+    // ---- 1b. 零回调自愈：只重启一次；已有回调时不重启 ----
+    {
+        Bench b; b.feed(3);
+        auto h = b.make(false, false);
+        FakeDeadSink sink; sink.callbacks = 0; sink.restartOk = true;
+        rta::render::render_loop(sink, h);
+        ck(sink.restarts == 1, "零渲染回调时只重启一次输出单元", std::to_string(sink.restarts));
+        ck(h.renderFail, "重启后仍无回调时如实报 RENDERFAIL（不伪装成功）");
+
+        Bench b2; b2.feed(3);
+        auto h2 = b2.make(false, false);
+        FakeDeadSink sink2; sink2.callbacks = 2; sink2.restartOk = true;
+        rta::render::render_loop(sink2, h2);
+        ck(sink2.restarts == 0, "已有稳定渲染回调时不重启（避免打断正在出声的流）", std::to_string(sink2.restarts));
+
+        // 现场形态：只有 1 次回调就停流 ⟹ 必须重启一次（否则永远不会自愈）。
+        Bench b3; b3.feed(3);
+        auto h3 = b3.make(false, false);
+        FakeDeadSink sink3; sink3.callbacks = 1; sink3.restartOk = true;
+        rta::render::render_loop(sink3, h3);
+        ck(sink3.restarts == 1, "只发生 1 次回调时重启一次输出单元", std::to_string(sink3.restarts));
     }
 
     // ---- 2. DoP：不可回退文案 ----
@@ -314,7 +342,7 @@ int main() {
         auto h = b.make(/*fallbackOk=*/false, /*dop=*/false);
         FakeDeadSink sink;
         rta::render::render_loop(sink, h);
-        ck(h.renderFail && contains(h.failMsg, "WASAPI 共享"),
+        ck(h.renderFail && contains(h.failMsg, "CoreAudio 共享"),
            "不可回退场景 failMsg 建议切换共享", h.failMsg);
     }
 

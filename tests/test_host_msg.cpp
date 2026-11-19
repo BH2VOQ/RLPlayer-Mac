@@ -166,6 +166,64 @@ int main() {
         }
     }
 
+    std::printf("=== 7) 2026-11-11：反馈接入后台（feedback:submit / feedback:watchdog） ===\n");
+    {
+        // 7.1 探活：无参命令（页面打开反馈面板时调；结果由宿主异步回传 feedback:status）
+        {
+            const auto m = parse_host_message("feedback:watchdog");
+            ck(m.action == HostAction::FeedbackWatchdog, "feedback:watchdog → FeedbackWatchdog");
+        }
+        // 7.2 提交：无正文（宿主会判 empty_text 拒绝，但协议层不崩、不误判）
+        {
+            const auto m = parse_host_message("feedback:submit");
+            ck(m.action == HostAction::FeedbackSubmit, "feedback:submit → FeedbackSubmit");
+            ck(m.arg.empty() && !m.attach_diag, "无正文、默认不带诊断包");
+        }
+        // 7.3 带正文
+        {
+            const auto m = parse_host_message("feedback:submit:播放破音");
+            ck(m.action == HostAction::FeedbackSubmit, "submit:<正文> → FeedbackSubmit");
+            ck(m.arg == "播放破音", "正文原样取出（清洗仍由宿主/纯逻辑层负责）", m.arg);
+            ck(!m.attach_diag, "默认不带诊断包");
+        }
+        // 7.4 带诊断包（诊断由宿主用本进程内的 diag 组装，页面**不给路径**）
+        {
+            const auto m = parse_host_message("feedback:submit+diag:切歌卡 1 秒");
+            ck(m.action == HostAction::FeedbackSubmit, "submit+diag → FeedbackSubmit");
+            ck(m.arg == "切歌卡 1 秒", "正文正确切出", m.arg);
+            ck(m.attach_diag, "attach_diag=true");
+        }
+        // 7.5 ⚠️ 安全/健壮性核心：正文里的冒号、换行、中文、甚至 "|diag:" 都不能把消息切坏。
+        //     submit 命令**没有路径段**（诊断由宿主生成），所以这里不做 "|diag:" 切分。
+        {
+            const auto m = parse_host_message("feedback:submit+diag:a:b c\n第二行|diag:/tmp/x");
+            ck(m.action == HostAction::FeedbackSubmit, "复杂正文 → FeedbackSubmit");
+            ck(m.arg == "a:b c\n第二行|diag:/tmp/x", "正文原样（含换行与 |diag:）", m.arg);
+            ck(m.attach_diag && m.diag_path.empty(),
+               "attach_diag 为真但**没有路径**（诊断由宿主生成，页面不能指定文件）", m.diag_path);
+        }
+        // 7.6 长正文不截断：16384 字节是后台上限，截断/清洗是纯逻辑层的事，协议层只搬运
+        {
+            std::string big(16384, 'x');
+            const auto m = parse_host_message("feedback:submit:" + big);
+            ck(m.action == HostAction::FeedbackSubmit && m.arg.size() == big.size(),
+               "16384 字节正文原样传递（协议层不截断）", std::to_string(m.arg.size()));
+        }
+        // 7.7 形态不认识 → None（不猜、不发）
+        for (const char* bad : {"feedback:submitX", "feedback:submit+", "feedback:submit+diagX",
+                                "feedback:watchdogs", "feedback:watchdog:x"}) {
+            const auto m = parse_host_message(bad);
+            ck(m.action == HostAction::None, "非法 submit/watchdog 形态 → None（不动作）",
+               std::string(bad) + " → " + m.reason);
+        }
+        // 7.8 旧邮件通道必须继续可用（功能不能删除）
+        {
+            const auto m = parse_host_message("feedback:compose:老通道还在");
+            ck(m.action == HostAction::FeedbackCompose && m.arg == "老通道还在",
+               "旧 compose 通道仍解析为 FeedbackCompose", m.arg);
+        }
+    }
+
     std::printf("\n%s（%d 项失败）\n", g_fail == 0 ? "host_msg 全部通过" : "host_msg 有失败", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

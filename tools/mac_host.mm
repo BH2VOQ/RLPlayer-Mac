@@ -41,6 +41,8 @@
 #include <condition_variable>
 #include <chrono>
 #include <atomic>
+#include <ctime>
+#include <sys/stat.h>
 
 #if __has_include("rlapp_core.h")
 #include "rlapp_core.h"
@@ -53,6 +55,7 @@ bool exit_requested();
 void request_shutdown();
 void stop_embedded();
 int cli_main(int argc, char** argv);
+std::string diag_json(std::size_t budget_bytes = 0);
 }
 #else
 namespace rta::net {
@@ -77,6 +80,7 @@ bool exit_requested();
 void request_shutdown();
 void stop_embedded();
 int cli_main(int argc, char** argv);
+std::string diag_json(std::size_t budget_bytes = 0);
 }
 #endif
 
@@ -115,6 +119,18 @@ struct CheckResult {
 #include "mac_feedback.h"
 #endif
 
+// 2026-11-11：反馈接入 rlplayer.rainlain.com 后台（macOS 独立命名空间）。
+// 传输走 net/http_client.h（平台层 libcurl，**阻塞同步**；调用点自己开后台队列），
+// 校验/请求体/响应解析/错误分类全在 net/feedback_api.h（有离线单测），安装 ID 在 net/install_id.h。
+// 与 RL_WITH_FEEDBACK 同一个构建宏门控：test_mac_transport 复用本文件，
+// 但它不链接 http_client / rlapp_core / mac_feedback 的实现，必须走 "unsupported" 回退。
+#if defined(RL_WITH_FEEDBACK) && __has_include("net/feedback_api.h")
+#define RL_HAVE_FEEDBACK_BACKEND 1
+#include "net/feedback_api.h"
+#include "net/install_id.h"
+#include "net/http_client.h"
+#endif
+
 // 1.1.1 D2：更新检查失败也要留稳定错误码（不只在原生弹窗里说人话）。
 #if __has_include("diag/diag.h")
 #include "diag/diag.h"
@@ -125,7 +141,8 @@ struct CheckResult {
 #else
 namespace rta::platform {
 enum class HostAction { None, Minimize, Maximize, Close, Drag, Theme, OpenUrl, Resize, PickDir,
-                        UpdateCheck, UpdateInstall, FeedbackCompose, FeedbackDiagOnly };
+                        UpdateCheck, UpdateInstall, FeedbackCompose, FeedbackDiagOnly,
+                        FeedbackSubmit, FeedbackWatchdog };
 struct HostMessage {
     HostAction action = HostAction::None;
     std::string arg;
@@ -185,6 +202,16 @@ inline HostMessage parse_host_message(const std::string& m) {
     // 协议里**没有**收件人字段）。回退版只做最基本的形态切分，清洗仍在 rta::feedback 里。
     if (m.rfind("feedback:", 0) == 0) {
         std::string rest = m.substr(9);
+        // 2026-11-11 反馈后台（与 src/platform/host_msg.h 保持同步；必须先于 "|diag:" 切分）
+        if (rest == "watchdog") { r.action = HostAction::FeedbackWatchdog; return r; }
+        if (rest == "submit") { r.action = HostAction::FeedbackSubmit; return r; }
+        if (rest == "submit+diag") { r.action = HostAction::FeedbackSubmit; r.attach_diag = true; return r; }
+        if (rest.rfind("submit+diag:", 0) == 0) {
+            r.action = HostAction::FeedbackSubmit; r.arg = rest.substr(12); r.attach_diag = true; return r;
+        }
+        if (rest.rfind("submit:", 0) == 0) {
+            r.action = HostAction::FeedbackSubmit; r.arg = rest.substr(7); return r;
+        }
         const std::string dtag = "|diag:";
         const std::size_t dpos = rest.find(dtag);
         if (dpos != std::string::npos) {
@@ -208,6 +235,102 @@ inline HostMessage parse_host_message(const std::string& m) {
     return r;
 }
 }
+#endif
+
+// ===========================================================================
+// 2026-11-11：反馈后台的宿主侧小工具（安装 ID 持久化 / 版本与系统串）
+//
+// 状态目录口径与 rtaweb 的 runtime_state_dir 一致：
+//   RLPLAYER_STATE_DIR（测试隔离） > ~/Library/Application Support/RLPlayer
+// 这里刻意不依赖平台层的 config_dir_utf8()：本文件会被 test_mac_transport
+// 以 #include 方式复用，那条路径不一定链接平台层，自己按同一条规则解析更稳。
+// ===========================================================================
+#if defined(RL_HAVE_FEEDBACK_BACKEND)
+namespace feedback_host {
+
+inline std::string state_dir() {
+    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+        if (*env) {
+            std::string s(env);
+            while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+            if (!s.empty()) return s;
+        }
+    }
+    @autoreleasepool {
+        NSArray<NSString*>* dirs = NSSearchPathForDirectoriesInDomains(
+            NSApplicationSupportDirectory, NSUserDomainMask, YES);
+        if (dirs.count > 0) {
+            NSString* p = [dirs[0] stringByAppendingPathComponent:@"RLPlayer"];
+            const char* u = [p fileSystemRepresentation];
+            if (u && *u) return std::string(u);
+        }
+    }
+    return std::string();
+}
+
+// 安装 ID：读过就用（只认规范形态），没有/非法就生成 128 位随机并原子落盘（0600）。
+// 为什么必须持久化：反馈后台用它做"这单是不是你的"的凭据（查状态 / 取诊断 / 7 天内删除），
+// 每次启动换一个 ID 会让用户失去对自己工单的所有权。文件里只有这个不透明 ID，无任何账号信息。
+inline bool ensure_install_id(std::string& out, std::string& err) {
+    out.clear();
+    err.clear();
+    const std::string dir = state_dir();
+    if (dir.empty()) { err = "找不到状态目录（无法保存反馈安装 ID）"; return false; }
+    const std::string path = dir + "/rlplayer-feedback-client-id";
+
+    if (FILE* f = std::fopen(path.c_str(), "rb")) {
+        char buf[256] = {0};
+        const std::size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        std::string s(buf, n);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t'))
+            s.pop_back();
+        if (rta::feedback::install_id_valid(s)) { out = s; return true; }
+        // 内容非法：这是本程序自己的状态文件，重新生成是唯一正确处置（不能拿坏 ID 发请求）
+    }
+
+    unsigned char entropy[16];
+    arc4random_buf(entropy, sizeof entropy);
+    const std::string id = rta::feedback::install_id_new(entropy);
+
+    ::mkdir(dir.c_str(), 0700);   // 已存在则忽略（EEXIST）
+    const std::string tmp = path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) { err = "无法写入反馈安装 ID"; return false; }
+    const std::string line = id + "\n";
+    const std::size_t wn = std::fwrite(line.data(), 1, line.size(), f);
+    std::fclose(f);
+    if (wn != line.size()) { std::remove(tmp.c_str()); err = "反馈安装 ID 写入不完整"; return false; }
+    ::chmod(tmp.c_str(), 0600);
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        err = "反馈安装 ID 落盘失败";
+        return false;
+    }
+    out = id;
+    return true;
+}
+
+inline std::string version_string() {
+#ifdef RLPLAYER_VERSION_STR
+    return RLPLAYER_VERSION_STR;
+#else
+    return "unknown";
+#endif
+}
+
+// 后台 os 字段（≤120 字符）："macOS 27.2.0 · RLPlayer 1.1.7"
+inline std::string os_string() {
+    std::string os = "macOS";
+    @autoreleasepool {
+        const NSOperatingSystemVersion v = [[NSProcessInfo processInfo] operatingSystemVersion];
+        os += " " + std::to_string((long)v.majorVersion) + "." +
+              std::to_string((long)v.minorVersion) + "." + std::to_string((long)v.patchVersion);
+    }
+    return os + " · RLPlayer " + version_string();
+}
+
+}  // namespace feedback_host
 #endif
 
 // ---------------------------------------------------------------------------
@@ -1305,6 +1428,27 @@ static bool native_ui_lang_is_en() {
 #endif
             break;
         }
+        // ---------------- 2026-11-11 反馈后台（rlplayer.rainlain.com） ----------------
+        // 与邮件通道同一条纪律：**地址 / 安装 ID / 诊断包内容都不来自页面**。
+        // 页面只给"正文"和"要不要诊断包"；其余全是宿主常量与本机状态。
+        case HostAction::FeedbackWatchdog: {
+#ifdef RL_HAVE_FEEDBACK_BACKEND
+            [self handleFeedbackWatchdog];
+#else
+            [self emitToPage:@"feedback:status:{\"stage\":\"watchdog\",\"ok\":false,"
+                             "\"message\":\"本构建未启用反馈后台模块\"}"];
+#endif
+            break;
+        }
+        case HostAction::FeedbackSubmit: {
+#ifdef RL_HAVE_FEEDBACK_BACKEND
+            [self handleFeedbackSubmit:hm];
+#else
+            [self emitToPage:@"feedback:status:{\"stage\":\"failed\",\"code\":\"unsupported\","
+                             "\"message\":\"本构建未启用反馈后台模块\"}"];
+#endif
+            break;
+        }
         case HostAction::None:
             break;
     }
@@ -1399,6 +1543,132 @@ static bool native_ui_lang_is_en() {
     if (!json) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         [self emitToPage:[@"feedback:status:" stringByAppendingString:json]];
+    });
+}
+#endif
+
+// ---------------- 2026-11-11 反馈后台：宿主侧执行 ----------------
+// 回传协议（与邮件通道同一个 feedback:status: 通道，页面 JSON.parse）：
+//   {"stage":"watchdog","ok":true,"ratePerMinute":5,"textBytes":16384,"diagBytes":8388608}
+//   {"stage":"packaging"}                          // 正在组装诊断包 JSON
+//   {"stage":"uploading","kb":123}                 // 正在 POST
+//   {"stage":"sent","id":"FB-...","diagStored":true}
+//   {"stage":"failed","code":"...","message":"...","retryable":true}
+//
+// 三道硬闸门：
+//   ① 安装 ID 只从本机状态读/生成，页面无法指定（后台用它做"这单是不是你的"凭据）；
+//   ② 诊断包在本进程内组装（复用 /api/diagzip 的同一套脱敏与预算），页面不能指定文件；
+//   ③ 后台地址是 net/feedback_api.h 的代码常量，页面不能改。
+#ifdef RL_HAVE_FEEDBACK_BACKEND
+- (void)handleFeedbackWatchdog {
+    // 阻塞 GET ⟹ 必须离开主线程（主线程跑 WKWebView，卡 10 秒等于界面假死）
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        const auto r = rta::net::http_get(rta::feedback::kFeedbackWatchdogUrl, {},
+                                         rta::feedback::kFeedbackWatchdogTimeoutMs);
+        const std::string body(r.body.begin(), r.body.end());
+        const auto wd = rta::feedback::parse_feedback_watchdog(r.status, body);
+        NSMutableDictionary* d = [NSMutableDictionary dictionary];
+        d[@"stage"] = @"watchdog";
+        d[@"ok"] = @(wd.reachable);
+        d[@"status"] = @((double)wd.status);
+        d[@"ratePerMinute"] = @((double)wd.rate_per_minute);
+        d[@"textBytes"] = @((double)wd.text_bytes);
+        d[@"diagBytes"] = @((double)wd.diag_bytes);
+        if (!wd.reachable) {
+            std::string msg = wd.error.empty() ? "反馈后台不可达" : wd.error;
+            if (r.timedOut) msg = "连接反馈后台超时";
+            d[@"message"] = [NSString stringWithUTF8String:msg.c_str()] ?: @"反馈后台不可达";
+        }
+        [self emitFeedbackJson:d];
+    });
+}
+
+- (void)handleFeedbackSubmit:(const rta::platform::HostMessage &)hm {
+    namespace fb = rta::feedback;
+    // 一次只允许一条在飞：连点「发送」不会在后台建出多张工单（幂等键是第二道保险）
+    static std::atomic<bool> s_busy{false};
+    bool expected = false;
+    if (!s_busy.compare_exchange_strong(expected, true)) {
+        [self emitFeedbackJson:@{ @"stage": @"failed", @"code": @"busy",
+                                  @"message": @"上一条反馈还在上传中，请稍候" }];
+        return;
+    }
+    // ⚠️ 异步 block 必须按值捕获（mac_update 的悬垂教训）：hm 是栈上的 const 引用
+    const std::string text = hm.arg;
+    const bool attach_diag = hm.attach_diag;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        auto fail = [&](const std::string& code, const std::string& msg) {
+            NSMutableDictionary* d = [NSMutableDictionary dictionary];
+            d[@"stage"] = @"failed";
+            d[@"code"] = [NSString stringWithUTF8String:code.c_str()] ?: @"";
+            d[@"message"] = [NSString stringWithUTF8String:msg.c_str()] ?: @"发送失败";
+            [self emitFeedbackJson:d];
+            s_busy.store(false);
+        };
+
+        // ① 安装 ID（本机状态；页面无从指定）
+        std::string client, ierr;
+        if (!feedback_host::ensure_install_id(client, ierr)) { fail("client_id_failed", ierr); return; }
+
+        // ② 诊断包：本进程内组装成单文件 JSON（与 /api/diagzip 共用同一套组装/脱敏）
+        std::string diag_json;
+        if (attach_diag) {
+            [self emitFeedbackJson:@{ @"stage": @"packaging" }];
+            // 6 MiB 预算：后台解码后上限 8 MiB，base64 传输还有 4/3 膨胀，留足余量
+            diag_json = rlapp::diag_json(6u * 1024u * 1024u);
+            if (diag_json.empty()) {
+                fail("diag_failed", "诊断包生成失败（可取消勾选「附带诊断包」只发正文）");
+                return;
+            }
+        }
+
+        // ③ 请求体（纯逻辑层负责校验 / JSON 转义 / base64 / 字段长度）
+        fb::FeedbackUploadInput in;
+        in.text = text;
+        in.version = feedback_host::version_string();
+        in.os = feedback_host::os_string();
+        in.client = client;
+        in.diag_json = diag_json;
+        in.attach_diag = attach_diag;
+        unsigned int rnd = 0;
+        arc4random_buf(&rnd, sizeof rnd);
+        in.idempotency_key = fb::make_feedback_idempotency_key((long long)std::time(nullptr), rnd);
+
+        const auto body = fb::build_feedback_upload(in);
+        if (!body.ok) { fail(body.code, body.error); return; }
+
+        NSMutableDictionary* up = [NSMutableDictionary dictionary];
+        up[@"stage"] = @"uploading";
+        up[@"kb"] = @((double)((body.json.size() + 1023) / 1024));
+        [self emitFeedbackJson:up];
+
+        // ④ 上传（阻塞 libcurl，跑在本后台队列；超时 120s 见 kFeedbackUploadTimeoutMs）
+        std::vector<std::string> headers = {"X-RLPlayer-Platform: mac",
+                                            "X-RLPlayer-Client: " + client};
+        const auto r = rta::net::http_post(fb::kFeedbackUploadUrl, body.json, headers,
+                                           "application/json", fb::kFeedbackUploadTimeoutMs);
+        const std::string reply_body(r.body.begin(), r.body.end());
+        const auto reply = fb::parse_feedback_upload_reply(r.status, reply_body);
+        if (reply.ok) {
+            NSMutableDictionary* d = [NSMutableDictionary dictionary];
+            d[@"stage"] = @"sent";
+            d[@"id"] = [NSString stringWithUTF8String:reply.id.c_str()] ?: @"";
+            d[@"diagStored"] = @(reply.diag_stored);
+            [self emitFeedbackJson:d];
+            s_busy.store(false);
+            return;
+        }
+        const auto f = fb::describe_feedback_failure(r.status, reply.code, reply.error,
+                                                     r.timedOut, r.error);
+        NSMutableDictionary* d = [NSMutableDictionary dictionary];
+        d[@"stage"] = @"failed";
+        d[@"code"] = [NSString stringWithUTF8String:f.code.c_str()] ?: @"";
+        d[@"message"] = [NSString stringWithUTF8String:f.message.c_str()] ?: @"发送失败";
+        d[@"retryable"] = @(f.retryable);
+        d[@"status"] = @((double)r.status);
+        [self emitFeedbackJson:d];
+        s_busy.store(false);
     });
 }
 #endif

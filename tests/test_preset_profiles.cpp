@@ -143,7 +143,7 @@ int main() {
         const DeviceCaps c = coreaudio_caps(kFull);
         const SourceInfo src = pcm_src(44100, 16);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
-        ck(s.rate == "follow", "Case 1: bitperfect/PCM ⟹ rate=follow（不重采样）");
+        ck(s.rate == "src", "Case 1: bitperfect/PCM ⟹ rate=src（保持源采样率，不重采样）");
         ck(s.dsd == 0, "Case 1: bitperfect/PCM ⟹ dsd=0（不调制）");
         ck(s.volumeDb == 0.0, "Case 1: bitperfect/PCM ⟹ 音量 0 dB");
         ck(s.shaper == "none", "Case 1: bitperfect/PCM ⟹ shaper=none（无抖动/整形）");
@@ -160,7 +160,7 @@ int main() {
         const SourceInfo src = pcm_src(44100, 24);
         const PresetSettings s = plan_preset(PresetProfile::BitPerfect, c, src);
         const BitPerfectCheck bp = check_bit_perfect(s, c, src);
-        ck(s.rate == "follow" && bp.ok, "Case 2: bitperfect/96k 设备 ⟹ 仍是 follow 且七条件全过");
+        ck(s.rate == "src" && bp.ok, "Case 2: bitperfect/96k 设备 ⟹ 仍是 src 且八条件全过");
     }
 
     // ---- ③ 负向对照：位深降低必须被判出来（证明七条件不是摆设） ----
@@ -241,11 +241,11 @@ int main() {
         ck(rate_num(s.rate) <= kPresetRateCap, "Case 9: rate 数值 ≤ 384000");
     }
 
-    // ---- ⑩ PCM 升频：探测为空 ⟹ follow + note（不假装支持） ----
+    // ---- ⑩ PCM 升频：探测为空 ⟹ src + note（不假装支持） ----
     {
         const DeviceCaps c = coreaudio_caps({});
         const PresetSettings s = plan_preset(PresetProfile::Pcm, c, pcm_src(44100, 16));
-        ck(s.rate == "follow", "Case 10: pcm/探测为空 ⟹ rate=follow", s.rate);
+        ck(s.rate == "src", "Case 10: pcm/探测为空 ⟹ rate=src", s.rate);
         ck(has_note(s, "探测为空"), "Case 10: note 写明探测为空、已降级");
     }
 
@@ -288,7 +288,7 @@ int main() {
         ck(s.modFamily == "ec" && s.modOrder == 7, "Case 13: dsd ⟹ modfamily=ec / modorder=7");
         ck(s.filter == "poly-sinc-tight-lp" && s.minTapsPerInput == 512,
            "Case 13: dsd ⟹ poly-sinc-tight-lp + 512 taps");
-        ck(s.rate == "follow", "Case 13: dsd ⟹ rate=follow");
+        ck(s.rate == "src", "Case 13: dsd ⟹ rate=src");
         ck(s.shaper == "none", "Case 13: dsd ⟹ shaper=none（DoP 强制无抖动）");
         ck(s.directSdm == 0, "Case 13: 源是 PCM ⟹ directSdm=0");
         ck(has_note(s, "原生"), "Case 13: note 写明走原生");
@@ -332,9 +332,6 @@ int main() {
         cases.push_back({ "coreaudio-192k", coreaudio_caps(k192k) });
         cases.push_back({ "coreaudio-empty", coreaudio_caps({}) });
         cases.push_back({ "asio-native-dsd512", asio_caps(kFull, "dsd512") });
-        DeviceCaps shared = coreaudio_caps(kFull);
-        shared.exclusive = false;
-        cases.push_back({ "shared-non-exclusive", shared });
         std::vector<SourceInfo> srcs;
         srcs.push_back(pcm_src(44100, 16));
         srcs.push_back(pcm_src(44100, 24));
@@ -345,6 +342,7 @@ int main() {
         for (const auto& cs : cases) {
             for (const auto& src : srcs) {
                 DeviceCaps dc = cs.c;
+                if (dc.rates.empty()) dc.exclusive = true; // 探测为空时单独测条件⑧之外的 7 条
                 if (src.srcBits == 32) dc.bits = 32;    // 32-bit 源需要 32-bit 输出才不降位深
                 const PresetSettings s = plan_preset(PresetProfile::BitPerfect, dc, src);
                 const BitPerfectCheck bp = check_bit_perfect(s, dc, src);
@@ -354,7 +352,17 @@ int main() {
                 }
             }
         }
-        ck(matrixFail == 0, "Case 17: 6 设备 × 4 源 ⟹ bitperfect 档七条件全部成立", firstBad);
+        ck(matrixFail == 0, "Case 17: 5 独占设备 × 4 源 ⟹ bitperfect 档八条件全部成立", firstBad);
+
+        // 条件⑧负向对照：共享模式必须判不通过且带共享说明
+        DeviceCaps shared = coreaudio_caps(kFull);
+        shared.exclusive = false;
+        const PresetSettings sShared = plan_preset(PresetProfile::BitPerfect, shared, pcm_src(44100, 16));
+        const BitPerfectCheck bpShared = check_bit_perfect(sShared, shared, pcm_src(44100, 16));
+        ck(!bpShared.ok && !bpShared.violations.empty() &&
+           bpShared.violations[0].find("⑧") != std::string::npos,
+           "Case 17[负向]: 共享模式 (exclusive=false) ⟹ 八条件判不过且点名⑧");
+        ck(has_note(sShared, "共享"), "Case 17[负向]: bitperfect 在共享模式下 note 明确提示共享重采样");
     }
 
     // ---- ⑱ 档位名 / 解析 / DoP 载波换算 ----
@@ -400,7 +408,7 @@ int main() {
         ck(s.minTapsPerInput == 512, "Case 19: pcm2dsd ⟹ minTapsPerInput=512",
            std::to_string(s.minTapsPerInput));
         ck(s.shaper == "none", "Case 19: pcm2dsd ⟹ shaper=none（抖动交给 1-bit 量化）", s.shaper);
-        ck(s.rate == "follow", "Case 19: pcm2dsd ⟹ rate=follow（载波由 dsd 档决定，不由 rate）", s.rate);
+        ck(s.rate == "src", "Case 19: pcm2dsd ⟹ rate=src（载波由 dsd 档决定，不由 rate）", s.rate);
         ck(s.directSdm == 0, "Case 19: pcm2dsd ⟹ directSdm=0（PCM 源没有直通）");
         ck(s.volumeDb == 0.0 && s.clearEqIr, "Case 19: pcm2dsd ⟹ 音量 0 dB + 清空 EQ/IR");
         ck(has_note(s, "DoP"), "Case 19: note 写明走 DoP");
@@ -463,7 +471,7 @@ int main() {
     {
         const DeviceCaps c = coreaudio_caps({});
         const PresetSettings s = plan_preset(PresetProfile::PcmToDsd, c, pcm_src(44100, 16));
-        ck(s.dsd == 0 && s.rate == "follow", "Case 22: pcm2dsd/探测为空 ⟹ dsd=0 且 rate=follow",
+        ck(s.dsd == 0 && s.rate == "src", "Case 22: pcm2dsd/探测为空 ⟹ dsd=0 且 rate=src",
            s.rate);
         ck(has_note(s, "降级为 PCM 升频"), "Case 22: note 写明已降级");
         ck(has_note(s, "探测为空"), "Case 22: note 点明探测为空（不假装支持）");
@@ -514,60 +522,60 @@ int main() {
         const PresetProfile three[3] = { PresetProfile::BitPerfect, PresetProfile::Pcm, PresetProfile::Dsd };
         // 2026-10-26 加第 4 档**之前**的实测基线（54 条 = 6 设备 × 3 源 × 3 档，顺序固定）
         static const char* kBaseline[54] = {
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|64||0||0|none|1|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|64||0||0|none|1|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
         "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
         "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
         "dsd|96000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|64||0||0|none|1|1|0",
+        "dsd|src|64|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|64||0||0|none|1|1|0",
         "pcm|192000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|64|ec|7|poly-sinc-tight-lp|512|none|1|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
-        "pcm|follow|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|0||0|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
-        "pcm|follow|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|0||0|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|64||0||0|none|0|1|0",
-        "pcm|follow|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|0||0|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|64|ec|7|poly-sinc-tight-lp|512|none|1|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
+        "pcm|src|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|src|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
+        "pcm|src|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|src|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|64||0||0|none|0|1|0",
+        "pcm|src|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
+        "dsd|src|0||0|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|64||0||0|none|1|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|64||0||0|none|1|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|256|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|0||0||0|none|0|1|0",
+        "dsd|src|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|0||0||0|none|0|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
-        "bitperfect|follow|64||0||0|none|1|1|0",
+        "dsd|src|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "bitperfect|src|64||0||0|none|1|1|0",
         "pcm|384000|0||0|poly-sinc-tight-lp|512|auto|0|1|0",
-        "dsd|follow|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
+        "dsd|src|512|ec|7|poly-sinc-tight-lp|512|none|0|1|0",
         };
         int idx = 0, mismatch = 0;
         std::string firstBad;

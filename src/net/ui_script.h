@@ -578,43 +578,29 @@ function bindUpdateCard() {
 }
 
 // ============================================================================
-// 2026-10-26 反馈通道（用户：点了按钮完全没反应 → 改走 Cloudflare Worker）
+// 2026-11-11 反馈通道：接入 rlplayer.rainlain.com 后台（macOS 独立命名空间）
 //
-// 演进过程（如实记录，避免后来者重复踩坑）：
-//   ① 最初设计 = 打开系统邮件客户端（NSSharingServiceNameComposeEmail），
-//      用户在自己已登录的邮箱里点发送。理由是不在二进制里存任何凭据。
-//      但实测暴露两个致命问题：
-//        · 页面侧**一行都没接**（#sp_fbsend 没有 onclick，feedback:status 没有接收分支）
-//          ⟹ 用户点按钮完全没反应。这是"壳侧写完 ≠ 能用"的典型。
-//        · 即使接上了，本机 Mail.app 没有可用账号时 performWithItems 仍回传"已打开"，
-//          用户点「发送」发不出去 ⟹ **谎报成功**（违反铁律 3）。
-//   ② 用户决定（2026-10-26）：**别折腾邮箱了，走 Cloudflare Worker**。
-//      「用户什么都不用调，直接就能发给我」才是对的体验。
+// 演进（如实记录，别重复踩）：
+//   ① 邮件（NSSharingService）：本机 Mail 无账号时仍回"已打开" ⟹ 谎报成功；
+//   ② Cloudflare Worker：2026-11-11 实测 HTTP 000（连不上），页面 fetch 还要求 CORS；
+//   ③ 现在：后台 https://rlplayer.rainlain.com/api/v1/feedback/macos
+//      · 后台**没有 CORS**（OPTIONS 直接 501）⟹ 页面不能直接 fetch，必须走宿主原生 libcurl；
+//      · 宿主负责：探活、组装诊断包 JSON、POST、幂等键、安装 ID（页面拿不到也不需要）；
+//      · 页面只发抽象命令，结果走 "feedback:status:<JSON>"（与 update:status 同一套通道）。
 //
-// 现在的架构（零凭据、零配置、零用户操作）：
+// 协议（真相源 src/platform/host_msg.h）：
+//   页面 → 宿主：feedback:watchdog
+//               feedback:submit[:<正文>]
+//               feedback:submit+diag[:<正文>]
+//   宿主 → 页面：feedback:status:{"stage":"watchdog|packaging|uploading|sent|failed", ...}
 //
-//   页面  ──POST JSON──▶  Cloudflare Worker  ──GitHub API──▶  Issue / 私有仓库
-//                              （token 只在 Worker 环境变量里，客户端永远拿不到）
-//
-//   * 客户端**不含任何 token**：Worker URL 是公开的，被反编译也无所谓
-//   * DDoS：Cloudflare 免费套餐自带，源站不暴露（用户明确担心这个）
-//   * 诊断包：Worker 负责转存（>64KB 不进 issue body）
-//
-// 协议（见 worker/feedback-worker.js）：
-//   POST <WORKER_URL>
-//   Content-Type: application/json
-//   { "text": "正文", "version": "1.0.7", "os": "macOS 27.0.1 / arm64",
-//     "diag": "<base64 可选，诊断包 zip>" }
-//   → 200 {"ok":true,"id":"<工单号>"}
-//   → 4xx {"ok":false,"error":"原因"}
-//
-// ⚠️ WORKER_URL 留空 = 功能未启用，页面会如实说"反馈通道未配置"，绝不假装发送成功。
-//    部署 Worker 后把地址填到这里（或由宿主注入）即可。
+// 硬约束：
+//   * 页面不能指定 URL / 收件人 / 文件路径（后台地址是宿主常量，安装 ID 是宿主状态）；
+//   * 探活没成功之前按钮禁用（后台不可达就明说，绝不假装发送成功）；
+//   * 正文按**字节**计（后台上限 16384 字节）；超限立刻标红，不悄悄截断。
 // ============================================================================
-var FB = { busy: false, diagPath: '' };
-
-// Worker 地址（部署后填入；留空则明确报未配置，不假装成功）
-var FB_WORKER_URL = 'https://rlplayer-feedback.bh2voq.workers.dev';
+var FB_MAX_BYTES = 16384;
+var FB = { busy: false, serverOk: null, checking: false, lastId: '', wdTimer: 0, lastCheck: 0 };
 
 function fbMsg(t, kind) {
   var el = D('sp_fbmsg');
@@ -624,124 +610,164 @@ function fbMsg(t, kind) {
                  : kind === 'ok' ? 'var(--ok-text)'
                  : kind === 'warn' ? 'var(--warn)' : 'var(--mut2)';
 }
+// 通道状态行（探活结果 / 不可用原因）。与发送结果分开显示：
+// 「通道连不上」和「这封反馈发失败」是两件事，用户要能分清。
+function fbChannel(t, kind) {
+  var el = D('sp_fbchan');
+  if (!el) return;
+  el.textContent = t || '';
+  el.style.color = kind === 'err' ? 'var(--danger)'
+                 : kind === 'ok' ? 'var(--ok-text)'
+                 : kind === 'warn' ? 'var(--warn)' : 'var(--mut2)';
+}
+// 提交按钮的唯一开关：忙 / 非 App / 通道未确认可用 时禁用。
+// 为什么非 App 也禁用：浏览器直开没有宿主通道，按钮点了也只能得到一句"不可用"，
+// 不如一开始就灰着并说明原因（不假装能用）。
 function fbBusy(on) {
   FB.busy = !!on;
   var btn = D('sp_fbsend');
-  if (btn) { btn.disabled = !!on; btn.textContent = on ? '正在发送…' : '发送反馈'; }
+  if (btn) {
+    btn.disabled = !!on || !IS_MAC_HOST || FB.serverOk !== true;
+    btn.textContent = on ? '正在发送…' : '发送反馈';
+  }
+  var retry = D('sp_fbretry');
+  if (retry) retry.style.display = (!IS_MAC_HOST || FB.serverOk === true || FB.checking) ? 'none' : '';
+}
+// UTF-8 字节数：后台上限是**字节**（16384），不是字符 —— 中文用户按字符数会超限
+function fbBytes(s) {
+  s = String(s == null ? '' : s);
+  try {
+    if (typeof TextEncoder === 'function') return new TextEncoder().encode(s).length;
+  } catch (e) { }
+  var n = 0;
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
 }
 function fbCount() {
   var t = D('sp_fbtext'), c = D('sp_fbcount');
   if (!t || !c) return;
-  var n = t.value ? t.value.length : 0;
-  c.textContent = n + ' / 8000';
-  // 超长要立刻让用户看见（Worker 也会截断，但提前告知比事后解释好）
-  c.style.color = n > 8000 ? 'var(--warn)' : 'var(--mut2)';
+  var n = fbBytes(t.value);
+  c.textContent = n + ' / ' + FB_MAX_BYTES + ' 字节';
+  c.style.color = n > FB_MAX_BYTES ? 'var(--warn)' : 'var(--mut2)';
+}
+// 探活：后台 GET watchdog 200+ok 才允许提交（文档要求；实测后台在线）。
+// 宿主 10s 超时，这里再留 2s 余量：12s 没回就按不可用处理，绝不假装连上了。
+function fbWatchdog(force) {
+  if (FB.checking) return;
+  FB.lastCheck = Date.now();
+  if (!IS_MAC_HOST) {
+    FB.serverOk = false;
+    fbChannel('反馈上传只在桌面 App 内可用', 'warn');
+    fbBusy(false);
+    return;
+  }
+  FB.checking = true;
+  fbChannel('正在检查反馈通道…', '');
+  fbBusy(false);
+  wcmd('feedback:watchdog');
+  if (FB.wdTimer) { clearTimeout(FB.wdTimer); FB.wdTimer = 0; }
+  FB.wdTimer = setTimeout(function () {
+    if (!FB.checking) return;
+    FB.checking = false;
+    FB.serverOk = false;
+    fbChannel('反馈通道无响应，请稍后重试', 'err');
+    fbBusy(false);
+  }, 12000);
 }
 
-// 宿主回传入口保留（旧邮件路径的兼容分支；Worker 路径不经过这里）
+// 宿主回传入口（探活 / 发送 / 失败都走这里；旧邮件通道的回传也兼容）
 function onFeedbackStatus(obj) {
   if (!obj || typeof obj !== 'object') return;
-  fbBusy(false);
-  fbMsg(String(obj.message || obj.stage || '未知状态'), obj.stage === 'failed' ? 'err' : 'ok');
-}
-
-// ArrayBuffer → base64（诊断包要放进 JSON）
-function fbBase64(buf) {
-  var bytes = new Uint8Array(buf);
-  var bin = '';
-  var CHUNK = 0x8000;                    // 分块，避免 apply 参数过多爆栈
-  for (var i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  var stage = String(obj.stage || '');
+  if (stage === 'watchdog') {
+    if (FB.wdTimer) { clearTimeout(FB.wdTimer); FB.wdTimer = 0; }
+    FB.checking = false;
+    FB.serverOk = !!obj.ok;
+    if (FB.serverOk) {
+      var lim = Number(obj.ratePerMinute || 0);
+      fbChannel('反馈通道已连接' + (lim > 0 ? '（每分钟最多 ' + lim + ' 次）' : ''), 'ok');
+    } else {
+      fbChannel('反馈后台暂不可用：' + String(obj.message || '未知原因'), 'err');
+    }
+    fbBusy(false);
+    return;
   }
-  return btoa(bin);
+  if (stage === 'packaging') { fbMsg('正在打包诊断包…'); return; }
+  if (stage === 'uploading') {
+    var kb = Number(obj.kb || 0);
+    fbMsg('正在上传' + (kb > 0 ? '（约 ' + kb + ' KB）' : '') + '…');
+    return;
+  }
+  if (stage === 'sent') {
+    FB.lastId = String(obj.id || '');
+    fbBusy(false);
+    var okText = '已收到，工单号 ' + (FB.lastId || '(无)') + '。感谢反馈！';
+    if (obj.diagStored === false) okText += '（诊断包未被后台保存）';
+    fbMsg(okText, 'ok');
+    var tt = D('sp_fbtext');
+    if (tt) tt.value = '';
+    fbCount();
+    return;
+  }
+  if (stage === 'failed') {
+    fbBusy(false);
+    var m = String(obj.message || '未知错误');
+    var code = String(obj.code || '');
+    var hint = '';
+    if (code === 'request_too_large') hint = '（可取消勾选「附带诊断包」只发正文）';
+    else if (code === 'rate_limited') hint = '（稍等一会儿再试）';
+    fbMsg('发送失败：' + m + hint, 'err');
+    return;
+  }
+  // 旧邮件通道的回传（compose-opened 等）：保持原行为，功能不删除
+  fbBusy(false);
+  fbMsg(String(obj.message || stage || '未知状态'), stage === 'failed' ? 'err' : 'ok');
 }
 
-// 发送主流程：POST 到 Cloudflare Worker。任何失败都如实显示，绝不假装"已发送"。
+// 发送主流程：只把「用户写了什么 / 要不要诊断包」交给宿主；地址、安装 ID、幂等键、
+// 诊断包组装全在宿主侧。任何失败都如实显示，绝不假装"已发送"。
 function fbSend() {
   if (FB.busy) return false;
   var t = D('sp_fbtext');
   var text = t ? String(t.value || '') : '';
   if (!text.trim()) { fbMsg('请先写下反馈内容再发送', 'err'); if (t) t.focus(); return false; }
-  if (!FB_WORKER_URL) {
-    fbMsg('反馈通道未配置（开发者尚未部署 Worker 地址）', 'err');
+  var n = fbBytes(text);
+  if (n > FB_MAX_BYTES) {
+    fbMsg('内容超过 ' + FB_MAX_BYTES + ' 字节（当前 ' + n + '），请精简后再发', 'err');
     return false;
   }
+  if (!IS_MAC_HOST) { fbMsg('反馈上传只在桌面 App 内可用', 'err'); return false; }
+  // 必须是**探活成功**（true）才发：null（还没探完）也不许发 —— 按钮此时是禁用的，
+  // 这里是给"程序化调用/键盘触发"兜底的第二道闸门。
+  if (FB.serverOk !== true) { fbMsg('反馈后台当前不可用，请稍后再试', 'err'); return false; }
   var wantDiag = false;
   var cb = D('sp_fbdiag');
   if (cb) wantDiag = !!cb.checked;
-
   fbBusy(true);
-
-  var payload = {
-    text: text,
-    version: (D('appVer') && D('appVer').textContent) ? D('appVer').textContent : '',
-    os: (navigator && navigator.userAgent) ? navigator.userAgent : ''
-  };
-
-  var withDiag = function () {
-    if (!wantDiag) return Promise.resolve(payload);
-    fbMsg('正在打包诊断包…');
-    return fetch('/api/diagzip').then(function (r) {
-      if (!r.ok) throw new Error('打包失败 HTTP ' + r.status);
-      return r.blob();
-    }).then(function (blob) {
-      if (blob.size < 22) throw new Error('诊断包太小（不是有效 ZIP）');
-      return blob.arrayBuffer();
-    }).then(function (buf) {
-      var v = new Uint8Array(buf, 0, 4);
-      if (!(v[0] === 0x50 && v[1] === 0x4B && v[2] === 0x03 && v[3] === 0x04)) {
-        throw new Error('诊断包不是合法 ZIP（缺少 PK 头）');
-      }
-      fbMsg('正在上传（' + Math.round(buf.byteLength / 1024) + ' KB）…');
-      payload.diag = fbBase64(buf);
-      payload.diagName = 'rlplayer-diag.zip';
-      return payload;
-    });
-  };
-
-  api('/api/diag').then(function(j){
-    if(j && j.ok) payload.case_id=j.case_id||j.caseId||'';
-    return withDiag();
-  }).then(function (body) {
-    fbMsg('正在发送…');
-    return fetch(FB_WORKER_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-  }).then(function (r) {
-    // 200 也可能带 ok:false，所以必须读 body 确认
-    return r.text().then(function (txt) {
-      var j = null;
-      try { j = JSON.parse(txt); } catch (e) { }
-      if (!j) throw new Error('服务器返回非 JSON（HTTP ' + r.status + '）');
-      if (!j.ok) throw new Error(j.error || ('服务器拒绝（HTTP ' + r.status + '）'));
-      return j;
-    });
-  }).then(function (j) {
-    fbBusy(false);
-    fbMsg('已发送，工单号 ' + (j.id || '(无)') + '。感谢反馈！', 'ok');
-    if (t) t.value = '';
-    fbCount();
-  }).catch(function (e) {
-    fbBusy(false);
-    var m = (e && e.message) ? e.message : String(e);
-    // 诊断包过大时给出可操作建议（而不是只说失败）
-    var hint = (m.indexOf('过大') >= 0 || m.indexOf('413') >= 0)
-      ? '（可取消勾选「附带诊断包」只发正文）' : '';
-    fbMsg('发送失败：' + m + hint, 'err');
-  });
+  fbMsg(wantDiag ? '正在打包诊断包并上传…' : '正在上传…');
+  wcmd('feedback:submit' + (wantDiag ? '+diag' : '') + ':' + text);
   return true;
 }
 
 function bindFeedbackCard() {
   var btn = D('sp_fbsend');
   if (btn) btn.onclick = function () { fbSend(); };
+  var retry = D('sp_fbretry');
+  if (retry) retry.onclick = function () { fbWatchdog(true); };
   var t = D('sp_fbtext');
   if (t) {
     t.oninput = fbCount;
     fbCount();
   }
+  // 探活：进设置页时一次；30 秒内不重复（失败后由「重试探活」强制）
+  if (!FB.lastCheck || Date.now() - FB.lastCheck > 30000) fbWatchdog(false);
+  else fbBusy(false);
 }
 
 // 261024-02 #3：长时长格式（专辑总时长用 1:05:24，单曲用 4:24；都用本地曲库真实数据，不用 AI 猜）
@@ -10156,13 +10182,16 @@ function renderSettingsPage() {
            tip('写清楚「做了什么 / 期望什么 / 实际什么」最有帮助') + '</label>'
        + '<textarea id=sp_fbtext rows=5 spellcheck=false placeholder="简单描述你遇到的问题…（例如：播放 DSD 文件时切歌会卡住 1 秒）" '
        + 'style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:7px;border:1px solid var(--line);background:var(--field);color:var(--txt);font:inherit;font-size:12.5px;line-height:1.6;resize:vertical;min-height:88px"></textarea>'
-       + '<div class=hint id=sp_fbcount style="margin-top:5px">0 / 8000</div></div>'
+       + '<div class=hint id=sp_fbcount style="margin-top:5px">0 / 16384 字节</div></div>'
+       + '<div class=hint id=sp_fbchan style="margin-top:5px">正在检查反馈通道…</div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px">'
        + '<label class=chk style="margin-right:2px"><input type=checkbox id=sp_fbdiag checked>'
        + '<span>附带诊断包</span>' + tip('打包日志 / 系统信息 / 设置摘要（token、密码等已脱敏为 <redacted>）。不建议关闭 —— 没有日志很难定位问题') + '</label>'
-       + '<button class="btn pri" id=sp_fbsend>发送反馈</button>'
+       + '<button class="btn pri" id=sp_fbsend disabled>发送反馈</button>'
+       + '<button class=btn id=sp_fbretry style="display:none">重试探活</button>'
        + '<span id=sp_fbmsg style="font-size:11.5px;color:var(--mut2)"></span></div>'
-       + '<div class=hint>点「发送反馈」会直接把内容上传给开发者，**不需要配置邮箱、不需要注册账号**。'
+       + '<div class=hint>点「发送反馈」会把内容上传到开发者后台（rlplayer.rainlain.com），**不需要配置邮箱、不需要注册账号**。'
+       + '提交前会先探活；通道不可用时按钮保持禁用，绝不假装发送成功。'
        + '诊断包已脱敏（token / 密码 / Authorization 头一律替换为 <redacted>，用户名与邮箱替换为 <user>），不会上传你的音乐文件。</div>')
      + '</div>';
 
@@ -13796,12 +13825,12 @@ document.addEventListener('visibilitychange', function () {
 })();
 
 /* ---------------- 页面内自检（1.1.4-beta10） ----------------
-   背景（2026-11-08 用户钦定的规则）：**禁止自起无头浏览器**。需要浏览器时只走 DSH 侧边栏。
+   背景（2026-11-08 钦定；2026-11-14 通道改为 ego）：**不要自起浏览器进程**。需要浏览器时只走 ego（dsh-ego-browser 的 ego_* 工具）。
    这条规则把"UI 判据怎么自动跑"堵死了：CDP 脚本（tools/uibrowser.js）会起 Edge 子进程。
    解法不是放弃判据，而是把判据搬进**页面自己**：
      · 页面里已经加载了全部生产函数（跟用户在用的完全同一份 JS）；
      · 检测用例在本文件末尾注册进 window.__SELFTEST；
-     · 侧边栏里打开页面 → 地址后加 ?selftest=1 → 页面跑完把结果表格画在自己身上，
+     · ego_navigate 打开页面（地址可直接带 ?selftest=1）→ 页面跑完把结果表格画在自己身上，
        同时 POST 回 /api/selftest/report 落盘（便于事后 grep，不依赖任何人肉截图）。
    🔴 铁律 3：每条判据必须能红。每个用例自带 want/actual，页面直接把两者并排画出来，
       不看"有没有数字"、只看"want 是否等于 actual"。 */
@@ -13866,8 +13895,8 @@ function selftestEnsureNowPlaying() {
 function selftestMaybeAutoRun() {
   var on = false;
   try {
-    // 同时认 query 与 hash：侧边栏/宿主对 URL 的规范化方式不统一，两种写法都支持才不至于"点了没反应"
-    // ① 服务端标志（首选：DSH 侧边栏会改写/丢弃 URL 参数，只有它能稳定生效）
+    // 同时认 query 与 hash：不同宿主对 URL 的规范方式不统一，两种写法都支持才不至于"点了没反应"
+    // ① 服务端标志（首选：一次性、稳定的触发；ego 下 URL 参数也可用，但标志文件保证刷新不重跑）
     on = (typeof window !== 'undefined' && window.__SELFTEST_AUTO === 1) ||
          /(?:^|[?&])selftest=1(?:&|$)/.test(location.search || '') ||
          /(?:^|[&#])selftest=1(?:&|$)/.test(location.hash || '');

@@ -30,6 +30,7 @@
 //     mac 的 file_clock 是**纳秒**（实测 1.79e18，比 MSVC 还大 10 倍），同样超 2^53。
 //     本库取毫秒规避；§8 把「纳秒会丢精度 / 毫秒不丢」两侧都实测钉住。
 #include "analysis/track_health.h"
+#include "analysis/container_duration.h"   // U10：容器声明时长探针（§13/§14）
 #include "analysis/health_store.h"
 #include "platform/path.h"
 #include <cstdio>
@@ -100,6 +101,82 @@ static bool write_wav44(const std::string& path, const rta::audio::AudioBuffer& 
     return (bool)f;
 }
 
+// ---- U10 夹具：手工拼四个容器的**最小合法头**（只测头解析，不测解码）----
+// 数值与上游 tests/test_health_completeness.cpp 的锚点逐一致：
+//   FLAC 1413239 @44100 = 32.046 s / WAV 10485760 B @176400 Bps = 59.443 s /
+//   MP3 Xing 4098 帧 ×1152 @44100 = 107.050 s / DSF 1083768832 @2822400 = 383.988 s
+static void write_raw_bytes(const std::string& path, const std::vector<unsigned char>& b) {
+    std::ofstream f(P(path), std::ios::binary | std::ios::trunc);
+    f.write((const char*)b.data(), (std::streamsize)b.size());
+}
+static std::vector<unsigned char> flac_hdr(uint32_t rate, int ch, int bps, long long total) {
+    std::vector<unsigned char> v;
+    auto put = [&v](const char* s) { for (int i = 0; s[i]; ++i) v.push_back((unsigned char)s[i]); };
+    put("fLaC");
+    v.push_back(0x80);                                  // last-block=1, type=0(STREAMINFO)
+    v.push_back(0); v.push_back(0); v.push_back(34);    // 长度 34
+    std::vector<unsigned char> si(34, 0);
+    si[0] = 0x12; si[1] = 0x00; si[2] = 0x12; si[3] = 0x00;   // min/max block size（值无关）
+    si[10] = (unsigned char)((rate >> 12) & 0xFF);
+    si[11] = (unsigned char)((rate >> 4) & 0xFF);
+    si[12] = (unsigned char)(((rate & 0x0F) << 4) | (((ch - 1) & 0x7) << 1) | (((bps - 1) >> 4) & 0x1));
+    si[13] = (unsigned char)((((bps - 1) & 0x0F) << 4) | ((total >> 32) & 0x0F));
+    for (int i = 0; i < 4; ++i) si[14 + i] = (unsigned char)((total >> (8 * (3 - i))) & 0xFF);
+    v.insert(v.end(), si.begin(), si.end());
+    v.resize(v.size() + 64, 0);
+    return v;
+}
+static std::vector<unsigned char> wav_hdr(uint32_t byteRate, uint32_t dataSize, bool dataFirst = false) {
+    std::vector<unsigned char> v;
+    auto put = [&v](const char* s) { for (int i = 0; s[i]; ++i) v.push_back((unsigned char)s[i]); };
+    auto le32 = [&v](uint32_t x) { for (int i = 0; i < 4; ++i) v.push_back((unsigned char)((x >> (8*i)) & 0xFF)); };
+    auto le16 = [&v](unsigned x) { for (int i = 0; i < 2; ++i) v.push_back((unsigned char)((x >> (8*i)) & 0xFF)); };
+    auto fmt = [&]() {
+        put("fmt "); le32(16);
+        le16(1); le16(2); le32(44100); le32(byteRate); le16(4); le16(16);
+    };
+    auto data = [&]() { put("data"); le32(dataSize); };
+    put("RIFF"); le32(36 + dataSize); put("WAVE");
+    if (dataFirst) { data(); } else { fmt(); data(); }
+    if (dataFirst) { fmt(); }                  // 坏头：data 在 fmt 之前
+    v.resize(v.size() + 128, 0);               // 一点真实字节（远少于声明值）
+    return v;
+}
+static std::vector<unsigned char> mp3_xing_hdr(uint32_t frames, long long delay, long long padding) {
+    std::vector<unsigned char> v;
+    v.push_back(0xFF); v.push_back(0xFB);       // MPEG1 Layer3，无 CRC
+    v.push_back(0x90);                           // bitrate idx 9(128k) / sr idx 0(44.1k)
+    v.push_back(0x00);                           // 立体声
+    v.resize(4 + 32, 0);                         // 边信息 32 字节（MPEG1 立体声）
+    auto putBE32 = [&v](uint32_t x) { for (int i = 3; i >= 0; --i) v.push_back((unsigned char)((x >> (8*i)) & 0xFF)); };
+    v.push_back('X'); v.push_back('i'); v.push_back('n'); v.push_back('g');
+    putBE32(0x1);                                // flags: FRAMES 位
+    putBE32(frames);
+    v.resize(4 + 32 + 120, 0);                   // Xing 头合计 120 字节
+    if (delay >= 0) {
+        v.push_back('L'); v.push_back('A'); v.push_back('M'); v.push_back('E');
+        v.resize(v.size() + 17, 0);              // 到 LAME 标签 +21
+        v.push_back((unsigned char)((delay >> 4) & 0xFF));
+        v.push_back((unsigned char)(((delay & 0x0F) << 4) | ((padding >> 8) & 0x0F)));
+        v.push_back((unsigned char)(padding & 0xFF));
+    }
+    v.resize(v.size() + 256, 0);
+    return v;
+}
+static std::vector<unsigned char> dsf_hdr(uint32_t rate, uint64_t count) {
+    std::vector<unsigned char> v;
+    auto put = [&v](const char* s) { for (int i = 0; s[i]; ++i) v.push_back((unsigned char)s[i]); };
+    auto le32 = [&v](uint32_t x) { for (int i = 0; i < 4; ++i) v.push_back((unsigned char)((x >> (8*i)) & 0xFF)); };
+    auto le64 = [&v](uint64_t x) { for (int i = 0; i < 8; ++i) v.push_back((unsigned char)((x >> (8*i)) & 0xFF)); };
+    put("DSD "); le64(28); le64(28 + 12 + 52 + 12 + 128); le64(0);      // 头 + fmt + 一点 data
+    put("fmt "); le64(52);
+    le32(1); le32(0); le32(2); le32(2);           // 版本 / 格式ID / 声道类型 / 声道数
+    le32(rate); le32(1); le64(count); le32(4096); le32(0);
+    put("data"); le64(128);
+    v.resize(v.size() + 128, 0);
+    return v;
+}
+
 // ---------------- 流式体检的一致性判据（macOS 移植：路径与段号已本地化） ----------------
 // 上游这三节的路径拼接是 `tmpDir + "\\xxx"`。mac 上 `\` 是【合法文件名字符】而非分隔符，
 // 照抄会在临时目录造出一个名字里带反斜杠的文件 —— 不报错、看起来"通过"，但行为与
@@ -122,6 +199,8 @@ static bool same_health(const TrackHealth& a, const TrackHealth& b) {
         && a.losslessSuspected == b.losslessSuspected && a.fake24bit == b.fake24bit
         && a.reason == b.reason
         && same_bits(a.durationSec, b.durationSec)
+        // U10：整段与流式两条路径的完整性结论也必须逐字一致（声明时长、是否半截、人话提示）
+        && same_bits(a.declaredSec, b.declaredSec) && a.incomplete == b.incomplete && a.note == b.note
         && a.fs == b.fs && a.channels == b.channels && a.bits == b.bits;
 }
 static std::string health_brief(const TrackHealth& h) {
@@ -728,6 +807,296 @@ int main() {
         std::error_code ec;
         fsx::remove(P(cp), ec);
         check(!fsx::exists(P(cp)), "取消测试临时文件已删除");
+    }
+
+
+    // ---------------- §13 「文件可能不完整」判据（U10，2026-11-16） ----------------
+    // 背景：半截文件（正在拷贝/下载/下载中断）能解码出"已有的那一部分"，duration_sec 只反映
+    // 已有字节的长度，指标看起来全对 —— 旧实现在这里给 status=ready，用户拿到的是半份结论。
+    // 本判据把容器声明时长（FLAC/WAV/MP3 Xing·VBRI/DSF）与实际解码时长比对，差太多就降为
+    // status=incomplete + note（指标照给，不拒绝出数）。
+    //
+    // 本机（macOS 分支）实测的三种"半截"行为**不一样**，判据必须分别钉住：
+    //   ① MP3：ffmpeg 照常解码已有帧 ⟹ 旧实现 status=ready + duration≈一半（**真正的假象**，
+    //      这正是本判据要抓的形态；判据上线后变 incomplete）；
+    //   ② WAV：产品自己的 read_wav 已经拒绝（"WAV data 块被截断…"）⟹ status=error。判据绝不能
+    //      把这种**真错误**降级成 merely-incomplete（否则用户会以为只是没下载完）；
+    //   ③ DSF：整段路径读到一半就结束（ready + 半长 ⟹ 判据能抓；素材要够长 —— 1 s 容差下限会让
+    //      太短的素材被当噪声放过）；但**流式**路径按 fmt.sampleCount
+    //      把缺失块补成静音 ⟹ analyze_file 会报满长，判据看不出差别（⚠️ 未解决项，见交付报告）。
+    printf("\n=== 13. 文件可能不完整：容器声明时长 vs 实际解码（半截文件）===\n");
+    {
+        std::error_code ec;
+        auto json_at = [](const std::string& js) { return rta::net::json_parse(js); };
+        auto jnum = [](const rta::net::Json& p, const char* key) { return p.ok() ? p[key].n() : 0.0; };
+        auto jstr = [](const rta::net::Json& p, const char* key) { return p.ok() ? p[key].s() : std::string(); };
+        auto jhas = [](const std::string& js, const char* needle) { return js.find(needle) != std::string::npos; };
+        auto truncate_half = [&](const std::string& path) {
+            const uintmax_t n = fsx::file_size(P(path), ec);
+            if (ec || n < 1000) return false;
+            fsx::resize_file(P(path), n / 2, ec);
+            return !ec;
+        };
+
+        // 13a 完整 WAV（10 s）：负向对照 —— declared ≈ duration，绝不误报
+        const std::string fullWav = rta::platform::join(tmpDir, "rtahealth_u10_10s.wav");
+        check(write_wav44(fullWav, tone16), "写出完整 WAV 夹具（10 s / 48 k / 16-bit 立体声）", fullWav);
+        {
+            const TrackHealth h = analyze_file(fullWav);
+            const std::string js = track_health_json(h);
+            const rta::net::Json p = json_at(js);
+            printf("  wav full : status=%s dur=%.3f declared=%.3f\n", h.status.c_str(), h.durationSec,
+                   jnum(p, "declared_sec"));
+            check(h.status == "ready", "完整 WAV status = ready（负向对照）", h.status);
+            check(jhas(js, "\"incomplete\":false"), "完整 WAV JSON incomplete=false");
+            check(std::fabs(jnum(p, "declared_sec") - h.durationSec) <= 0.02,
+                  "完整 WAV declared_sec ≈ 实际时长（±0.02，不误报的前提）",
+                  std::to_string(jnum(p, "declared_sec")));
+            check(jstr(p, "note").empty(), "完整 WAV note 为空串（不写死文案）");
+            check(!h.incomplete && h.declaredSec > 0.0 && h.note.empty(), "完整 WAV 结构体字段：未判不完整");
+        }
+        // analyze_buffer 不判完整性（没有路径可读容器头，本来也无从判定）
+        {
+            const TrackHealth hb = analyze_buffer(tone16);
+            check(hb.status == "ready" && !hb.incomplete && hb.declaredSec == 0.0 && hb.note.empty() &&
+                      hb.errorCode.empty(),
+                  "analyze_buffer 不判：declared_sec=0 / incomplete=false / note 空 / errorCode 空");
+        }
+
+        // 13b 截断 WAV（任务书指定的夹具）：本机解码器已拒绝 ⟹ 判据不许把它降级成 incomplete
+        const std::string halfWav = rta::platform::join(tmpDir, "rtahealth_u10_half.wav");
+        check(write_wav44(halfWav, tone16), "写出待截断 WAV 夹具", halfWav);
+        check(truncate_half(halfWav), "resize_file 把 WAV 截到 ~50%",
+              std::to_string((unsigned long long)fsx::file_size(P(halfWav), ec)) + " B");
+        {
+            const TrackHealth h = analyze_file(halfWav);
+            const std::string js = track_health_json(h);
+            printf("  wav half : status=%s dur=%.3f err=%s\n", h.status.c_str(), h.durationSec,
+                   h.error.substr(0, 70).c_str());
+            check(h.status == "error", "截断 WAV 是**解码错误**（read_wav 拒绝越界 data 块），不是 ready",
+                  h.status + " / " + h.error.substr(0, 90));
+            check(!jhas(js, "\"incomplete\":true"), "截断 WAV 绝不被降级成 incomplete（真错误 ≠ 没下载完）");
+        }
+
+        // 13c MP3：10 s 同内容 → ffmpeg 编码 → 截 50% ⟹ 旧实现 ready + 半长（真正的假象）
+        // MP3 夹具要 ffmpeg 编码器（仓库自带 build-mac/ffmpeg-lite）；取不到就明确 SKIP，不谎报通过。
+        std::string ffmpegBin;
+        auto runnable = [](const std::string& p) {
+            if (p.empty()) return false;
+            return std::system((std::string("\"") + p + "\" -version >/dev/null 2>&1").c_str()) == 0;
+        };
+        if (runnable("ffmpeg")) ffmpegBin = "ffmpeg";
+        if (ffmpegBin.empty() && runnable(rta::audio::find_tool("ffmpeg")))
+            ffmpegBin = rta::audio::find_tool("ffmpeg");
+        if (ffmpegBin.empty()) {
+            for (const char* rel : { "build-mac/ffmpeg-lite/ffmpeg", "ffmpeg-lite/ffmpeg" }) {
+                const std::string p = fsx::current_path().string() + "/" + rel;
+                if (runnable(p)) { ffmpegBin = p; break; }
+            }
+        }
+        const std::string fullMp3 = rta::platform::join(tmpDir, "rtahealth_u10_10s.mp3");
+        const std::string halfMp3 = rta::platform::join(tmpDir, "rtahealth_u10_half.mp3");
+        if (ffmpegBin.empty()) {
+            printf("  [SKIP] ffmpeg 不可执行 ⟹ 半截 MP3 判据跳过（WAV/DSF 判据仍已执行）\n");
+        } else {
+            const std::string cmd = "\"" + ffmpegBin + "\" -v error -y -i \"" + fullWav +
+                                    "\" -ar 44100 -ac 2 -c:a libmp3lame -b:a 192k \"" + halfMp3 + "\"";
+            check(std::system(cmd.c_str()) == 0, "ffmpeg 用同一份 10 s 内容编码 MP3 夹具（44.1 k / 192 kbps）",
+                  ffmpegBin);
+            check(fsx::copy_file(P(halfMp3), P(fullMp3), fsx::copy_options::overwrite_existing, ec) && !ec,
+                  "复制一份完整 MP3 作负向对照");
+            check(truncate_half(halfMp3), "把 MP3 截到 ~50%",
+                  std::to_string((unsigned long long)fsx::file_size(P(halfMp3), ec)) + " B");
+            {
+                const TrackHealth h = analyze_file(fullMp3);
+                const std::string js = track_health_json(h);
+                const rta::net::Json p = json_at(js);
+                printf("  mp3 full : status=%s dur=%.3f declared=%.3f\n", h.status.c_str(), h.durationSec,
+                       jnum(p, "declared_sec"));
+                check(h.status == "ready", "完整 MP3 status = ready（负向对照）", h.status);
+                check(jhas(js, "\"incomplete\":false"), "完整 MP3 JSON incomplete=false");
+                check(std::fabs(jnum(p, "declared_sec") - h.durationSec) <= 0.02,
+                      "完整 MP3 declared_sec ≈ 实际时长（±0.02）", std::to_string(jnum(p, "declared_sec")));
+                check(jstr(p, "note").empty(), "完整 MP3 note 为空串");
+            }
+            {
+                const TrackHealth h = analyze_file(halfMp3);
+                const std::string js = track_health_json(h);
+                const rta::net::Json p = json_at(js);
+                const double decl = jnum(p, "declared_sec");
+                printf("  mp3 half : status=%s dur=%.3f declared=%.3f\n", h.status.c_str(), h.durationSec, decl);
+                check(h.status == "incomplete", "红：半截 MP3 status = incomplete（旧实现为 ready）", h.status);
+                check(jhas(js, "\"incomplete\":true"), "红：半截 MP3 JSON incomplete=true", js.substr(0, 200));
+                check(std::fabs(decl - 10.0) <= 0.01, "红：declared_sec ≈ 10.0 ±0.01（容器头声明）",
+                      "declared_sec = " + std::to_string(decl));
+                check(std::fabs(h.durationSec - 5.0) <= 0.05, "实际解码 ≈ 5.0 s（只有半截字节）",
+                      "duration_sec = " + std::to_string(h.durationSec));
+                char durTxt[32] = {0};
+                std::snprintf(durTxt, sizeof(durTxt), "%.3f", jnum(p, "duration_sec"));
+                const std::string note = jstr(p, "note");
+                check(note.find("10.000") != std::string::npos && note.find(durTxt) != std::string::npos &&
+                          note.find("文件可能不完整") != std::string::npos,
+                      "红：note 同时给出声明值与实际值（后端人话原样）", note);
+                // 结构体字段直接钉住（JSON 只证明序列化；这里证明判据落在 TrackHealth 上）
+                check(h.incomplete, "红：TrackHealth.incomplete = true（结构体字段）");
+                check(std::fabs(h.declaredSec - 10.0) <= 0.01, "红：TrackHealth.declaredSec ≈ 10.0",
+                      std::to_string(h.declaredSec));
+                check(h.note.find("文件可能不完整") != std::string::npos,
+                      "红：TrackHealth.note 是有内容的中文人话", h.note);
+                check(h.errorCode == "analysis.incomplete", "红：errorCode = analysis.incomplete（稳定码）",
+                      h.errorCode);
+                check(h.error.empty(), "incomplete 不是 error：error 字段保持空串", h.error);
+                // 整段路径必须给同一份结论（两条路径各调一次 apply_completeness）
+                const TrackHealth hw = analyze_file_whole(halfMp3);
+                check(hw.status == "incomplete" && same_bits(hw.declaredSec, h.declaredSec) &&
+                          hw.incomplete == h.incomplete && hw.note == h.note,
+                      "红：整段 vs 流式对同一半截 MP3 的完整性结论逐字一致",
+                      hw.status + " / " + std::to_string(hw.declaredSec));
+            }
+        }
+
+        // 13d 合成 DSF 截半：整段路径抓到（判据的第二个容器）
+        const std::string fullDsf = rta::platform::join(tmpDir, "rtahealth_u10_full.dsf");
+        const std::string halfDsf = rta::platform::join(tmpDir, "rtahealth_u10_half.dsf");
+        // 必须是够长的素材：判据有 1 s 容差下限，1 s 的 DSF 截半只差 0.5 s ⟹ 会被当噪声放过。
+        check(write_test_dsf(fullDsf, 2, 2822400u, 2822400ull * 4), "写出合成 DSF（4 s / 立体声 / DSD64）",
+              fullDsf);
+        check(fsx::copy_file(P(fullDsf), P(halfDsf), fsx::copy_options::overwrite_existing, ec) && !ec,
+              "复制一份待截断 DSF");
+        check(truncate_half(halfDsf), "把 DSF 截到 ~50%");
+        {
+            const TrackHealth h = analyze_file_whole(halfDsf);
+            const std::string js = track_health_json(h);
+            const rta::net::Json p = json_at(js);
+            printf("  dsf half (whole): status=%s dur=%.3f declared=%.3f\n", h.status.c_str(), h.durationSec,
+                   jnum(p, "declared_sec"));
+            check(h.status == "incomplete", "红：半截 DSF（整段路径）status = incomplete（旧实现为 ready）", h.status);
+            check(std::fabs(jnum(p, "declared_sec") - 4.0) <= 0.01, "半截 DSF declared_sec ≈ 4.0 s",
+                  std::to_string(jnum(p, "declared_sec")));
+            check(h.durationSec > 1.80 && h.durationSec < 2.20, "半截 DSF 实际解码约一半（只覆盖已存在字节）",
+                  std::to_string(h.durationSec));
+            // ⚠️ 未解决项（如实打印，不假装已修）：流式 DSD 源按 fmt.sampleCount 把缺失块补成静音，
+            //    于是 analyze_file 报满长 ⟹ declared≈实际，判据在这条路径上看不出差别。
+            //    修它要动解码路径（本包范围外，与「不动 DSP/解码路径」的纪律冲突）。
+            const TrackHealth sHalf = analyze_file(halfDsf);
+            printf("  dsf half (stream): status=%s dur=%.3f（⚠️ 流式 DSD 源补静音，判据在此路径无效）\n",
+                   sHalf.status.c_str(), sHalf.durationSec);
+            const TrackHealth fullDsfH = analyze_file(fullDsf);
+            const std::string jsF = track_health_json(fullDsfH);
+            const rta::net::Json pF = json_at(jsF);
+            check(fullDsfH.status == "ready", "完整 DSF status = ready（负向对照）", fullDsfH.status);
+            check(jhas(jsF, "\"incomplete\":false"), "完整 DSF JSON incomplete=false");
+            check(std::fabs(jnum(pF, "declared_sec") - fullDsfH.durationSec) <= 0.02,
+                  "完整 DSF declared_sec ≈ 实际时长（±0.02）", std::to_string(jnum(pF, "declared_sec")));
+        }
+
+        // 13e 伪文件（纯文本冒充 WAV）：探针必须拒绝 ⟹ 不做任何判定
+        const std::string fakeWav = rta::platform::join(tmpDir, "rtahealth_u10_fake.wav");
+        {
+            std::vector<unsigned char> junk(4096, 'Z');
+            write_raw_bytes(fakeWav, junk);
+            DeclaredDuration dFake;
+            check(!probe_declared_duration(fakeWav, &dFake), "伪文件 probe 返回 false（unknown ⟹ 不判）");
+            check(dFake.seconds <= 0.0 && dFake.how.empty(),
+                  "伪文件 DeclaredDuration 为空（不是猜出来的 0 s）");
+            const std::string jFake = track_health_json(analyze_file(fakeWav));
+            check(!jhas(jFake, "\"incomplete\":true"), "伪文件绝不判 incomplete");
+        }
+
+        fsx::remove(P(halfWav), ec);
+        fsx::remove(P(fullWav), ec);
+        fsx::remove(P(fakeWav), ec);
+        if (!ffmpegBin.empty()) { fsx::remove(P(fullMp3), ec); fsx::remove(P(halfMp3), ec); }
+        fsx::remove(P(halfDsf), ec);
+        fsx::remove(P(fullDsf), ec);
+        check(!fsx::exists(P(halfWav)) && !fsx::exists(P(fullWav)) && !fsx::exists(P(fakeWav)) &&
+                  !fsx::exists(P(halfDsf)) && !fsx::exists(P(fullDsf)),
+              "§13 临时文件已清理");
+    }
+
+    // ---------------- §14 容器声明时长探针：四个合法头 + 四个坏头（宁可漏报） ----------------
+    printf("\n=== 14. probe_declared_duration：四个容器逐项 + 坏头一律 unknown ===\n");
+    {
+        const std::string dir = rta::platform::join(tmpDir, "rtahealth_u10_probe_");
+        std::error_code ec;
+        fsx::create_directories(P(dir), ec);
+        check(!ec && fsx::is_directory(P(dir), ec), "探针夹具目录创建成功", dir);
+        auto probe_sec = [](const std::string& path, double* sec, std::string* how) {
+            DeclaredDuration d;
+            if (!probe_declared_duration(path, &d)) return false;
+            *sec = d.seconds;
+            *how = d.how;
+            return true;
+        };
+        // 14a 四个合法头：声明时长必须读得对（锚点值 = 上游 tests/test_health_completeness.cpp）
+        {
+            const std::string f = rta::platform::join(dir, "probe.flac");
+            write_raw_bytes(f, flac_hdr(44100, 2, 16, 1413239));
+            double s = 0; std::string how;
+            check(probe_sec(f, &s, &how) && std::fabs(s - 32.0462) < 0.001,
+                  "FLAC STREAMINFO total_samples 1413239 @44100 = 32.046 s", how);
+        }
+        {
+            const std::string w = rta::platform::join(dir, "probe.wav");
+            write_raw_bytes(w, wav_hdr(176400, 10485760u));
+            double s = 0; std::string how;
+            check(probe_sec(w, &s, &how) && std::fabs(s - 59.4435) < 0.001,
+                  "WAV data 10485760 B / byteRate 176400 = 59.443 s", how);
+        }
+        {
+            const std::string m = rta::platform::join(dir, "probe.mp3");
+            write_raw_bytes(m, mp3_xing_hdr(4098u, -1, 0));
+            double s = 0; std::string how;
+            check(probe_sec(m, &s, &how) && std::fabs(s - (4098.0 * 1152) / 44100.0) < 0.001,
+                  "MP3 Xing 4098 帧 ×1152 @44100 = 107.050 s", how);
+            const std::string m2 = rta::platform::join(dir, "probe_lame.mp3");
+            write_raw_bytes(m2, mp3_xing_hdr(4098u, 576, 1000));
+            double s2 = 0; std::string how2;
+            check(probe_sec(m2, &s2, &how2) && std::fabs(s2 - (4098.0 * 1152 - 1576) / 44100.0) < 0.001,
+                  "MP3 Xing 扣掉 LAME delay/padding（与 ffmpeg 的裁切口径一致）", how2);
+        }
+        {
+            const std::string ds = rta::platform::join(dir, "probe.dsf");
+            write_raw_bytes(ds, dsf_hdr(2822400u, 1083768832ull));
+            double s = 0; std::string how;
+            check(probe_sec(ds, &s, &how) && std::fabs(s - 383.9884) < 0.001,
+                  "DSF fmt.sampleCount 1083768832 @2822400 = 383.988 s", how);
+        }
+        // 14b 四个坏头：一律返回 false（宁可漏报，不许误报）
+        {
+            const std::string f0 = rta::platform::join(dir, "stream.flac");
+            write_raw_bytes(f0, flac_hdr(44100, 2, 16, 0));      // total_samples=0 = 流式编码
+            double s = 0; std::string how;
+            check(!probe_sec(f0, &s, &how), "FLAC total_samples=0 → unknown（不判）", how);
+        }
+        {
+            const std::string wf = rta::platform::join(dir, "rf64.wav");
+            write_raw_bytes(wf, wav_hdr(176400, 0xFFFFFFFFu));    // RF64/流式占位
+            double s = 0; std::string how;
+            check(!probe_sec(wf, &s, &how), "WAV dataSize=0xFFFFFFFF → unknown（不猜）", how);
+        }
+        {
+            std::vector<unsigned char> v;
+            v.push_back(0xFF); v.push_back(0xFB); v.push_back(0x90); v.push_back(0x00);
+            v.resize(4 + 32 + 512, 0);                            // 有帧、无 Xing/VBRI
+            const std::string cbr = rta::platform::join(dir, "cbr.mp3");
+            write_raw_bytes(cbr, v);
+            double s = 0; std::string how;
+            check(!probe_sec(cbr, &s, &how), "MP3 无 Xing/VBRI → unknown（不做 CBR 估算）", how);
+        }
+        {
+            const std::string df = rta::platform::join(dir, "datafirst.wav");
+            write_raw_bytes(df, wav_hdr(176400, 10485760u, /*dataFirst=*/true));
+            double s = 0; std::string how;
+            check(!probe_sec(df, &s, &how), "WAV data 在 fmt 之前 → unknown（没有 byteRate 就不判）", how);
+        }
+        {
+            const std::string none = rta::platform::join(dir, "no-such-file.flac");
+            DeclaredDuration d;
+            check(!probe_declared_duration(none, &d), "不存在的文件 → unknown（不抛异常）");
+        }
+        fsx::remove_all(P(dir), ec);
+        check(!fsx::exists(P(dir)), "§14 临时目录已清理");
     }
 
     printf("\n%s (失败项 %d)\n", fails == 0 ? "全部通过" : "存在失败", fails);

@@ -242,7 +242,8 @@ int main() {
     {
         struct Rec { double fs; int order; };
         const Rec cases[] = { {2822400.0, 5}, {5644800.0, 5}, {5644800.0, 7},
-                              {11289600.0, 5}, {11289600.0, 7} };
+                              {11289600.0, 5}, {11289600.0, 7},
+                              {22579200.0, 5}, {22579200.0, 7} };
         for (const auto& c : cases) {
             SdmConfig cfg;
             cfg.fs = c.fs; cfg.order = c.order; cfg.levels = 2;
@@ -326,6 +327,46 @@ int main() {
         printf("  nonFinite=%lld\n", m.nonFinite());
         check(!bad, "NaN 之后 1-bit 输出仍然合法");
         check(m.nonFinite() >= 1, "NaN 被识别并清零");
+    }
+
+    // 2026-11-17（DSP 对抗分析已证实）：构造器旧实现直接取 cfg_.order，不钳位。
+    // order<=0 时 (size_t)order 下溢、order>7 时 process() 的环路越过 NTF 系数长度
+    // （Ec 家族内部钳到 8，系数与缓冲区不匹配）⟹ 越界读。这里把「系数长度必须等于
+    // effectiveOrder+1 且阶数在 [1,7]」变成硬判据。
+    {
+        const double rates[] = {2822400.0, 5644800.0, 11289600.0, 22579200.0, 45158400.0};
+        struct Fam { ModulatorFamily f; const char* name; };
+        static const Fam fams[] = {{ModulatorFamily::Dsd, "Dsd"},
+                                   {ModulatorFamily::Chebyshev, "Chebyshev"},
+                                   {ModulatorFamily::Ec, "Ec"},
+                                   {ModulatorFamily::Ahm, "Ahm"}};
+        static const int orders[] = {-3, 0, 1, 5, 7, 8, 9, 12};
+        bool ok = true;
+        std::string detail;
+        for (double fs : rates) {
+            for (const Fam& fm : fams) {
+                for (int order : orders) {
+                    SdmConfig c;
+                    c.fs = fs;
+                    c.family = fm.f;
+                    c.order = order;
+                    c.cutoffHz = 20000.0;
+                    SdmModulator m(c);
+                    const int eff = m.effectiveOrder();
+                    const bool sizeOk = (int)m.ntf().p.size() == eff + 1 &&
+                                        (int)m.ntf().d.size() == eff + 1;
+                    const bool rangeOk = eff >= 1 && eff <= 7;
+                    if (!(sizeOk && rangeOk)) {
+                        ok = false;
+                        detail = std::string(fm.name) + " order=" + std::to_string(order) +
+                                 " fs=" + std::to_string((long long)fs) + " eff=" + std::to_string(eff) +
+                                 " p=" + std::to_string(m.ntf().p.size()) +
+                                 " d=" + std::to_string(m.ntf().d.size());
+                    }
+                }
+            }
+        }
+        check(ok, "构造器阶数钳位：effectiveOrder ∈ [1,7] 且 NTF 系数长度 = order+1（防越界读）", detail);
     }
 
     printf("\n%s (失败项 %d)\n", fails == 0 ? "全部通过" : "存在失败", fails);

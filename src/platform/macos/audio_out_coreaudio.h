@@ -43,6 +43,7 @@
 #include "audio/phys_format.h"   // 设备物理格式选择判据（真 bit-perfect 的前提）
 #include "platform/macos/pcm_format_validation.h"
 #include "platform/macos/airplay_policy.h"
+#include "platform/macos/output_buffer_config.h"
 #include "platform/macos/dop_silence_fill.h"   // 1.1.2 P0-3：欠载时的合法 DoP 静音帧
 
 namespace rta::platform {
@@ -431,6 +432,14 @@ inline std::vector<rta::audio::PhysFormat> available_physical_formats(AudioStrea
 // Hog Mode 在 macOS 上**不能**阻止其它进程播放（PLATFORM.md 13.10.5 实测：
 // 独占期间第三进程 IOProc 照常运行、成功抓录 1.5 秒）。所以真独占必须显式检测，
 // 不能把 Hog 的登记归属当成保证。
+inline bool device_is_running(AudioDeviceID dev) {
+    AudioObjectPropertyAddress addr{kAudioDevicePropertyDeviceIsRunning,
+                                    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    UInt32 v = 0, size = sizeof(v);
+    if (::AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &v) != noErr) return false;
+    return v != 0;
+}
+
 inline bool device_running_somewhere(AudioDeviceID dev) {
     AudioObjectPropertyAddress addr{kAudioDevicePropertyDeviceIsRunningSomewhere,
                                     kAudioObjectPropertyScopeGlobal,
@@ -672,6 +681,7 @@ inline void pack_sample_i32(uint8_t* dst, int32_t s, int bits) {
 } // namespace detail
 
 class CoreAudioOutput final : public AudioOutput {
+    friend struct CoreAudioOutputOfflineAccess;
 public:
     CoreAudioOutput() = default;
     ~CoreAudioOutput() override { close(); }
@@ -1192,35 +1202,20 @@ public:
         else clientPacking_ = macos::ContainerPacking::Int32;
         clientBits_ = (uint32_t)clientPackBits;
 
-        // 6) 缓冲帧数：
-        // 若为 AirPlay 设备（isAirPlay），严禁硬套本地 bufferMs，采用设备实际 buffer size
-        UInt32 frames = 0;
-        if (isAirPlay && actualDevCaps.currentBufferFrames >= 32) {
-            frames = (UInt32)actualDevCaps.currentBufferFrames;
-        } else {
-            frames = (UInt32)((double)rate_ * buffer_ms_ / 1000.0);
-            if (frames < 32) frames = 32;
-            ::AudioUnitSetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
-                                   kAudioUnitScope_Global, 0, &frames, sizeof(frames));
+        // Device period and AudioUnit processing budget are separate properties.
+        UInt32 requestedFrames = (UInt32)std::max(32.0, (double)rate_ * buffer_ms_ / 1000.0);
+        macos::OutputBufferApi bufferApi;
+        const auto bufferConfig = macos::configure_output_buffers(device_, unit_, requestedFrames,
+                                                                  !shared_ && !isAirPlay, bufferApi);
+        if (bufferConfig.status != noErr) {
+            const OSStatus bufferStatus = bufferConfig.status;
+            close_locked();
+            fail(OutputError::StartFailed, "无法确认设备缓冲或配置 AUHAL 渲染切片（OSStatus=" + std::to_string((int)bufferStatus) + "）");
+            return false;
         }
-
-        // 读回实际生效的 buffer frame size 并检查校验
-        UInt32 actualBufferFrames = 0;
-        UInt32 bufSizeVal = sizeof(actualBufferFrames);
-        if (::AudioUnitGetProperty(unit_, kAudioDevicePropertyBufferFrameSize,
-                                   kAudioUnitScope_Global, 0, &actualBufferFrames, &bufSizeVal) == noErr &&
-            actualBufferFrames >= 32) {
-            frames = actualBufferFrames;
-        }
-        // ⚠️ 兜底：AirPlay 且设备没报 currentBufferFrames、读回也失败时 frames 会是 0。
-        // 0 会让 buffer_frames() 返回 0 ⟹ 渲染循环只能拿 4096 的猜测周期，而环形缓冲
-        // 却按 1024 分配，等于人为把吞吐压到 1/4。这里退回 bufferMs 折算，绝不返回 0。
-        if (frames < 32) {
-            frames = (UInt32)((double)rate_ * (buffer_ms_ > 0.0 ? buffer_ms_ : 100.0) / 1000.0);
-            if (frames < 32) frames = 32;
-        }
-
+        const UInt32 frames = bufferConfig.frames;
         buffer_frames_ = frames;
+        maximum_slice_frames_ = bufferConfig.maximumSlice;
         // 2026-10-25：IO 周期帧数 = 设备的 buffer frame size。ZeroAttrib 用它判
         // 「供料不足一个周期」（等价 WASAPI 的 per）。
         io_period_frames_ = (size_t)frames;
@@ -1277,10 +1272,12 @@ public:
     // ---------------- 写入 ----------------
     // 渲染回调从这里取数据。用环形缓冲解耦"设备拉"与"引擎推"。
     size_t write(const int32_t* interleaved, size_t frames) override {
-        if (!opened_) { fail(OutputError::NotOpened, "write 前必须先 open"); return 0; }
         if (!interleaved || frames == 0) return 0;
 
         std::lock_guard<std::mutex> lk(mu_);
+        // 2026-11-17（并发审计）：opened_ 是受 mu_ 保护的控制字段，必须在锁内读，
+        // 否则与 open/close 并发时是数据竞争（TSan 可复现）。
+        if (!opened_) { fail(OutputError::NotOpened, "write 前必须先 open"); return 0; }
         // 环形缓冲剩余空间（帧）。capacity 为 0 说明 open 没走完 —— 防御性返回 0，
         // 绝不能让下面的 % capacity 触发除零（铁律 3：判据要能证明自己没崩）。
         const size_t capacity = ring_frames_;
@@ -1347,6 +1344,13 @@ public:
     bool dop_requested() const { return dop_requested_.load(std::memory_order_relaxed); }
     // 1.1.2 AP-1.3 自证：本次是否被平台强制成了共享输出（AirPlay 恒为 true）。
     bool shared_mode() const { return shared_; }
+    // 诊断用只读快照（2026-11-17）：关闭后设备是否仍留在独占物理格式，靠它回答。
+    bool phys_locked() const { return physLocked_; }
+    UInt32 client_bits() const { return clientBits_; }
+    uint32_t last_render_flags() const { return last_render_flags_.load(std::memory_order_relaxed); }
+    double last_render_sample_time() const { return last_render_sample_time_.load(std::memory_order_relaxed); }
+    uint32_t last_render_bytes() const { return last_render_bytes_.load(std::memory_order_relaxed); }
+    uint32_t last_render_frames() const { return last_render_frames_.load(std::memory_order_relaxed); }
 
     // ---------------- 1.1.2 DoP 安全自证（只读诊断，供 STAT / signal chain 取用）----------------
     // phase    : 渲染侧标记相位的异常计数（改写/非法/声道对齐）与"下一帧标记"
@@ -1387,6 +1391,34 @@ public:
     size_t frames_written() const override { return frames_written_; }
     size_t frames_rendered() const override { return frames_rendered_.load(); }
     uint64_t underruns() const override { return underruns_.load(); }
+    uint64_t render_callbacks() const { return render_callbacks_.load(); }
+    UInt32 maximum_slice_frames() const { return maximum_slice_frames_; }
+    OSStatus last_render_status() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!unit_) return kAudio_ParamError;
+        OSStatus status = noErr;
+        UInt32 n = sizeof(status);
+        // LastRenderError belongs to the output scope; querying Global returns paramErr (-50).
+        const auto query = ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Output, 0, &status, &n);
+        return query == noErr ? status : 0;
+    }
+    OSStatus last_render_query() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!unit_) return kAudio_ParamError;
+        UInt32 n = sizeof(OSStatus);
+        return ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Output, 0, nullptr, &n);
+    }
+    bool restart_io() {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!unit_ || !initialized_) return false;
+        if (running_) ::AudioOutputUnitStop(unit_);
+        const OSStatus st = ::AudioOutputUnitStart(unit_);
+        running_ = (st == noErr);
+        io_restarts_.fetch_add(1);
+        return running_;
+    }
+    uint64_t io_restarts() const { return io_restarts_.load(); }
+    bool device_running() const { return device_ != kAudioObjectUnknown && detail::device_is_running(device_); }
 
     // ---------------- 欠载归因（与 WASAPI 侧同名同义，2026-10-25 移植）----------------
     // 对应原来 WasapiOutput::zero_pad_full / zero_starved / last_zero_reason。
@@ -1657,11 +1689,21 @@ private:
     }
 
     // 设备拉数据的回调：把环形缓冲里的帧按设备请求量填出去；不够就补静音并记欠载
-    static OSStatus render_trampoline(void* refcon, AudioUnitRenderActionFlags* /*flags*/,
-                                      const AudioTimeStamp* /*ts*/, UInt32 /*bus*/,
+    static OSStatus render_trampoline(void* refcon, AudioUnitRenderActionFlags* flags,
+                                      const AudioTimeStamp* ts, UInt32 /*bus*/,
                                       UInt32 frames, AudioBufferList* io) {
         auto* self = static_cast<CoreAudioOutput*>(refcon);
-        if (!self || !io) return noErr;
+        if (!self) return noErr;
+        self->render_callbacks_.fetch_add(1, std::memory_order_relaxed);
+        // 2026-11-17：记录回调现场，用于区分「无回调」「回调带 OutputIsSilence」
+        // 与「时间戳不推进（设备时钟停摆）」。实时线程只写原子量，不分配、不加锁。
+        if (flags) self->last_render_flags_.store((uint32_t)*flags, std::memory_order_relaxed);
+        if (ts) self->last_render_sample_time_.store((double)ts->mSampleTime, std::memory_order_relaxed);
+        if (io && io->mNumberBuffers > 0) {
+            self->last_render_bytes_.store((uint32_t)io->mBuffers[0].mDataByteSize, std::memory_order_relaxed);
+            self->last_render_frames_.store(frames, std::memory_order_relaxed);
+        }
+        if (!io) return noErr;
         self->render(frames, io);
         return noErr;
     }
@@ -1692,7 +1734,8 @@ private:
         const size_t bytes_per_sample = (size_t)(packBits / 8);
         const size_t frame_bytes = bytes_per_sample * ch;
         // 设备请求的帧数 = 字节数 / 每帧字节数（不能用 int32 宽度反推！）
-        const size_t out_frames = frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0;
+        const size_t out_frames = std::min<size_t>(frames, frame_bytes ? (io->mBuffers[0].mDataByteSize / frame_bytes) : 0);
+        if (!out || out_frames == 0) return;
 
         // ---- 1.1.2 P0-3 后续：DoP 输出整段委托给纯函数（dop_silence_fill.h）----
         //
@@ -1751,7 +1794,7 @@ private:
             std::memset(out + i * frame_bytes, 0, frame_bytes * (out_frames - i));
             underruns_.fetch_add(1);
         }
-        read_pos_ = (read_pos_ + take) % capacity;
+        read_pos_ = (read_pos_ + i) % capacity;
         frames_rendered_.fetch_add(out_frames);
     }
 
@@ -1804,6 +1847,13 @@ private:
         underruns_.store(0);
         gain_.store(1.0, std::memory_order_relaxed);
         buffer_frames_ = 0;
+        maximum_slice_frames_ = 0;
+        render_callbacks_.store(0);
+        last_render_flags_.store(0);
+        last_render_sample_time_.store(-1.0);
+        last_render_bytes_.store(0);
+        last_render_frames_.store(0);
+        io_restarts_.store(0);
         devicePacking_ = macos::ContainerPacking::Packed16;
         deviceEffectiveBits_ = 0;
         deviceContainerBits_ = 0;
@@ -1869,13 +1919,22 @@ private:
     std::atomic<uint32_t> dopDeviceRate_{0};
     std::atomic<bool> dopExclusiveRateOk_{false};
     size_t buffer_frames_ = 0;
-    size_t frames_written_ = 0;
+    UInt32 maximum_slice_frames_ = 0;
+    std::atomic<uint64_t> render_callbacks_{0};
+    // 最近一次回调的现场（见 render_trampoline 注释）
+    std::atomic<uint32_t> last_render_flags_{0};
+    std::atomic<double>   last_render_sample_time_{-1.0};
+    std::atomic<uint32_t> last_render_bytes_{0};
+    std::atomic<uint32_t> last_render_frames_{0};
+    std::atomic<uint64_t> io_restarts_{0};
+    std::atomic<size_t> frames_written_{0};
 
     // 环形缓冲（帧）
     std::vector<int32_t> ring_;
     size_t ring_frames_ = 0;
-    size_t write_pos_ = 0;
-    size_t read_pos_ = 0;
+    // Single producer / single callback: publish PCM before advancing the write cursor.
+    std::atomic<size_t> write_pos_{0};
+    std::atomic<size_t> read_pos_{0};
     std::atomic<uint64_t> underruns_{0};
     std::atomic<size_t> frames_rendered_{0};
 

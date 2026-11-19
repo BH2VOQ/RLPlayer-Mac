@@ -177,6 +177,1149 @@ if(APPLE)
     RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
   # 1.1.5.1：中国大陆更新通道用 Security.framework 做 PS256 验签
   target_link_libraries(rlplayer_mac PRIVATE rlapp_core "-framework AppKit" "-framework WebKit" "-framework Security")
+
+  # ---------------- 2026-11-11：纯 AppKit 原生客户端（1.1.7.1 起，从零实现） ----------------
+  # 与 web 版并行：rlplayer_mac 保持默认/回退；rlplayer_native 是新的原生客户端，
+  # 主内容区**没有任何 WKWebView**（--selftest 会断言 webviews=0）。
+  # 业务核心复用 rlapp_core（同一份 /api dispatch），UI 层不复制播放/曲库真相。
+  add_executable(rlplayer_native
+    tools/native_ui/main.mm
+    tools/native_ui/RLPAppDelegate.mm
+    tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPEQGeometry.mm
+    tools/native_ui/RLPMainWindowController.mm
+    tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPPlaceholderViewController.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm
+    tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm
+    tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPRecentViewController.mm
+    tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPStreamingViewController.mm
+    tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPFunctionalAudit.mm
+    tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPTrackActions.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTargetCurve.mm
+    tools/mac_update.mm)
+  set_source_files_properties(
+    tools/mac_update.mm
+    tools/native_ui/main.mm tools/native_ui/RLPAppDelegate.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm tools/native_ui/RLPArtistDetailViewController.mm
+    tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPTracksViewController.mm
+    tools/native_ui/RLPFoldersViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPFunctionalAudit.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(rlplayer_native PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_compile_definitions(rlplayer_native PRIVATE
+    RL_WITH_UPDATE=1
+    RLPLAYER_VERSION_STR="${RLPLAYER_VERSION_FOR_APP}")
+  # MediaPlayer：媒体键（MPRemoteCommandCenter）与锁屏正在播放信息。原生客户端的必备能力，
+  # web 版做不到（页面 JS 拿不到系统媒体键）。
+  target_link_libraries(rlplayer_native PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security" "-framework MediaPlayer"
+    "-framework AVFoundation" "-framework CoreMedia")   # --audit 夹具读真实时长（索引 dur 不许自欺；CMTimeGetSeconds 在 CoreMedia）
+
+  # Offline contracts for the frozen web album and mini bar.
+  add_executable(test_native_album_web tests/test_native_album_web.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm)
+  # 全程序「每页只有一层滚动」（用户 2026-11-15 明确：不要大框架套小框架）。
+  # 判据遍历左导航全部 key，统计每页"真的能滚"的容器数量，必须恰好 1（页面根那根）。
+  add_executable(test_native_single_scroll tests/test_native_single_scroll.mm
+    tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/mac_update.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  set_source_files_properties(tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_compile_options(test_native_single_scroll PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_single_scroll PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_single_scroll PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_single_scroll PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework WebKit" "-framework Security"
+    "-framework MediaPlayer" "-framework AVFoundation" "-framework CoreMedia")
+  add_test(NAME native_single_scroll COMMAND test_native_single_scroll)
+  set_tests_properties(native_single_scroll PROPERTIES TIMEOUT 240)
+
+  # EQ 页端到端（真 embedded 核心 / 真数据 / 真拖动）。上一轮那批"全绿"的单测与审计
+  # 与产品共用同一套错误假设，于是"JSON 键读错 + bands 格式全错"两条真故障双双假绿。
+  # 这条判据只认核心状态里的事实：哪一段的 gain 真的变了。
+  add_executable(test_native_eq_contract tests/test_native_eq_contract.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPEQGeometry.mm
+    tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPCoreClient.mm
+    # E12 走设置页的真实刷新入口（reloadData），所以需要整套设置页。
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/mac_update.mm)
+  target_compile_options(test_native_eq_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_eq_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_eq_contract PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework Security")
+  add_test(NAME native_eq_contract COMMAND test_native_eq_contract)
+  set_tests_properties(native_eq_contract PROPERTIES TIMEOUT 180)
+
+  add_executable(test_native_eq_geometry tests/test_native_eq_geometry.mm
+    tools/native_ui/RLPEQGeometry.mm)
+  target_compile_options(test_native_eq_geometry PRIVATE -fobjc-arc)
+  target_include_directories(test_native_eq_geometry PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_eq_geometry PRIVATE "-framework AppKit" "-framework Foundation")
+  add_test(NAME native_eq_geometry COMMAND test_native_eq_geometry)
+  add_executable(test_native_shortcuts tests/test_native_shortcuts.mm
+    tools/native_ui/RLPShortcuts.mm)
+  target_compile_options(test_native_shortcuts PRIVATE -fobjc-arc)
+  target_include_directories(test_native_shortcuts PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_shortcuts PRIVATE "-framework AppKit" "-framework Foundation")
+  add_test(NAME native_shortcuts COMMAND test_native_shortcuts)
+  add_executable(test_native_bar_web tests/test_native_bar_web.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm  tools/native_ui/RLPVolumeKnobView.mm
+)
+  foreach(t IN ITEMS test_native_album_web test_native_bar_web)
+    target_compile_options(${t} PRIVATE -fobjc-arc)
+    target_include_directories(${t} PRIVATE src tools tools/native_ui)
+    # QuartzCore：第14项的半透明判据要造两层渐变背景（CAGradientLayer）来证明
+    # 「换背景后条内像素真的变化」，这是"真磨砂"唯一有意义的证明方式。
+    target_link_libraries(${t} PRIVATE "-framework AppKit" "-framework QuartzCore")
+  endforeach()
+  target_link_libraries(test_native_album_web PRIVATE rlapp_core)
+  add_test(NAME native_album_web COMMAND test_native_album_web)
+  add_test(NAME native_bar_web COMMAND test_native_bar_web)
+
+  # 底栏 × 真实 embedded 核心（第2项判据的快速版：秒级，不必等一轮 13 分钟的 --audit）。
+  # 为什么单独建一个可执行文件：--audit 是整窗离屏审计，跑一轮十几分钟；
+  # 而「播放中底栏图标是否切成暂停」是一个三段异步（轮询→回调→应用状态）的不变量，
+  # 改一行判据就要重跑整窗是不可接受的反馈周期。这里只装底栏 + 核心。
+  # 纪律：backend=null + volume=-120 —— 只跑 DSP，绝不打开设备（铁律②）。
+  add_executable(test_native_bar_core tests/test_native_bar_core.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  target_compile_options(test_native_bar_core PRIVATE -fobjc-arc)
+  target_include_directories(test_native_bar_core PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_bar_core PRIVATE rlapp_core
+    "-framework AppKit" "-framework MediaPlayer")
+
+  # 播放/暂停三入口请求契约（P0-1）：底栏 / 播放页 / 菜单·媒体键显式命令。
+  # 桩核心只记录请求路径，不启动播放核心、不打开音频设备。
+  # 对 1.1.7.32 先跑红：停止态只发 /api/pause?on=0（no-op）、媒体键沿用 isPlaying 快照。
+  add_executable(test_native_pause_paths tests/test_native_pause_paths.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_pause_paths PRIVATE -fobjc-arc)
+  target_include_directories(test_native_pause_paths PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pause_paths PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_executable(test_native_queue_import_contract tests/test_native_queue_import_contract.mm
+    tools/native_ui/RLPQueueViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_queue_import_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_queue_import_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_queue_import_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_queue_import_contract COMMAND test_native_queue_import_contract)
+  set_tests_properties(native_queue_import_contract PROPERTIES TIMEOUT 60)
+
+  add_test(NAME native_pause_paths COMMAND test_native_pause_paths)
+  set_tests_properties(native_pause_paths PROPERTIES TIMEOUT 120)
+  # 单层滚动 + EQ 曲线拖动（第6/7项）。**必须真实窗口响应链**：
+  # 上一轮的 EQ 拖动判据只调 applyDragEvent:（等于只测换算函数），
+  # 完全证明不了「真实鼠标事件能走到这个视图」——本轮换成 NSWindow sendEvent。
+  add_executable(test_native_scroll_eq tests/test_native_scroll_eq.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPTrackActions.mm
+    tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_scroll_eq PRIVATE -fobjc-arc)
+  target_include_directories(test_native_scroll_eq PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_scroll_eq PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_scroll_eq COMMAND test_native_scroll_eq)
+  set_tests_properties(native_scroll_eq PROPERTIES TIMEOUT 120)
+
+  # OPRA 卡片墙（P1）：型号卡片 + 预设卡片墙 + 目标曲线小图 + 当前态 + 应用请求。
+  # 对 1.1.7.34 先跑红（旧码是型号下拉 + 预设下拉，没有卡片/曲线小图/当前态）。
+  add_executable(test_native_opra_cards tests/test_native_opra_cards.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_opra_cards PRIVATE -fobjc-arc)
+  target_include_directories(test_native_opra_cards PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_opra_cards PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_opra_cards COMMAND test_native_opra_cards)
+
+  add_executable(test_native_volume_knob tests/test_native_volume_knob.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPTheme.mm)
+  target_compile_options(test_native_volume_knob PRIVATE -fobjc-arc)
+  target_include_directories(test_native_volume_knob PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_volume_knob PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework Security")
+  add_test(NAME native_volume_knob COMMAND test_native_volume_knob)
+  set_tests_properties(native_opra_cards PROPERTIES TIMEOUT 120)
+
+  # 「AI 整理」栏三张卡片的几何判据（第5项）：离屏量真实视图树，不开窗、不出声。
+  # 旧码没有 dot/name/status/p1/p2 子视图（NSButton 多行标题），先跑红再改绿。
+  add_executable(test_native_rail_cards tests/test_native_rail_cards.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_rail_cards PRIVATE -fobjc-arc)
+  target_include_directories(test_native_rail_cards PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_rail_cards PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_rail_cards COMMAND test_native_rail_cards)
+  set_tests_properties(native_rail_cards PROPERTIES TIMEOUT 120)
+
+  # 「AI 整理」栏内容级判据：三卡的 summary 预览/两档/点击实体类型/URL 形状。
+  # 对旧码先跑红（旧码只显示本地事实 + 点开查看、点击 kind 恒为 track），改完再跑绿。
+  add_executable(test_native_rail_preview tests/test_native_rail_preview.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_rail_preview PRIVATE -fobjc-arc)
+  target_include_directories(test_native_rail_preview PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_rail_preview PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_rail_preview COMMAND test_native_rail_preview)
+  set_tests_properties(native_rail_preview PROPERTIES TIMEOUT 120)
+
+  # 「正在播放 · 音频分析面板」web #npAnal 对齐判据：头部独立标题/右对齐状态/单一边框
+  # 分段控件（C1 同源几何）+ L0 摘要卡（标题 10.5/摘要 11.5/内边距 7-9-8/多声道徽标
+  # + 高度随内容生长）+ 展开档 L1/L2 仍保留三卡并在卡内长出 2 列指标网格（旧码是
+  # 「隐藏三卡 + 一块纯文本 blob」）。对 1.1.7.24 先跑红，改完再跑绿。
+  add_executable(test_native_analysis_panel tests/test_native_analysis_panel.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_analysis_panel PRIVATE -fobjc-arc)
+  target_include_directories(test_native_analysis_panel PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_analysis_panel PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_analysis_panel COMMAND test_native_analysis_panel)
+  set_tests_properties(native_analysis_panel PROPERTIES TIMEOUT 120)
+
+  # 正在播放页 #npMeta 芯片行 = web `.npmline` + `.badge` + `.chip`：
+  # 徽标逐值（9.5/600/kern.3/radius5/acc-weak/ok-bg）+ EQ/IR 芯片（settings.kv.eq/ir）
+  # + 投放/加歌单同处一行 + flex-wrap（窄宽不重叠、行高增长、按钮行下移）。
+  # 对 1.1.7.26 先跑红（旧码只有 4 个 11pt/radius10 徽标，整行受 meta.enriched 闸门，
+  # EQ/IR/投放/加歌单根本不在这一行，也没有换行）。改完再跑绿。
+  add_executable(test_native_npmeta_chips tests/test_native_npmeta_chips.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_npmeta_chips PRIVATE -fobjc-arc)
+  target_include_directories(test_native_npmeta_chips PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_npmeta_chips PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_npmeta_chips COMMAND test_native_npmeta_chips)
+  set_tests_properties(native_npmeta_chips PROPERTIES TIMEOUT 120)
+
+  # 播放队列页排序 = web #qSort：8 档（默认/标题/艺术家/专辑/时长/年份/随机打乱/反转）、
+  # queueItemLine 的 CUE 区间保真（path \t cs \t ce）、行播放入口 playPath(file,cs,ce)。
+  # 对 1.1.7.27 先跑红（旧码只有 3 档、qorder 只发路径、播放不带区间）。改完再跑绿。
+  add_executable(test_native_queue_sort tests/test_native_queue_sort.mm
+    tools/native_ui/RLPQueueViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_queue_sort PRIVATE -fobjc-arc)
+  target_include_directories(test_native_queue_sort PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_queue_sort PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_queue_sort COMMAND test_native_queue_sort)
+  set_tests_properties(native_queue_sort PROPERTIES TIMEOUT 120)
+
+  # 收藏页/歌单页行为修正（P1 单击只选中不整列开播 / P3 单曲循环下起播前切列表循环）。
+  # 对 feat/pages-fixes 之前的旧码先跑红（旧码：action=onDoubleClick:；playFromIndex 无 mode 守卫）。
+  add_executable(test_native_pages_fixes tests/test_native_pages_fixes.mm
+    tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_pages_fixes PRIVATE -fobjc-arc)
+  target_include_directories(test_native_pages_fixes PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pages_fixes PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_pages_fixes COMMAND test_native_pages_fixes)
+  set_tests_properties(native_pages_fixes PROPERTIES TIMEOUT 120)
+
+  # 页面 P8–P12 判据（歌单页顶栏标题/计数、曲目页搜索空态与单一搜索入口、
+  # 右键收藏双向、收藏/最近列结构）。用真主窗口 + 全量页面（与 test_native_single_scroll
+  # 同一份源码清单）；客户端用记录型 spy 替换 +[RLPCoreClient shared]：不启动核心、不出声。
+  add_executable(test_native_pages_p812 tests/test_native_pages_p812.mm
+    tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/mac_update.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  set_source_files_properties(tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_compile_options(test_native_pages_p812 PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_pages_p812 PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_pages_p812 PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pages_p812 PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework WebKit" "-framework Security"
+    "-framework MediaPlayer" "-framework AVFoundation" "-framework CoreMedia")
+  add_test(NAME native_pages_p812 COMMAND test_native_pages_p812)
+  set_tests_properties(native_pages_p812 PROPERTIES TIMEOUT 240)
+
+  # 播放队列页行布局 = web `.qrow`：4 列（序号/标题/文件夹/×）、行高 38、无列头、
+  # 当前行 accent-weak + 标题 accent、× 仅行悬停可见、底部分隔线。对 1.1.7.28 先跑红。
+  add_executable(test_native_queue_rows tests/test_native_queue_rows.mm
+    tools/native_ui/RLPQueueViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_queue_rows PRIVATE -fobjc-arc)
+  target_include_directories(test_native_queue_rows PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_queue_rows PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_queue_rows COMMAND test_native_queue_rows)
+  set_tests_properties(native_queue_rows PROPERTIES TIMEOUT 120)
+
+  # 右侧抽屉 D1/D2 判据：① 点歌词行 = POST /api/seek?pos=<该行时刻/时长>（后端只认 pos=，
+  # 旧码发 ratio= ⟹ 每次都跳回曲首）；② 在歌词页签切歌（底栏下一首 / 点队列行）后必须
+  # 重拉当前曲的歌词（/api/lyrics?file=B），且同一首不被每秒重拉。对旧码先跑红。
+  add_executable(test_native_right_drawer tests/test_native_right_drawer.mm
+    tools/native_ui/RLPRightDrawer.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  target_compile_options(test_native_right_drawer PRIVATE -fobjc-arc)
+  target_include_directories(test_native_right_drawer PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_right_drawer PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_right_drawer COMMAND test_native_right_drawer)
+  set_tests_properties(native_right_drawer PROPERTIES TIMEOUT 120)
+
+  # 正在播放页 D3/D4 判据：① /api/cast/start 返回 ok 后必须**立刻**刷芯片（不等 2s 轮询），
+  # 失败不许假装已推送；② 重新打开页面要重读 /api/queue 同步循环/随机模式（旧码只在换曲分支读）。
+  add_executable(test_native_np_refresh tests/test_native_np_refresh.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_np_refresh PRIVATE -fobjc-arc)
+  target_include_directories(test_native_np_refresh PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_np_refresh PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_np_refresh COMMAND test_native_np_refresh)
+  set_tests_properties(native_np_refresh PROPERTIES TIMEOUT 120)
+
+  # 顶栏搜索语义 D5 = web #q：260ms 防抖（不用回车）+ 按当前视图分派
+  # （专辑/艺术家/曲目页内过滤，其余视图才切曲目页）+ Esc/清空按当前视图重拉。
+  # 用真主窗口 + 全量页面（与 test_native_single_scroll 同一份源码清单），
+  # 客户端用记录型 spy 替换 +[RLPCoreClient shared]：不启动核心、不出声。
+  add_executable(test_native_topbar_search tests/test_native_topbar_search.mm
+    tools/native_ui/RLPShortcuts.mm
+    tools/native_ui/RLPMainWindowController.mm tools/native_ui/RLPSidebarViewController.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPArtistDetailViewController.mm tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPQueueViewController.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPRecentViewController.mm tools/native_ui/RLPFavoritesViewController.mm
+    tools/native_ui/RLPStreamingViewController.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm
+    tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/mac_update.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPPlaceholderViewController.mm tools/native_ui/RLPRightDrawer.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPAnalysisSummary.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPCoreClient.mm)
+  target_compile_options(test_native_topbar_search PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_topbar_search PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_topbar_search PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_topbar_search PRIVATE rlapp_core
+    "-framework AppKit" "-framework QuartzCore" "-framework WebKit" "-framework Security"
+    "-framework MediaPlayer" "-framework AVFoundation" "-framework CoreMedia")
+  add_test(NAME native_topbar_search COMMAND test_native_topbar_search)
+  set_tests_properties(native_topbar_search PROPERTIES TIMEOUT 240)
+
+  # 专辑页 / 文件夹页空态 = web emptyStateHtml（非 classic）：0 张专辑时空态卡
+  # （有/无 roots 两套文案 + 三个入口）与「此目录没有音频文件」。对 1.1.7.29 先跑红。
+  add_executable(test_native_empty_states tests/test_native_empty_states.mm
+    tools/native_ui/RLPAlbumsViewController.mm tools/native_ui/RLPFoldersViewController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPRemoveDir.mm)
+  target_compile_options(test_native_empty_states PRIVATE -fobjc-arc)
+  target_include_directories(test_native_empty_states PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_empty_states PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_empty_states COMMAND test_native_empty_states)
+  set_tests_properties(native_empty_states PROPERTIES TIMEOUT 120)
+
+  # AI 整理栏 nprailempty / npSummHint 状态：无实体时三卡不显示并出空态说明；
+  # loading/insufficient/error（可重试）/ok 状态行。对 1.1.7.30 先跑红。
+  add_executable(test_native_rail_states tests/test_native_rail_states.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_rail_states PRIVATE -fobjc-arc)
+  target_include_directories(test_native_rail_states PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_rail_states PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_rail_states COMMAND test_native_rail_states)
+  set_tests_properties(native_rail_states PROPERTIES TIMEOUT 120)
+
+  # 投放芯片运行态 = web npCastBtnHtml：/api/cast/state running → 「已推送到 <device>」+ ok 三令牌，
+  # 点击 = /api/cast/stop（不是弹设备列表）；否则「推送到设备」。对 1.1.7.31 先跑红。
+  add_executable(test_native_cast_chip tests/test_native_cast_chip.mm
+    tools/native_ui/RLPNowPlayingViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_compile_options(test_native_cast_chip PRIVATE -fobjc-arc)
+  target_include_directories(test_native_cast_chip PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_cast_chip PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_cast_chip COMMAND test_native_cast_chip)
+  set_tests_properties(native_cast_chip PROPERTIES TIMEOUT 120)
+
+  # 曲目页行几何/内容 = web `.trow-track`：7 列（无独立专辑列、有规格列）、响应式
+  # 1.6/1.8/1:0.9、无列头、rowHeight 34、artist — album 单格。对 1.1.7.25 先跑红。
+  add_executable(test_native_tracks_rows tests/test_native_tracks_rows.mm
+    tools/native_ui/RLPTracksViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_tracks_rows PRIVATE -fobjc-arc)
+  target_include_directories(test_native_tracks_rows PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_tracks_rows PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_tracks_rows COMMAND test_native_tracks_rows)
+  set_tests_properties(native_tracks_rows PROPERTIES TIMEOUT 120)
+
+  # 第12项「标签写回」结构+几何判据：真设置页（隔离目录、backend=null）、离屏、不出声。
+  add_executable(test_native_writeback_card tests/test_native_writeback_card.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_writeback_card PRIVATE -fobjc-arc)
+  target_include_directories(test_native_writeback_card PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_writeback_card PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_writeback_card COMMAND test_native_writeback_card)
+  set_tests_properties(native_writeback_card PROPERTIES TIMEOUT 180)
+
+  # task-3 A/B：设置页「卡片外散落控件」逐页结构判据。
+  # 判据断言每个控件的最近卡片祖先存在（共同容器），且每张卡片都有真实卡体内容；
+  # 另断言输入页不再出现第二套采集控件、输出页声道微调有按声道数生成的真实控件、
+  # 元数据两组控件各自归卡、流媒体/诊断控件全部归卡。
+  add_executable(test_native_settings_cards tests/test_native_settings_cards.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_settings_cards PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_cards PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_cards PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_settings_cards COMMAND test_native_settings_cards)
+  set_tests_properties(native_settings_cards PROPERTIES TIMEOUT 300)
+
+  # task-3 C/D：反馈就地发送（不弹窗、真 POST 到 web 同款端点）+ 诊断摘要只复制不弹面板。
+  # 网络层用测试接缝注入：断言的是 feedback_api.h 的端点/六字段/成功判定，不联网。
+  add_executable(test_native_feedback_inline tests/test_native_feedback_inline.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_feedback_inline PRIVATE -fobjc-arc)
+  target_include_directories(test_native_feedback_inline PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_feedback_inline PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_feedback_inline COMMAND test_native_feedback_inline)
+  set_tests_properties(native_feedback_inline PROPERTIES TIMEOUT 300)
+
+  # 设置页「卡片粒度 + cal 页真控件」判据（task-4）：
+  # ① EQ 页两卡（web 参数均衡 / 耳机 EQ）且各自控件归属正确；
+  # ② cal 页三卡（web 测量向导 / EQ 文件 / 房间校正 IR）；
+  # ③ sp_eq / sp_ir / sp_irgpu 必须是真控件（旧码只有 identifier 映射 ⟹ parity 假绿）；
+  # ④ 行为：改 sp_eq / sp_irgpu 后 /api/settings 对应字段真的落盘；⑤ 页签内无嵌套滚动。
+  add_executable(test_native_settings_granularity tests/test_native_settings_granularity.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm
+    tools/native_ui/RLPTargetCurve.mm tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm)
+  target_compile_options(test_native_settings_granularity PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_granularity PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_granularity PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_settings_granularity COMMAND test_native_settings_granularity)
+  set_tests_properties(native_settings_granularity PROPERTIES TIMEOUT 180)
+
+
+
+  # 更新检查结果「跨线程所有权」判据：done 回调的 const CheckResult& 是生产者的对象，
+  # 跨 dispatch_async 必须自带拷贝。旧实现引用捕获 ⟹ 主线程读已释放堆缓冲（偶发 SIGBUS）。
+  add_executable(test_native_update_result_lifetime tests/test_native_update_result_lifetime.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm)
+  target_compile_options(test_native_update_result_lifetime PRIVATE -fobjc-arc)
+  target_include_directories(test_native_update_result_lifetime PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_update_result_lifetime PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_update_result_lifetime COMMAND test_native_update_result_lifetime)
+  set_tests_properties(native_update_result_lifetime PROPERTIES TIMEOUT 120)
+
+  # 界面语言：启动时应用持久化 lang；切换时实时刷新并保留当前编辑状态。
+  # 判据先红后绿见 tests/test_native_lang.mm 文件头；真核心 + 真设置页真控件，不出声。
+  add_executable(test_native_lang tests/test_native_lang.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTargetCurve.mm tools/mac_update.mm)
+  target_compile_options(test_native_lang PRIVATE -fobjc-arc)
+  target_include_directories(test_native_lang PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_lang PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_lang COMMAND test_native_lang)
+  set_tests_properties(native_lang PROPERTIES TIMEOUT 180)
+
+  # 第8项耳机目标曲线：桥层（数组三元组/预设字段）+ 请求逐字段（web diff）+ 图上图层（像素）。
+  add_executable(test_native_target_curve tests/test_native_target_curve.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_target_curve PRIVATE -fobjc-arc)
+  target_include_directories(test_native_target_curve PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_target_curve PRIVATE
+    "-framework AppKit" "-framework QuartzCore")
+  add_test(NAME native_target_curve COMMAND test_native_target_curve)
+  set_tests_properties(native_target_curve PROPERTIES TIMEOUT 180)
+
+  add_test(NAME native_bar_core COMMAND test_native_bar_core)
+  set_tests_properties(native_bar_core PROPERTIES
+    ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin"
+    TIMEOUT 180)
+
+  # 原生 UI 的两条离线门禁（不联网、不开窗口、不发声）：
+  #   native_ui_selftest = 视图树契约（10 项，含 webviews=0）
+  #   native_ui_smoke    = ObjC 桥 → C++ 核心的真实链路（隔离 state/library，拉 ping/albums/status）
+  add_test(NAME native_default_app
+           COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/tests/check_native_default_app.cmake)
+  add_test(NAME native_ui_selftest COMMAND rlplayer_native --selftest)
+  set_tests_properties(native_ui_selftest PROPERTIES
+    ENVIRONMENT "RLPLAYER_STATE_DIR=${CMAKE_BINARY_DIR}/native-selftest-state" TIMEOUT 60)
+  add_test(NAME native_ui_smoke COMMAND rlplayer_native --smoke)
+  set_tests_properties(native_ui_smoke PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11：功能级验收（真数据 + 真导航 + 像素级主题判定 + 离屏截图）。
+  # native_ui_selftest 只问"页面能不能构造"，抓不到
+  # "专辑页双击直接播放、永远进不去详情"和"选了浅色主页还是黑的"这两类故障。
+  # 这条会真的点进去、真的量渲染出来的颜色。
+  add_test(NAME native_ui_functional
+           COMMAND rlplayer_native --audit ${CMAKE_BINARY_DIR}/native-audit-shots)
+  set_tests_properties(native_ui_functional PROPERTIES TIMEOUT 300)
+
+  # 2026-11-12：原生 vs web 的**机器生成**对照表门禁。
+  # 判据只有一条：missing 必须为 0，且每条 na 都要能在 web 前端源码里复核
+  # （web 真的没调用那个端点）。手抄清单不算数 —— 这张表由脚本从两侧源码抽出来。
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME native_ui_parity
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/native_ui/parity_scan.py --check)
+    set_tests_properties(native_ui_parity PROPERTIES TIMEOUT 120)
+    # 2026-11-12：主题令牌逐值核对 web CSS（色值/圆角/侧栏宽）。
+    # 上一轮只验"identifier 存在"，验不出"dark 底色是墨绿而 web 是近黑"这类真偏差。
+    add_test(NAME native_ui_theme
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/native_ui/theme_parity.py
+                     --bin $<TARGET_FILE:rlplayer_native> --check)
+    set_tests_properties(native_ui_theme PROPERTIES TIMEOUT 120)
+
+  # 2026-11-12：设置键「能读能写」的真核心判据。
+  # 控件在界面上 ≠ 值能落盘：/api/settings 是白名单 + 合并写，白名单外的键被**静默丢弃**
+  # （回 ok:true 但 conf 里没有），界面一切正常、重启后回到默认值。
+  # 这条对 web 设置页真实使用的键逐个写 → 读回，有一个被吞掉就红。
+  add_executable(test_native_settings_keys tests/test_native_settings_keys.mm
+    tools/native_ui/RLPCoreClient.mm)
+  set_source_files_properties(tests/test_native_settings_keys.mm
+    tools/native_ui/RLPCoreClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_native_settings_keys PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_native_settings_keys PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_settings_keys COMMAND test_native_settings_keys)
+  set_tests_properties(native_settings_keys PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：LRC 解析必须与 web parseLrc 逐条一致（offset 量纲/多时间戳/纯文本 t=-1）。
+  # 纯函数判据，不启核心、不联网、不出声。
+  add_executable(test_native_lyrics tests/test_native_lyrics.mm
+    tools/native_ui/RLPLyrics.mm)
+  set_source_files_properties(tests/test_native_lyrics.mm
+    tools/native_ui/RLPLyrics.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_native_lyrics PRIVATE ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_native_lyrics PRIVATE "-framework Foundation")
+  add_test(NAME native_lyrics COMMAND test_native_lyrics)
+  set_tests_properties(native_lyrics PROPERTIES TIMEOUT 60)
+  endif()
+
+  # 2026-11-11（1.1.7.1）：播放页音频分析「一行」的判据。
+  # 摘要判读是纯函数（构造 health 字典钉边界，含"不许用 snr_db"负向判据）；
+  # 一行几何先断言"量到了"再断言"同一行"，避免未布局时 frame 全 0 假红。
+  add_executable(test_analysis_row tests/test_analysis_row.mm
+    tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPWaveformView.mm
+    tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_analysis_row.mm
+    tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPWaveformView.mm
+    tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPKnowledgeView.mm
+    tools/native_ui/RLPNativeI18n.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_analysis_row PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_analysis_row PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME analysis_row COMMAND test_analysis_row)
+  target_sources(test_analysis_row PRIVATE tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm)
+  target_link_libraries(test_analysis_row PRIVATE "-framework CoreImage" "-framework QuartzCore")
+  target_link_libraries(rlplayer_native PRIVATE "-framework CoreImage" "-framework QuartzCore")
+  get_target_property(_np_web_sources test_analysis_row SOURCES)
+  list(FILTER _np_web_sources EXCLUDE REGEX "tests/test_analysis_row.mm$")
+  add_executable(test_native_nowplaying_web tests/test_native_nowplaying_web.mm ${_np_web_sources})
+  target_compile_options(test_native_nowplaying_web PRIVATE -fobjc-arc)
+  target_include_directories(test_native_nowplaying_web PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_nowplaying_web PRIVATE rlapp_core "-framework AppKit" "-framework CoreImage" "-framework QuartzCore")
+  add_test(NAME native_nowplaying_web COMMAND test_native_nowplaying_web)
+
+  # U2 包3：正在播放页原生波形视图（np.waveform）的判据。
+  # 先红：旧实现视图树没有 np.waveform、/api/waveform 0 次请求；
+  # 后绿：注入合成 peaks 后判 view/长度/播放头/双色/点击 seek/拖选高亮。
+  add_executable(test_native_waveform tests/test_native_waveform.mm ${_np_web_sources})
+  target_compile_options(test_native_waveform PRIVATE -fobjc-arc)
+  target_include_directories(test_native_waveform PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_waveform PRIVATE rlapp_core "-framework AppKit" "-framework CoreImage" "-framework QuartzCore")
+  add_test(NAME native_waveform COMMAND test_native_waveform)
+
+  # U2 包3：RLPNowPlayingViewController 引用 RLPWaveformView；凡编译该 VC 的目标都要带上这个 TU，
+  # 否则链接期 _OBJC_CLASS_$_RLPWaveformView 未定义。test_analysis_row 的源列表已直接包含它，
+  # test_native_nowplaying_web / test_native_waveform 由该列表派生，这里只补其余目标。
+  foreach(_wf_target IN ITEMS rlplayer_native test_native_single_scroll test_native_pause_paths
+      test_native_rail_cards test_native_rail_preview test_native_analysis_panel
+      test_native_npmeta_chips test_native_pages_p812 test_native_np_refresh
+      test_native_topbar_search test_native_rail_states test_native_cast_chip)
+    if(TARGET ${_wf_target})
+      target_sources(${_wf_target} PRIVATE tools/native_ui/RLPWaveformView.mm)
+    endif()
+  endforeach()
+
+  set_tests_properties(analysis_row PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：聆听室合并页的判据。
+  # A3「没有跳设置页的入口」在旧快速开始页上必然红（旧页有四个跳设置按钮）；
+  # A4/A5 是纯函数：档位只能选后端真实存在的滤波、DSD 档按源类型分流。
+  add_executable(test_listening_room tests/test_listening_room.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+  )
+  set_source_files_properties(tests/test_listening_room.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_listening_room PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_listening_room PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME listening_room COMMAND test_listening_room)
+  set_tests_properties(listening_room PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：专业工作台的判据。
+  # B3a/B3d 是**安全性判据**：A/B 快照绝不能含 device/backend/hogexcl，
+  # 否则 A/B 对比时会切输出设备、抢独占、爆音。
+  # B2 钉住"不适用的信号链节点必须真的灰掉"（PCM 下的 SDM、DoP 下的 shaper）。
+  add_executable(test_workbench tests/test_workbench.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+  )
+  set_source_files_properties(tests/test_workbench.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_workbench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_workbench PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME workbench COMMAND test_workbench)
+  set_tests_properties(workbench PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：双模式页面的「设置读回」真链路判据。
+  # 触发原因是真 BUG：/api/settings 的值在 kv 子对象里，而新页面最初读顶层
+  # ⟹ 全部静默回落默认值、A/B 快照抓空。三条离线判据都不启动核心，抓不到它。
+  # 纪律：隔离 state/library + backend=null + volume=-120，不开设备、不出声。
+  add_executable(test_mode_settings_readback tests/test_mode_settings_readback.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPListeningRoom.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_mode_settings_readback.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_mode_settings_readback PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_mode_settings_readback PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME mode_settings_readback COMMAND test_mode_settings_readback)
+  set_tests_properties(mode_settings_readback PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：流媒体服务器增删改/启用/测试（对齐 web SRC 区块，补交接单 §2.2 只读挂账）。
+  # 真核心判据：add/update(keepPass)/active/remove 全部写后读回；密码红线（GET 不回明文、
+  # 编辑不回填）。设置页依赖闭包较大（均衡/输入/投放/校准/更新/反馈子视图），逐一列出。
+  # 纪律：隔离 state/library + backend=null + volume=-120，不开设备、不出声。
+  add_executable(test_servers_view tests/test_servers_view.mm
+    tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPInputView.mm
+    tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm
+    tools/mac_update.mm)
+  set_source_files_properties(tests/test_servers_view.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_servers_view PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_servers_view PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME servers_view COMMAND test_servers_view)
+  set_tests_properties(servers_view PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：信号链详情（对齐 web showChain 的 /api/signal 语义）。
+  # JSON→节点是纯函数（不碰 AppKit/网络），逐分支钉住升/降采样方向、GPU、DSD、AirPlay、
+  # bit-perfect 结论、空响应不填假节点。UI 只排版，不再自己算语义。
+  add_executable(test_signal_chain tests/test_signal_chain.mm
+    tools/native_ui/RLPSignalChain.mm)
+  set_source_files_properties(tests/test_signal_chain.mm
+    tools/native_ui/RLPSignalChain.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_signal_chain PRIVATE ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_signal_chain PRIVATE "-framework Foundation")
+  add_test(NAME signal_chain COMMAND test_signal_chain)
+  set_tests_properties(signal_chain PROPERTIES TIMEOUT 60)
+
+  # 2026-11-12：删除磁盘目录的安全判据（用户授权移植）。**绝不真删磁盘**：
+  # 纯函数钉确认文案（路径/数量/不可恢复/移出库提示），真核心钉库外目录被
+  # rmdirinfo/rmdir 双重拒绝（后端 checkRemovableDirLocked 防线）。
+  add_executable(test_remove_dir tests/test_remove_dir.mm
+    tools/native_ui/RLPRemoveDir.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_remove_dir.mm
+    tools/native_ui/RLPRemoveDir.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_remove_dir PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_remove_dir PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME remove_dir COMMAND test_remove_dir)
+  set_tests_properties(remove_dir PROPERTIES TIMEOUT 120)
+
+  # 2026-11-12：AI 接入 / 联网检索端点真链路判据（用户实测报的两个真故障）。
+  # ① 保存端点把模型重置成默认（原生多发 model=，web 只发 base_url/key）；
+  # ② 测试连接失灵（原生发 api_key=，后端只认 key= ⟹ 密钥从未落盘）；
+  # ③ fetch/search 端点选项缺失（search_provider/search_base_url/search_key）。
+  # 纪律：隔离目录 + backend=null，**不连外网**（只验配置落盘与读回）。
+  add_executable(test_llm_endpoint tests/test_llm_endpoint.mm
+    tools/native_ui/RLPSettingsViewController.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm)
+  set_source_files_properties(tests/test_llm_endpoint.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPServersView.mm
+    tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPMetaSourcesView.mm tools/native_ui/RLPLibStatsView.mm
+    tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm tools/native_ui/RLPInputView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPCastView.mm tools/native_ui/RLPCalibrationView.mm
+    tools/native_ui/RLPUpdateWindowController.mm tools/native_ui/RLPFeedbackWindowController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/mac_update.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_llm_endpoint PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_llm_endpoint PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME llm_endpoint COMMAND test_llm_endpoint)
+  set_tests_properties(llm_endpoint PROPERTIES TIMEOUT 180)
+
+  # 2026-11-12：古典作品页（补齐 web setView('works') / Discogs 演绎版本）。
+  # 只验 UI 契约与输入校验，**不连外网**（离线也必须跑绿）。
+  add_executable(test_works_view tests/test_works_view.mm
+    tools/native_ui/RLPWorksViewController.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm
+    tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_works_view.mm
+    tools/native_ui/RLPWorksViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_works_view PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_works_view PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME works_view COMMAND test_works_view)
+  set_tests_properties(works_view PROPERTIES TIMEOUT 120)
+
+  # 2026-11-12：艺术家网格 / 专辑曲目表 / 播放条的**几何**判据。
+  # 这三处都是「能构造但布局错」，只有量 frame 才抓得住（前两版列宽修法都改坏了）。
+  add_executable(test_artist_grid tests/test_artist_grid.mm
+    tools/native_ui/RLPArtistsViewController.mm
+    tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_artist_grid.mm
+    tools/native_ui/RLPArtistsViewController.mm tools/native_ui/RLPAlbumDetailViewController.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPSignalChain.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_artist_grid PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_artist_grid PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME artist_grid COMMAND test_artist_grid)
+  set_tests_properties(artist_grid PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11：曲目右键菜单完整性（对齐 web trackActionMenu 四项核心动作）。
+  # 触发原因：原生曲目页只有两项、专辑详情完全没有右键菜单、队列只有两项。
+  # 2026-11-12：歌单页曲目表也接共享菜单（T14），故把歌单页与基类编进本测试。
+  add_executable(test_track_actions tests/test_track_actions.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm)
+  set_source_files_properties(tests/test_track_actions.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_include_directories(test_track_actions PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools ${CMAKE_SOURCE_DIR}/tools/native_ui)
+  target_link_libraries(test_track_actions PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME track_actions COMMAND test_track_actions)
+  set_tests_properties(track_actions PROPERTIES TIMEOUT 120)
+
+  # 2026-11-11（1.1.7.1）：/api/settings 的"写了就是写了"判据。
+  # 触发原因是一个真 BUG：白名单漏了 hogexcl ⟹ POST 回 ok:true 却不落盘、读回为空，
+  # web 版设置页的「严格独占」勾选因此从不保存。判据是黑盒三连（回显/读回/conf 原文），
+  # 只断言 ok:true 会漏掉它 —— 见 tests/test_settings_persist.cpp 头注释。
+  add_executable(test_settings_persist tests/test_settings_persist.cpp)
+  target_include_directories(test_settings_persist PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_settings_persist PRIVATE rlapp_core)
+  add_test(NAME settings_persist COMMAND test_settings_persist)
+  set_tests_properties(settings_persist PROPERTIES TIMEOUT 120)
+
+  # 2026-11-17：随机模式下手动拖动队列后，关闭随机不得回退旧顺序快照
+  # （g_q.base 未作废 → 用户手动调整整列被覆盖）。见 tests/test_queue_manual_order.cpp。
+  add_executable(test_queue_manual_order tests/test_queue_manual_order.cpp)
+  target_include_directories(test_queue_manual_order PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_queue_manual_order PRIVATE rlapp_core)
+  add_test(NAME queue_manual_order COMMAND test_queue_manual_order)
+  set_tests_properties(queue_manual_order PROPERTIES TIMEOUT 120)
+
+  # 2026-11-16：并发 POST /api/settings 的「丢键 / 写窗口内读到半截 conf」判据
+  # （评审 BLOCKER）。8 线程各 200 次写自己的键 + 2 个读线程同时读 conf 原文与
+  # GET /api/settings；旧实现（读-改-写无锁 + trunc 覆盖写）必然丢键/读到空 map。
+  add_executable(test_settings_race tests/test_settings_race.cpp)
+  target_include_directories(test_settings_race PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_settings_race PRIVATE rlapp_core)
+  add_test(NAME settings_race COMMAND test_settings_race)
+  set_tests_properties(settings_race PROPERTIES TIMEOUT 180)
+
+  # 2026-11-16（U12 第二步）：1-bit SDM 拐点准入是否真的接到三个真实入口 ——
+  #   ① 保存前置闸门（POST /api/settings：422 + 不写盘）、② 开流前闸门（DoP，进线程之前）、
+  #   ③ GET 的 additive sdm 快照（原生提示文案的真相源）。
+  # 判据是黑盒（HTTP 状态槽 / conf 原文 / /api/status.error），不看实现；
+  # 改前必然红（POST 回 ok:true 并把 modcut=20 写进 conf）。见测试文件头注释。
+  add_executable(test_sdm_settings_gate tests/test_sdm_settings_gate.cpp)
+  target_include_directories(test_sdm_settings_gate PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+  target_link_libraries(test_sdm_settings_gate PRIVATE rlapp_core)
+  add_test(NAME sdm_settings_gate COMMAND test_sdm_settings_gate)
+  set_tests_properties(sdm_settings_gate PROPERTIES TIMEOUT 180)
 endif()
 
 # ---------------- 测试 ----------------
@@ -191,7 +1334,7 @@ target_link_libraries(test_diag_run_marker PRIVATE rtadsp)
 add_test(NAME diag_run_marker COMMAND test_diag_run_marker)
 add_executable(rtadiag tools/rtadiag.cpp)
 target_link_libraries(rtadiag PRIVATE rtadsp)
-foreach(_diag_test diag_bundle diag_http diag_questions rtadiag float_decode quality_edges health_store lyrics_cache ir_resample)
+foreach(_diag_test diag_bundle diag_bundle_json diag_http diag_questions rtadiag float_decode quality_edges health_store lyrics_cache ir_resample)
   add_executable(test_${_diag_test} tests/test_${_diag_test}.cpp)
   target_link_libraries(test_${_diag_test} PRIVATE rtadsp ${RL_PLATFORM_LIBS})
   add_test(NAME ${_diag_test} COMMAND test_${_diag_test})
@@ -236,6 +1379,11 @@ if(APPLE)
   target_include_directories(test_coreaudio PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(test_coreaudio PRIVATE ${RL_PLATFORM_LIBS})
   add_test(NAME coreaudio COMMAND test_coreaudio --no-open)
+
+  add_executable(test_coreaudio_buffer_config tests/test_coreaudio_buffer_config.cpp)
+  target_include_directories(test_coreaudio_buffer_config PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_coreaudio_buffer_config PRIVATE ${RL_PLATFORM_LIBS})
+  add_test(NAME coreaudio_buffer_config COMMAND test_coreaudio_buffer_config)
 
   # 回环逐位比对工具（Aggregate Tap / 虚拟设备输入侧；默认电平 -60 dBFS）
   # rtaloop_tap.mm：CATapDescription/AudioHardwareCreateProcessTap 是 ObjC++ 门控，
@@ -444,9 +1592,24 @@ add_executable(test_modulator_families tests/test_modulator_families.cpp)
 target_link_libraries(test_modulator_families PRIVATE rtadsp)
 add_test(NAME modulator_families COMMAND test_modulator_families)
 
+# ---------------- 2026-11-16：U12 1-bit SDM 输出 corner 准入（设置前置闸门的契约测试）----------------
+# 策略照抄上游语义，见 src/dsp/sdm_output_policy.h 顶部注释：非真 EC 的 1-bit
+# corner 必须 >= 100 kHz，Chebyshev 优先于 ecCorrection（不豁免），corner<=0/NaN
+# 单独一条错误。纯策略头单测：不实例化调制器、不碰设备、不发声。
+# 绝不静默换 corner —— 本测试同时锁死「非法值不得被改写成 100 kHz 后放行」的错误码。
+add_executable(test_sdm_policy tests/test_sdm_policy.cpp)
+target_link_libraries(test_sdm_policy PRIVATE rtadsp)
+add_test(NAME sdm_policy COMMAND test_sdm_policy)
+
 add_executable(test_filters tests/test_filters.cpp)
 target_link_libraries(test_filters PRIVATE rtadsp)
 add_test(NAME filters COMMAND test_filters)
+
+# ---------------- 2026-11-16：U8 滤波器族标注（纯头分类器 / 展示文案）----------------
+# 判据见 tests/test_filter_family.cpp 顶部：真实名字表、负向对照、全量归族、相位正交。
+add_executable(test_filter_family tests/test_filter_family.cpp)
+target_link_libraries(test_filter_family PRIVATE rtadsp)
+add_test(NAME filter_family COMMAND test_filter_family)
 
 # PCM 回放质量量测报告工具（离线客观量测，不打开音频设备）
 add_executable(pcm_quality_report tests/pcm_quality_report.cpp)
@@ -455,6 +1618,10 @@ target_link_libraries(pcm_quality_report PRIVATE rtadsp)
 add_executable(test_pipeline tests/test_pipeline.cpp)
 target_link_libraries(test_pipeline PRIVATE rtadsp)
 add_test(NAME pipeline COMMAND test_pipeline)
+
+add_executable(test_pipeline_apodizing tests/test_pipeline_apodizing.cpp)
+target_link_libraries(test_pipeline_apodizing PRIVATE rtadsp)
+add_test(NAME pipeline_apodizing COMMAND test_pipeline_apodizing)
 
 add_executable(test_conv_matrix tests/test_conv_matrix.cpp)
 target_link_libraries(test_conv_matrix PRIVATE rtadsp)
@@ -537,6 +1704,12 @@ add_executable(test_eq_reload tests/test_eq_reload.cpp ${RL_LOOPBACK_SRC} ${RL_I
 target_include_directories(test_eq_reload PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
 target_link_libraries(test_eq_reload PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
 add_test(NAME eq_reload COMMAND test_eq_reload)
+
+add_executable(test_playback_control_reset tests/test_playback_control_reset.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
+target_include_directories(test_playback_control_reset PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_playback_control_reset PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+add_test(NAME playback_control_reset COMMAND test_playback_control_reset)
+set_tests_properties(playback_control_reset PROPERTIES TIMEOUT 60)
 
 # ---------------- 1.1.2 DSD 播放可靠性热修（P0-1 / P0-2）----------------
 # P0-2：直通资格不得被"同族速率计划可用"覆盖（EQ/IR/音量/响度/RG/trim/声道变化）。
@@ -641,6 +1814,11 @@ add_test(NAME buffer_policy COMMAND test_buffer_policy)
 add_executable(test_ratepick tests/test_ratepick.cpp)
 target_include_directories(test_ratepick PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME ratepick COMMAND test_ratepick)
+
+# U5（v3.3.11）：PCM 采样率族策略真值表（prefer|strict|compatible；7056000 必须 unknown）。
+add_executable(test_rate_family_policy tests/test_rate_family_policy.cpp)
+target_include_directories(test_rate_family_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME rate_family_policy COMMAND test_rate_family_policy)
 
 # 最小 ZIP（STORE）打包结构（2026-10-22 功能3「导出诊断 = 一个压缩包」）。
 # 纯内存、零外部依赖、不调 PowerShell（理由见 src/net/zipstore.h 头注）。
@@ -784,7 +1962,7 @@ if(NODE_EXECUTABLE)
   add_test(NAME llm_ui COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_llm_ui.js)
   set_tests_properties(llm_ui PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
   # 1.1.4-beta10：合作艺术家拆分 / 艺术家卡简介 / 首页艺术家归属 —— 纯逻辑，不需要浏览器
-  # （本机规则：禁止自起无头浏览器；能离线证明的先证明，几何量测改为侧边栏目视验收）
+  # （本机规则：不要自起浏览器进程；能离线证明的先证明，几何量测改为 ego 页面内自检）
   add_test(NAME b10_logic COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_b10_logic.js)
   set_tests_properties(b10_logic PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 30)
   # 1.1.5-beta2：UI 资料检索契约（album/file 传参、knowledge 轮询单飞、资料不足态）——纯逻辑
@@ -799,6 +1977,16 @@ if(PYTHON3_EXECUTABLE)
   add_test(NAME i18n_table_check
            COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_i18n_table.py --check)
   set_tests_properties(i18n_table_check PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
+  # 原生 UI 词表同步：tools/native_ui/RLPNativeI18n.mm 由 gen_native_i18n.py 生成，
+  # 改过 docs/i18n 却忘了重生成时英文界面会回落中文（2026-11-14 实测已漂移 2 条）。
+  add_test(NAME native_i18n_table_check
+           COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_native_i18n.py --check)
+  set_tests_properties(native_i18n_table_check PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
+  # 原生 UI 文案覆盖：源码里每个 RLPTr(@"中文") 都必须有英文译文。
+  # 为什么不靠人眼：原生一路加控件，新增短文案很容易绕过词表（英文界面中英混排）。
+  add_test(NAME native_i18n_coverage
+           COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_native_i18n_coverage.py)
+  set_tests_properties(native_i18n_coverage PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 60)
 endif()
 
 add_executable(test_raop_session tests/test_raop_session.cpp)
@@ -931,6 +2119,27 @@ add_executable(test_room_measurement tests/test_room_measurement.cpp)
 target_include_directories(test_room_measurement PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME room_measurement COMMAND test_room_measurement)
 
+# U4：测量麦克风校准曲线（纯 header：解析 / 对数插值 / 读数减校准）
+add_executable(test_mic_cal tests/test_mic_cal.cpp)
+target_include_directories(test_mic_cal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME mic_cal COMMAND test_mic_cal)
+
+# U4 第二步：/api/miccal 黑盒（导入→GET 读回→清除；坏文件 400 + 稳定 code）。
+# 需要 rlapp_core：判据走的是真实 handle()（与 App/CLI 同一份 dispatch），不是另写一份 handler。
+add_executable(test_mic_cal_api tests/test_mic_cal_api.cpp)
+target_include_directories(test_mic_cal_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_mic_cal_api PRIVATE rlapp_core)
+add_test(NAME mic_cal_api COMMAND test_mic_cal_api)
+set_tests_properties(mic_cal_api PROPERTIES TIMEOUT 120)
+
+# U16（上游 v3.3.11）：工作台命名配置档 /api/profiles 黑盒（save→读回→apply 逐键一致→delete）。
+# 与 mic_cal_api 同一路径：进程内 rlapp::dispatch，不监听端口、不开音频设备。
+add_executable(test_profiles_api tests/test_profiles_api.cpp)
+target_include_directories(test_profiles_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_profiles_api PRIVATE rlapp_core)
+add_test(NAME profiles_api COMMAND test_profiles_api)
+set_tests_properties(profiles_api PROPERTIES TIMEOUT 120)
+
 add_executable(rtahealth tools/rtahealth.cpp)
 target_include_directories(rtahealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(rtahealth PRIVATE ${RL_PLATFORM_LIBS})
@@ -980,6 +2189,30 @@ add_test(NAME dsd_rate_convert COMMAND test_dsd_rate_convert)
 add_executable(test_feedback_redact tests/test_feedback_redact.cpp)
 target_include_directories(test_feedback_redact PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME feedback_redact COMMAND test_feedback_redact)
+
+# 2026-11-11：反馈接入 rlplayer.rainlain.com 后台的纯逻辑层（零网络 / 零磁盘 / 零 ObjC）。
+# 判据：请求体字段与上限（字节不是字符）、JSON 转义往返、诊断 base64 往返、
+#       响应解析（HTTP 200 + ok:false 必须判失败）、错误码→中文与可重试性、
+#       幂等键格式、安装 ID 形态（宿主侧持久化另由 mac_transport/实机覆盖）。
+add_executable(test_feedback_api tests/test_feedback_api.cpp)
+target_include_directories(test_feedback_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME feedback_api COMMAND test_feedback_api)
+add_executable(test_install_id tests/test_install_id.cpp)
+target_include_directories(test_install_id PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME install_id COMMAND test_install_id)
+
+# 1.1.7.1：随机播放排列（一轮不重复 / 重洗不立刻重复上一首 / 均匀性）。
+add_executable(test_shuffle_order tests/test_shuffle_order.cpp)
+target_include_directories(test_shuffle_order PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME shuffle_order COMMAND test_shuffle_order)
+
+# 真实后台端到端（默认 SKIP，不联网；RLPLAYER_FEEDBACK_LIVE=1 才建单，结束自动删除）。
+# 证明的是纯逻辑层证明不了的四件事：后台真的接受这份请求体、幂等重放同号、
+# client 能取回诊断包且逐字节一致、7 天内自助删除可用。
+add_executable(test_feedback_live tests/test_feedback_live.cpp)
+target_include_directories(test_feedback_live PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_feedback_live PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME feedback_live COMMAND test_feedback_live)
 
 # R-1：房间测量的 mac 传输层（CoreAudio）。
 # §1 算法链零设备（默认跑）；§2/§3 真开设备需 RTA_ROOM_HW=1，§3 真出声还需 RTA_ROOM_AUDIBLE=1
@@ -1177,6 +2410,15 @@ target_include_directories(test_ai_fill PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_ai_fill PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME ai_fill COMMAND test_ai_fill)
 
+# ---------------- 1.1.7.90：歌词 AI（翻译 / 音译 / 假名 / 繁体，移植上游 v3.3.11 lyrics_ai.h）
+# 全离线：假 LLM 走 LlmConfig.transport 钩子 ⟹ 不出网、不需要 key。
+# 判据：行数守恒 / 空行保留 / finish_reason=length 不交付 / 行数不符拒绝 / no_key /
+#       LRC 时间戳前缀逐字节保留。
+add_executable(test_lyrics_ai tests/test_lyrics_ai.cpp)
+target_include_directories(test_lyrics_ai PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_lyrics_ai PRIVATE ${RL_PLATFORM_LIBS})
+add_test(NAME lyrics_ai COMMAND test_lyrics_ai)
+
 option(RTA_BUILD_LEGACY_TESTS "构建尚未移植到 macOS 的旧测试（缺 POSIX 垫片，默认关闭）" OFF)
 if(RTA_BUILD_LEGACY_TESTS)
 
@@ -1220,3 +2462,276 @@ target_link_libraries(dsdconv PRIVATE rtadsp)
 # 已移出守卫。⚠️ 实测它能编译并运行通过，只是依赖 windows.h 之外的垫片——
 # 仍放在 RTA_BUILD_LEGACY_TESTS 开关内，等 wp-d2-tests 的 POSIX 垫片合并后随整块打开。
 endif()   # RTA_BUILD_LEGACY_TESTS
+
+# U2 包1：波形峰值包络（src/analysis/waveform.h，纯头、零平台依赖）。
+# 判据：30 s/48 kHz 合成信号 10.0 s 唯一满幅脉冲 → bins=300 最大 bin ∈ [99,101]；
+# 分块（1024 帧）与整段逐 bin 逐位相等；边界/bins 钳位/totalFrames=0 不崩。
+# 全程离线：不开音频设备、不解码真实文件、不读写缓存（铁律 1）。
+add_executable(test_waveform tests/test_waveform.cpp)
+target_include_directories(test_waveform PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME waveform COMMAND test_waveform)
+
+# U2 包2：GET /api/waveform 黑盒（波形本体 / LRU 命中 / FileIdentity 失效 / bins 钳位 /
+# CUE 区间 / 路径稳定码）。需要 rlapp_core：判据走真实 handle()，不是另写一份 handler。
+add_executable(test_waveform_api tests/test_waveform_api.cpp)
+target_include_directories(test_waveform_api PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_waveform_api PRIVATE rlapp_core)
+add_test(NAME waveform_api COMMAND test_waveform_api)
+set_tests_properties(waveform_api PROPERTIES TIMEOUT 180)
+
+# 2026-11-16 评审 MAJOR：DSD 抽取设置按值快照（写侧唯一整组入口）。
+# 判据：并发 3 写 1 读，读到的每次快照都必须是 A 或 B 的完整三元组（旧实现的引用读会出现撕裂组合）。
+add_executable(test_dsd_settings_snapshot tests/test_dsd_settings_snapshot.cpp)
+target_include_directories(test_dsd_settings_snapshot PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dsd_settings_snapshot COMMAND test_dsd_settings_snapshot)
+set_tests_properties(dsd_settings_snapshot PROPERTIES TIMEOUT 120)
+
+# 2026-11-16 评审 MINOR：AI 歌词缓存目录容量上限（最多 500 文件 / 200 MB，按 mtime 最旧先删）。
+add_executable(test_lyrics_cache_prune tests/test_lyrics_cache_prune.cpp)
+target_include_directories(test_lyrics_cache_prune PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME lyrics_cache_prune COMMAND test_lyrics_cache_prune)
+set_tests_properties(lyrics_cache_prune PROPERTIES TIMEOUT 120)
+
+# Navigation regression uses the same complete native composition as topbar search.
+if(APPLE)
+  get_target_property(_nav_sources test_native_topbar_search SOURCES)
+  list(FILTER _nav_sources EXCLUDE REGEX "tests/test_native_topbar_search\.mm$")
+  add_executable(test_native_navigation_contract tests/test_native_navigation_contract.mm ${_nav_sources})
+  target_compile_options(test_native_navigation_contract PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_navigation_contract PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_navigation_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_nav_libs test_native_topbar_search LINK_LIBRARIES)
+  target_link_libraries(test_native_navigation_contract PRIVATE ${_nav_libs})
+  add_test(NAME native_navigation_contract COMMAND test_native_navigation_contract)
+  set_tests_properties(native_navigation_contract PROPERTIES TIMEOUT 240)
+
+  add_executable(test_native_language_pages tests/test_native_language_pages.mm ${_nav_sources})
+  target_compile_options(test_native_language_pages PRIVATE -fobjc-arc)
+  target_compile_definitions(test_native_language_pages PRIVATE RL_WITH_UPDATE=1)
+  target_include_directories(test_native_language_pages PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_language_pages PRIVATE ${_nav_libs})
+  add_test(NAME native_language_pages COMMAND test_native_language_pages)
+  set_tests_properties(native_language_pages PROPERTIES TIMEOUT 180)
+
+  get_target_property(_filter_sources test_workbench SOURCES)
+  list(FILTER _filter_sources EXCLUDE REGEX "tests/test_workbench[.]mm$")
+  add_executable(test_native_filter_selection_contract tests/test_native_filter_selection_contract.mm ${_filter_sources})
+  target_compile_options(test_native_filter_selection_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_filter_selection_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_filter_libs test_workbench LINK_LIBRARIES)
+  target_link_libraries(test_native_filter_selection_contract PRIVATE ${_filter_libs})
+  add_test(NAME native_filter_selection_contract COMMAND test_native_filter_selection_contract)
+  set_tests_properties(native_filter_selection_contract PROPERTIES TIMEOUT 120)
+
+  get_target_property(_settings_sources test_native_settings_granularity SOURCES)
+  list(FILTER _settings_sources EXCLUDE REGEX "tests/test_native_settings_granularity[.]mm$")
+  add_executable(test_native_settings_readback_contract tests/test_native_settings_readback_contract.mm ${_settings_sources})
+  target_compile_options(test_native_settings_readback_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_readback_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_settings_libs test_native_settings_granularity LINK_LIBRARIES)
+  target_link_libraries(test_native_settings_readback_contract PRIVATE ${_settings_libs})
+  add_test(NAME native_settings_readback_contract COMMAND test_native_settings_readback_contract)
+  set_tests_properties(native_settings_readback_contract PROPERTIES TIMEOUT 180)
+
+  add_executable(test_native_playback_async_contract tests/test_native_playback_async_contract.mm
+    tools/native_ui/RLPRightDrawer.mm tools/native_ui/RLPLyrics.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPPlaybackBarView.mm
+    tools/native_ui/RLPQuickStartViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPVolumeKnobView.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm)
+  target_compile_options(test_native_playback_async_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_playback_async_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_playback_async_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_playback_async_contract COMMAND test_native_playback_async_contract)
+  set_tests_properties(native_playback_async_contract PROPERTIES TIMEOUT 60)
+
+  add_executable(test_native_core_shutdown_contract tests/test_native_core_shutdown_contract.mm tools/native_ui/RLPCoreClient.mm)
+  target_compile_options(test_native_core_shutdown_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_core_shutdown_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_core_shutdown_contract PRIVATE "-framework Foundation")
+  add_test(NAME native_core_shutdown_contract COMMAND test_native_core_shutdown_contract)
+  set_tests_properties(native_core_shutdown_contract PROPERTIES TIMEOUT 60)
+
+  add_executable(test_native_playback_intent_contract tests/test_native_playback_intent_contract.mm
+    tools/native_ui/RLPPlaylistsViewController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPAnalysisSummary.mm)
+  target_compile_options(test_native_playback_intent_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_playback_intent_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_playback_intent_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_playback_intent_contract COMMAND test_native_playback_intent_contract)
+  set_tests_properties(native_playback_intent_contract PROPERTIES TIMEOUT 60)
+
+  add_executable(test_native_workbench_async_contract tests/test_native_workbench_async_contract.mm ${_filter_sources})
+  target_compile_options(test_native_workbench_async_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_workbench_async_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_workbench_async_contract PRIVATE ${_filter_libs})
+  add_test(NAME native_workbench_async_contract COMMAND test_native_workbench_async_contract)
+  set_tests_properties(native_workbench_async_contract PROPERTIES TIMEOUT 90)
+
+  add_executable(test_native_peq_write_read_contract tests/test_native_peq_write_read_contract.mm ${_filter_sources})
+  target_compile_options(test_native_peq_write_read_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_peq_write_read_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_peq_write_read_contract PRIVATE ${_filter_libs})
+  add_test(NAME native_peq_write_read_contract COMMAND test_native_peq_write_read_contract)
+  set_tests_properties(native_peq_write_read_contract PROPERTIES TIMEOUT 90)
+
+  add_executable(test_native_settings_draft_contract tests/test_native_settings_draft_contract.mm ${_settings_sources})
+  target_compile_options(test_native_settings_draft_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_draft_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_draft_contract PRIVATE ${_settings_libs})
+  add_test(NAME native_settings_draft_contract COMMAND test_native_settings_draft_contract)
+  set_tests_properties(native_settings_draft_contract PROPERTIES TIMEOUT 90)
+
+  add_executable(test_native_settings_save_contract tests/test_native_settings_save_contract.mm ${_settings_sources})
+  target_compile_options(test_native_settings_save_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_save_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_save_contract PRIVATE ${_settings_libs})
+  add_test(NAME native_settings_save_contract COMMAND test_native_settings_save_contract)
+  set_tests_properties(native_settings_save_contract PROPERTIES TIMEOUT 90)
+endif()
+
+add_executable(test_filter_settings_snapshot tests/test_filter_settings_snapshot.cpp)
+target_include_directories(test_filter_settings_snapshot PRIVATE src tools)
+target_link_libraries(test_filter_settings_snapshot PRIVATE rlapp_core)
+add_test(NAME filter_settings_snapshot COMMAND test_filter_settings_snapshot)
+set_tests_properties(filter_settings_snapshot PROPERTIES TIMEOUT 120)
+
+if(APPLE)
+  add_executable(test_native_volume_contract tests/test_native_volume_contract.mm
+    tools/native_ui/RLPVolumeKnobView.mm tools/native_ui/RLPVolumeSliderView.mm
+    tools/native_ui/RLPPlaybackBarView.mm tools/native_ui/RLPNowPlayingViewController.mm
+    tools/native_ui/RLPShortcuts.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPSupport.mm tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPSignalChain.mm
+    tools/native_ui/RLPKnowledgeView.mm tools/native_ui/RLPAnalysisSummary.mm
+    tools/native_ui/RLPLyrics.mm tools/native_ui/RLPTrackActions.mm tools/native_ui/RLPWaveformView.mm)
+  target_compile_options(test_native_volume_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_volume_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_volume_contract PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework CoreImage")
+  add_test(NAME native_volume_contract COMMAND test_native_volume_contract)
+  set_tests_properties(native_volume_contract PROPERTIES TIMEOUT 120)
+
+  # 2026-11-17：窗口 autosave frame 超出屏幕时，聆听室会被屏幕边缘裁掉。
+  add_executable(test_native_window_frame tests/test_native_window_frame.mm)
+  target_compile_options(test_native_window_frame PRIVATE -fobjc-arc)
+  target_include_directories(test_native_window_frame PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_window_frame PRIVATE "-framework AppKit")
+  add_test(NAME native_window_frame COMMAND test_native_window_frame)
+  set_tests_properties(native_window_frame PROPERTIES TIMEOUT 30)
+endif()
+
+if(APPLE)
+  add_executable(test_native_listening_contract tests/test_native_listening_contract.mm
+    tools/native_ui/RLPListeningRoom.mm tools/native_ui/RLPQuickStartViewController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPModels.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPNativeI18n.mm)
+  target_compile_options(test_native_listening_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_listening_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_listening_contract PRIVATE rlapp_core "-framework AppKit")
+  add_test(NAME native_listening_contract COMMAND test_native_listening_contract)
+  set_tests_properties(native_listening_contract PROPERTIES TIMEOUT 180)
+
+  get_target_property(_listen_async_sources test_native_listening_contract SOURCES)
+  list(FILTER _listen_async_sources EXCLUDE REGEX "tests/test_native_listening_contract[.]mm$")
+  add_executable(test_native_listening_async_contract tests/test_native_listening_async_contract.mm ${_listen_async_sources})
+  target_compile_options(test_native_listening_async_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_listening_async_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_listen_async_libs test_native_listening_contract LINK_LIBRARIES)
+  target_link_libraries(test_native_listening_async_contract PRIVATE ${_listen_async_libs})
+  add_test(NAME native_listening_async_contract COMMAND test_native_listening_async_contract)
+  set_tests_properties(native_listening_async_contract PROPERTIES TIMEOUT 90)
+
+  get_target_property(_studio_sources test_workbench SOURCES)
+  list(FILTER _studio_sources EXCLUDE REGEX "tests/test_workbench[.]mm$")
+  add_executable(test_native_studio_contract tests/test_native_studio_contract.mm ${_studio_sources})
+  target_compile_options(test_native_studio_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_studio_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_studio_libs test_workbench LINK_LIBRARIES)
+  target_link_libraries(test_native_studio_contract PRIVATE ${_studio_libs})
+  add_test(NAME native_studio_contract COMMAND test_native_studio_contract)
+  set_tests_properties(native_studio_contract PROPERTIES TIMEOUT 180)
+
+  get_target_property(_modes_sources test_native_topbar_search SOURCES)
+  list(FILTER _modes_sources EXCLUDE REGEX "tests/test_native_topbar_search[.]mm$")
+  add_executable(test_native_modes_contract tests/test_native_modes_contract.mm ${_modes_sources})
+  target_compile_options(test_native_modes_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_modes_contract PRIVATE src tools tools/native_ui)
+  get_target_property(_modes_libs test_native_topbar_search LINK_LIBRARIES)
+  target_link_libraries(test_native_modes_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_modes_contract COMMAND test_native_modes_contract)
+  set_tests_properties(native_modes_contract PROPERTIES TIMEOUT 240)
+
+  # 主窗尺寸不被页面内容 fitting 撑大/锁死 + 900x600 顶栏几何（2026-11-18 用户：
+  # 切换到聆听室后窗口变长且缩不回）。新测试从 topbar 目标复用 UI 源，另加工作台两文件。
+  add_executable(test_native_window_fit_contract tests/test_native_window_fit_contract.mm
+    ${_modes_sources}
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm)
+  target_compile_options(test_native_window_fit_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_window_fit_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_window_fit_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_window_fit_contract COMMAND test_native_window_fit_contract)
+  set_tests_properties(native_window_fit_contract PROPERTIES TIMEOUT 240)
+
+  # 设置「元数据」页自身宽度收敛（隐藏 adv 不传导 fitting，900/940 下不横向溢出）。
+  add_executable(test_native_settings_width_contract tests/test_native_settings_width_contract.mm
+    ${_modes_sources})
+  target_compile_options(test_native_settings_width_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_width_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_width_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_settings_width_contract COMMAND test_native_settings_width_contract)
+  set_tests_properties(native_settings_width_contract PROPERTIES TIMEOUT 240)
+
+  # 900x600 全侧栏页宽度/滚动容器/专辑网格契约（2026-11-18 循环 debug 第 2 轮）。
+  add_executable(test_native_pages_900_contract tests/test_native_pages_900_contract.mm
+    ${_modes_sources}
+    tools/native_ui/RLPWorkbench.mm
+    tools/native_ui/RLPWorkbenchViewController.mm)
+  target_compile_options(test_native_pages_900_contract PRIVATE -fobjc-arc)
+  target_include_directories(test_native_pages_900_contract PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_pages_900_contract PRIVATE ${_modes_libs})
+  add_test(NAME native_pages_900_contract COMMAND test_native_pages_900_contract)
+  set_tests_properties(native_pages_900_contract PROPERTIES TIMEOUT 240)
+endif()
+
+add_executable(test_windows_filter_parity tests/test_windows_filter_parity.cpp)
+target_link_libraries(test_windows_filter_parity PRIVATE rtadsp)
+add_test(NAME windows_filter_parity COMMAND test_windows_filter_parity)
+set_tests_properties(windows_filter_parity PROPERTIES TIMEOUT 180)
+
+add_executable(test_volume_backend_contract tests/test_volume_backend_contract.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
+target_include_directories(test_volume_backend_contract PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_volume_backend_contract PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+add_test(NAME volume_backend_contract COMMAND test_volume_backend_contract)
+set_tests_properties(volume_backend_contract PROPERTIES TIMEOUT 120)
+
+add_executable(test_preset_apply_contract tests/test_preset_apply_contract.cpp ${RL_LOOPBACK_SRC} ${RL_IMAGE_THUMB_SRC})
+target_include_directories(test_preset_apply_contract PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(test_preset_apply_contract PRIVATE rtadsp ${RL_PLATFORM_LIBS} "-framework Foundation" ${RL_IMAGE_FRAMEWORKS})
+add_test(NAME preset_apply_contract COMMAND test_preset_apply_contract)
+set_tests_properties(preset_apply_contract PROPERTIES TIMEOUT 120)
+
+# Native mode host composition: every fixture that embeds the main window
+# must also link its professional home, just as the shipped App does.
+if(APPLE)
+  get_property(_mode_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_mode_target IN LISTS _mode_targets)
+    get_target_property(_mode_sources ${_mode_target} SOURCES)
+    if(_mode_sources)
+      list(FIND _mode_sources "tools/native_ui/RLPMainWindowController.mm" _mode_host_index)
+      if(NOT _mode_host_index EQUAL -1)
+        foreach(_mode_source tools/native_ui/RLPWorkbench.mm tools/native_ui/RLPWorkbenchViewController.mm tools/native_ui/RLPSignalChain.mm)
+          list(FIND _mode_sources "${_mode_source}" _mode_source_index)
+          if(_mode_source_index EQUAL -1)
+            target_sources(${_mode_target} PRIVATE ${_mode_source})
+          endif()
+        endforeach()
+      endif()
+    endif()
+  endforeach()
+endif()

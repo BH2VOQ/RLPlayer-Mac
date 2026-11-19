@@ -76,8 +76,9 @@ static int run(const std::string& cmd) {
     return std::system((cmd + " >/dev/null 2>&1").c_str());
 }
 
-// 造一个最小但结构合法的 .app（有 Info.plist + MacOS/RLPlayer）
-static bool make_fake_app(const std::string& path, const std::string& marker) {
+// 造一个最小但结构合法的 .app（有 Info.plist + MacOS/RLPlayer；可选写 CFBundleShortVersionString）
+static bool make_fake_app(const std::string& path, const std::string& marker,
+                          const std::string& shortVersion = "") {
     if (run("mkdir -p '" + path + "/Contents/MacOS'") != 0) return false;
     FILE* f = std::fopen((path + "/Contents/MacOS/RLPlayer").c_str(), "wb");
     if (!f) return false;
@@ -86,13 +87,23 @@ static bool make_fake_app(const std::string& path, const std::string& marker) {
     ::chmod((path + "/Contents/MacOS/RLPlayer").c_str(), 0755);
     FILE* p = std::fopen((path + "/Contents/Info.plist").c_str(), "wb");
     if (!p) return false;
-    const std::string plist =
+    std::string plist =
         "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
-        "<key>CFBundleIdentifier</key><string>com.rta.rlplayer.f4test</string>"
-        "</dict></plist>";
+        "<key>CFBundleIdentifier</key><string>com.rta.rlplayer.f4test</string>";
+    if (!shortVersion.empty()) {
+        plist += "<key>CFBundleShortVersionString</key><string>" + shortVersion + "</string>";
+    }
+    plist += "</dict></plist>";
     std::fwrite(plist.data(), 1, plist.size(), p);
     std::fclose(p);
     return true;
+}
+
+static std::string read_plist_short_version(const std::string& appPath) {
+    NSString* p = [NSString stringWithUTF8String:(appPath + "/Contents/Info.plist").c_str()];
+    NSDictionary* d = [NSDictionary dictionaryWithContentsOfFile:p];
+    id v = d[@"CFBundleShortVersionString"];
+    return [v isKindOfClass:[NSString class]] ? std::string([(NSString*)v UTF8String]) : std::string();
 }
 
 // 读 .app 里那个 marker 文件的内容（用来证明"装进去的是哪一份"）
@@ -885,7 +896,7 @@ int main() {
             // 造真 dmg（复用第 1 步那份 stage/dmg 的构造方式，但单独一份避免相互影响）
             const std::string pipeBase = base + "/pipe";
             run("mkdir -p '" + pipeBase + "/stage'");
-            ck(make_fake_app(pipeBase + "/stage/RLPlayer.app", "PIPE-PAYLOAD-v9.9.9"),
+            ck(make_fake_app(pipeBase + "/stage/RLPlayer.app", "PIPE-PAYLOAD-v9.9.9", "9.9.9"),
                "流水线：构造最小 .app");
             const std::string pipeDmg = pipeBase + "/update.dmg";
             const int crc2 = run("/usr/bin/hdiutil create -quiet -srcfolder '" + pipeBase + "/stage'"
@@ -1135,7 +1146,7 @@ int main() {
         {
             const std::string fBase = base + "/fu";
             run("mkdir -p '" + fBase + "/stage'");
-            ck(make_fake_app(fBase + "/stage/RLPlayer.app", "PAYLOAD-C"), "【B】构造镜像载荷");
+            ck(make_fake_app(fBase + "/stage/RLPlayer.app", "PAYLOAD-C", "9.9.9-fu"), "【B】构造镜像载荷");
             std::string imgFu, howFu, shaFu, bShaErr;
             ck(make_image_fixture(fBase + "/stage", fBase + "/img", imgFu, howFu),
                "【B】造出可挂载镜像", howFu);
@@ -1405,7 +1416,7 @@ int main() {
         {
             const std::string sBase = base + "/stale";
             run("mkdir -p '" + sBase + "/stage'");
-            ck(make_fake_app(sBase + "/stage/RLPlayer.app", "PAYLOAD-STALE"), "【E】构造镜像载荷");
+            ck(make_fake_app(sBase + "/stage/RLPlayer.app", "PAYLOAD-STALE", "9.9.9-stale"), "【E】构造镜像载荷");
             std::string imgS, howS, shaS, eS;
             ck(make_image_fixture(sBase + "/stage", sBase + "/img", imgS, howS),
                "【E】造出可挂载镜像", howS);
@@ -1529,6 +1540,337 @@ int main() {
                 }
             }
             std::system(("pkill -TERM -f '" + srvS + "' 2>/dev/null").c_str());
+            ::usleep(150 * 1000);
+        }
+
+        // =====================================================================
+        // 19. 【U2】ditto 返回 0 但目标包版本不匹配：回滚 / 拒绝假成功 / 恢复失败落盘
+        // 20. 【U1】取消语义边界：校验前取消 vs 安装开始后取消且安装失败（不吞错误）
+        // =====================================================================
+        {
+            const std::string u2Base = base + "/u2";
+            const std::string imgsDir = u2Base + "/imgs";
+            run("mkdir -p '" + imgsDir + "'");
+
+            auto buildDmg = [&](const std::string& tag, const std::string& marker,
+                                const std::string& ver, std::string& outDmg,
+                                std::string& outSha, long long& outSz) {
+                const std::string stg = u2Base + "/stage-" + tag;
+                run("mkdir -p '" + stg + "'");
+                ck(make_fake_app(stg + "/RLPlayer.app", marker, ver),
+                   "【U2】构造镜像载荷 " + tag);
+                std::string how, serr;
+                const bool okImg = make_image_fixture(stg, imgsDir + "/" + tag, outDmg, how);
+                ck(okImg && !outDmg.empty(), "【U2】生成镜像 " + tag, how);
+                ck(sha256_of_file(outDmg, outSha, serr), "【U2】计算镜像摘要 " + tag, serr);
+                outSz = file_size(outDmg);
+            };
+
+            std::string dmgMismatch, shaMismatch;
+            long long szMismatch = 0;
+            buildDmg("mismatch", "BAD-VER-1.0.5", "1.0.5", dmgMismatch, shaMismatch, szMismatch);
+
+            std::string dmgNoVer, shaNoVer;
+            long long szNoVer = 0;
+            buildDmg("nover", "MISSING-PLIST-VER", "", dmgNoVer, shaNoVer, szNoVer);
+
+            std::string dmgGood, shaGood;
+            long long szGood = 0;
+            buildDmg("good", "GOOD-VER-2.0.4", "2.0.4", dmgGood, shaGood, szGood);
+
+            const std::string srvU2 = u2Base + "/srv.py";
+            const std::string portU2File = u2Base + "/port.txt";
+            {
+                FILE* f = std::fopen(srvU2.c_str(), "wb");
+                std::string py;
+                py += "import http.server, socketserver, os\n";
+                py += "FILES = {\n";
+                py += "    '/mismatch.dmg': '" + dmgMismatch + "',\n";
+                py += "    '/nover.dmg': '" + dmgNoVer + "',\n";
+                py += "    '/good.dmg': '" + dmgGood + "',\n";
+                py += "}\n";
+                py += "class H(http.server.BaseHTTPRequestHandler):\n";
+                py += "    def do_GET(self):\n";
+                py += "        p = FILES.get(self.path.split('?')[0])\n";
+                py += "        if not p or not os.path.isfile(p):\n";
+                py += "            self.send_response(404); self.end_headers(); return\n";
+                py += "        d = open(p, 'rb').read()\n";
+                py += "        self.send_response(200)\n";
+                py += "        self.send_header('Content-Length', str(len(d)))\n";
+                py += "        self.end_headers(); self.wfile.write(d); self.wfile.flush()\n";
+                py += "    def log_message(self, *a): pass\n";
+                py += "srv = socketserver.TCPServer(('127.0.0.1', 0), H)\n";
+                py += "print(srv.server_address[1], flush=True); srv.serve_forever()\n";
+                std::fwrite(py.data(), 1, py.size(), f);
+                std::fclose(f);
+            }
+            std::system(("/usr/bin/python3 '" + srvU2 + "' > '" + portU2File + "' 2>&1 &").c_str());
+            int portU2 = 0;
+            for (int i = 0; i < 80 && portU2 <= 0; ++i) {
+                ::usleep(100 * 1000);
+                FILE* f = std::fopen(portU2File.c_str(), "r");
+                if (!f) continue;
+                char buf[32] = {0};
+                if (std::fgets(buf, sizeof buf, f)) portU2 = std::atoi(buf);
+                std::fclose(f);
+            }
+            ck(portU2 > 0, "【U2/U1】本地镜像 HTTP 服务就绪", "port=" + std::to_string(portU2));
+
+            if (portU2 > 0) {
+                const std::string baseUrl = "http://127.0.0.1:" + std::to_string(portU2);
+                const std::string logPath = rta::platform::join(
+                    rta::platform::config_dir_utf8(), "rlplayer-update.log");
+                set_test_allow_loopback_download(true);
+
+                // ---------- 19a: ditto 返回 0 但 CFBundleShortVersionString (1.0.5) != 期望 (2.0.1) ----------
+                {
+                    const std::string target = u2Base + "/t19a/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t19a'");
+                    ck(make_fake_app(target, "OLD-KEEP-19a", "1.0.0"), "【U2-19a】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "2.0.1";
+                    plan.downloadUrl = baseUrl + "/mismatch.dmg";
+                    plan.sha256 = shaMismatch;
+                    plan.size = szMismatch;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d19a.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-19a";
+                    opt.autoRestart = false;
+
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, nil, CancelToken(), opt, outcome, backup);
+
+                    ck(!ok && !outcome.ok && outcome.code == InstallResultCode::Failed,
+                       "【U2-19a】版本不匹配时绝不报已安装", outcome.message);
+                    ck(!outcome.versionVerified, "【U2-19a】versionVerified 为 false");
+                    ck(outcome.message.find("1.0.5") != std::string::npos &&
+                       outcome.message.find("2.0.1") != std::string::npos,
+                       "【U2-19a】错误包含实际版本 1.0.5 与期望版本 2.0.1", outcome.message);
+                    ck(!backup.empty() && dir_exists(backup), "【U2-19a】备份目录存在", backup);
+                    ck(read_marker(target) == "OLD-KEEP-19a" &&
+                       read_plist_short_version(target) == "1.0.0",
+                       "【U2-19a】版本不匹配触发备份恢复，目标恢复为旧版",
+                       read_marker(target) + " ver=" + read_plist_short_version(target));
+                    ck(file_contains(logPath, "UPDATE_INSTALL_FAIL stage=verify_version") &&
+                       file_contains(logPath, "2.0.1"),
+                       "【U2-19a】版本校验失败已写 UPDATE_INSTALL_FAIL", logPath);
+                }
+
+                // ---------- 19b: ditto 返回 0 但 Info.plist 缺少 CFBundleShortVersionString ----------
+                {
+                    const std::string target = u2Base + "/t19b/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t19b'");
+                    ck(make_fake_app(target, "OLD-KEEP-19b", "1.0.0"), "【U2-19b】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "2.0.2";
+                    plan.downloadUrl = baseUrl + "/nover.dmg";
+                    plan.sha256 = shaNoVer;
+                    plan.size = szNoVer;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d19b.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-19b";
+                    opt.autoRestart = false;
+
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, nil, CancelToken(), opt, outcome, backup);
+
+                    ck(!ok && outcome.code == InstallResultCode::Failed,
+                       "【U2-19b】缺少 CFBundleShortVersionString 时拒绝报已安装", outcome.message);
+                    ck(outcome.message.find("2.0.2") != std::string::npos,
+                       "【U2-19b】错误包含期望版本 2.0.2", outcome.message);
+                    ck(read_marker(target) == "OLD-KEEP-19b",
+                       "【U2-19b】缺版本字段时同样从备份恢复", read_marker(target));
+                }
+
+                // ---------- 19c: 版本不匹配且恢复失败 ⟹ 落盘 UPDATE_INSTALL_FAIL + 明确文案 ----------
+                {
+                    const std::string target = u2Base + "/t19c/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t19c'");
+                    ck(make_fake_app(target, "OLD-KEEP-19c", "1.0.0"), "【U2-19c】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "2.0.3";
+                    plan.downloadUrl = baseUrl + "/mismatch.dmg";
+                    plan.sha256 = shaMismatch;
+                    plan.size = szMismatch;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d19c.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-19c";
+                    opt.autoRestart = false;
+
+                    set_test_force_restore_failure(true);
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, nil, CancelToken(), opt, outcome, backup);
+                    set_test_force_restore_failure(false);
+
+                    ck(!ok && outcome.code == InstallResultCode::Failed,
+                       "【U2-19c】恢复失败仍返回失败", outcome.message);
+                    ck(outcome.message.find("目标包版本不匹配且恢复失败") != std::string::npos,
+                       "【U2-19c】错误明确写\"目标包版本不匹配且恢复失败\"", outcome.message);
+                    ck(outcome.message.find("1.0.5") != std::string::npos &&
+                       outcome.message.find("2.0.3") != std::string::npos,
+                       "【U2-19c】错误写明实际/期望版本", outcome.message);
+                    ck(file_contains(logPath, "UPDATE_INSTALL_FAIL stage=verify_version") &&
+                       file_contains(logPath, "目标包版本不匹配且恢复失败"),
+                       "【U2-19c】UPDATE_INSTALL_FAIL 已落盘且包含恢复失败说明", logPath);
+                }
+
+                // ---------- 19d: 对照组 — 版本匹配（含 v 前缀兼容）必须通过 ----------
+                {
+                    const std::string target = u2Base + "/t19d/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t19d'");
+                    ck(make_fake_app(target, "OLD-KEEP-19d", "1.0.0"), "【U2-19d】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "v2.0.4";
+                    plan.downloadUrl = baseUrl + "/good.dmg";
+                    plan.sha256 = shaGood;
+                    plan.size = szGood;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d19d.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-19d";
+                    opt.autoRestart = false;
+
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, nil, CancelToken(), opt, outcome, backup);
+
+                    ck(ok && outcome.ok && outcome.versionVerified &&
+                       outcome.installedVersion == "2.0.4" &&
+                       outcome.code == InstallResultCode::InstalledManualRestart,
+                       "【U2-19d】对照：版本匹配（v2.0.4 == 2.0.4）校验通过且报 InstalledManualRestart",
+                       outcome.message);
+                    ck(read_marker(target) == "GOOD-VER-2.0.4",
+                       "【U2-19d】新版载荷实际替换到位", read_marker(target));
+                }
+
+                // ---------- 20a: 校验阶段取消边界（未进 installing 前）⟹ Cancelled ----------
+                {
+                    const std::string target = u2Base + "/t20a/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t20a'");
+                    ck(make_fake_app(target, "OLD-20a", "1.0.0"), "【U1-20a】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "2.0.4";
+                    plan.downloadUrl = baseUrl + "/good.dmg";
+                    plan.sha256 = shaGood;
+                    plan.size = szGood;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d20a.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-20a";
+                    opt.autoRestart = false;
+
+                    CancelToken tok;
+                    ProgressFn prog = ^(const NativeProgress& pr) {
+                        if (pr.stage == "verifying" && pr.percent == InstallProgressRange::kDownloadEnd) {
+                            tok.cancel();
+                        }
+                    };
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, prog, tok, opt, outcome, backup);
+
+                    ck(!ok && outcome.cancelled && outcome.code == InstallResultCode::Cancelled,
+                       "【U1-20a】校验前取消返回明确 Cancelled 结果码", outcome.message);
+                    ck(read_marker(target) == "OLD-20a",
+                       "【U1-20a】校验前取消未触碰现有 .app", read_marker(target));
+                }
+
+                // ---------- 20b: 进入 installing 后才取消，且随后版本校验失败 ⟹ 绝不伪装成取消 ----------
+                {
+                    const std::string target = u2Base + "/t20b/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t20b'");
+                    ck(make_fake_app(target, "OLD-20b", "1.0.0"), "【U1-20b】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "2.0.5";
+                    plan.downloadUrl = baseUrl + "/mismatch.dmg";
+                    plan.sha256 = shaMismatch;
+                    plan.size = szMismatch;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d20b.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-20b";
+                    opt.autoRestart = false;
+
+                    CancelToken tok;
+                    ProgressFn prog = ^(const NativeProgress& pr) {
+                        if (pr.stage == "installing") tok.cancel();
+                    };
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, prog, tok, opt, outcome, backup);
+
+                    ck(tok.cancelled(), "【U1-20b】前提：token.cancelled() 已被置位");
+                    ck(!ok && !outcome.cancelled && outcome.code == InstallResultCode::Failed,
+                       "【U1-20b】installing 阶段失败即使 token 被取消也不得上报 Cancelled",
+                       outcome.message);
+                    ck(outcome.message.find("2.0.5") != std::string::npos,
+                       "【U1-20b】如实保留真实失败信息（版本不匹配）", outcome.message);
+                    ck(read_marker(target) == "OLD-20b",
+                       "【U1-20b】失败回滚后目标保持旧版", read_marker(target));
+                }
+
+                // ---------- 20c: 进入 installing 后才取消，安装本身成功 ⟹ 仍报成功 ----------
+                {
+                    const std::string target = u2Base + "/t20c/RLPlayer.app";
+                    run("mkdir -p '" + u2Base + "/t20c'");
+                    ck(make_fake_app(target, "OLD-20c", "1.0.0"), "【U1-20c】预置旧版本 .app");
+
+                    CheckResult plan;
+                    plan.decision = Decision::UpdateAvailable;
+                    plan.remoteVersion = "2.0.4";
+                    plan.downloadUrl = baseUrl + "/good.dmg";
+                    plan.sha256 = shaGood;
+                    plan.size = szGood;
+
+                    InstallPipelineOptions opt;
+                    opt.targetApp = target;
+                    opt.dmgPath = u2Base + "/d20c.dmg";
+                    opt.mountPoint = u2Base + "/rlplayer-update-mnt-20c";
+                    opt.autoRestart = false;
+
+                    CancelToken tok;
+                    ProgressFn prog = ^(const NativeProgress& pr) {
+                        if (pr.stage == "installing") tok.cancel();
+                    };
+                    InstallOutcome outcome;
+                    std::string backup;
+                    const bool ok = run_install_pipeline(plan, prog, tok, opt, outcome, backup);
+
+                    ck(tok.cancelled(), "【U1-20c】前提：installing 开始后取消被请求");
+                    ck(ok && outcome.ok && !outcome.cancelled &&
+                       outcome.code == InstallResultCode::InstalledManualRestart,
+                       "【U1-20c】installing 已完成替换与版本校验 ⟹ 如实上报已安装", outcome.message);
+                    ck(read_marker(target) == "GOOD-VER-2.0.4",
+                       "【U1-20c】新版已安装", read_marker(target));
+                }
+
+                set_test_allow_loopback_download(false);
+            }
+            std::system(("pkill -TERM -f '" + srvU2 + "' 2>/dev/null").c_str());
             ::usleep(150 * 1000);
         }
 

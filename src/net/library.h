@@ -613,6 +613,15 @@ inline std::string lib_path_key(const std::string& p) {
         if (c == '/') c = '\\';
         else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     }
+    // 2026-11-17（曲库审计）：折叠重复分隔符。根目录写成 "Music//A" 或带 "./" 时，
+    // 同一个文件会得到两个键 ⟹ CUE 认领失配、收藏/封面查找失败。
+    std::string out;
+    out.reserve(k.size());
+    for (char c : k) {
+        if (c == '\\' && !out.empty() && out.back() == '\\') continue;
+        out.push_back(c);
+    }
+    k.swap(out);
     while (!k.empty() && k.back() == '\\') k.pop_back();
     return k;
 }
@@ -2626,10 +2635,14 @@ inline LibCleanResult Library::removeUnder(const std::string& dir) {
     std::string text;
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        // 2026-11-17（曲库审计已证实）：带尾分隔符的 dir 会让 lib_path_under 在
+        // a[b.size()] 处比到文件名首字母 ⟹ 传 "/Music/A/" 时静默删 0 首。
+        std::string dirNorm = dir;
+        while (!dirNorm.empty() && (dirNorm.back() == '/' || dirNorm.back() == '\\')) dirNorm.pop_back();
         std::vector<LibTrack> kept;
         kept.reserve(tracks_.size());
         for (auto& t : tracks_) {
-            if (lib_path_under(t.path, dir)) { ++r.removed; continue; }
+            if (lib_path_under(t.path, dirNorm)) { ++r.removed; continue; }
             kept.push_back(std::move(t));
         }
         applyCleanLocked(std::move(kept), r.removed);

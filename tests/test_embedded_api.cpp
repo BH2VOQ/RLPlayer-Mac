@@ -137,6 +137,15 @@ static bool contains(const std::string& hay, const std::string& needle) {
     return hay.find(needle) != std::string::npos;
 }
 
+static std::string urlq(const std::string& v) {
+    std::string out;
+    for (char c : v) {
+        if (std::isalnum((unsigned char)c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') out += c;
+        else { char buf[8]; std::snprintf(buf, sizeof buf, "%%%02X", (unsigned)(unsigned char)c); out += buf; }
+    }
+    return out;
+}
+
 // 一次 dispatch 的便捷包装
 static std::string call(const std::string& path, std::string* ctOut = nullptr,
                         const std::string& method = "GET", const std::string& body = std::string()) {
@@ -405,6 +414,79 @@ int main() {
         ck(peakSerial.load() == 1,
            "反面控制：持锁执行时峰值恒为 1（证明这个判据真能区分串行/并行）",
            "峰值=" + std::to_string(peakSerial.load()));
+    }
+
+    // =====================================================================
+    // 判据 3.5：v3.3.11 单曲封面手动设置 / 恢复自动（/api/cover/set|reset）
+    // =====================================================================
+    std::printf("\n[3.5] /api/cover/set|reset（单曲封面手动覆盖）\n");
+    {
+        // 造一个真实存在、曲库索引里的音频文件（路由要求 file 真实可读且是音频）。
+        const std::string trackPath = u8str(musicRoot / "AlbumA" / "01.flac");
+        fs::create_directories(musicRoot / "AlbumA", ec);   // 目录必须先存在，否则 ofstream 静默失败
+        {
+            std::ofstream f(trackPath, std::ios::binary | std::ios::trunc);
+            f.write("fLaC\0\0\0\0", 8);
+            f.flush();
+        }
+        ck(fs::exists(fs::u8path(trackPath), ec),
+           "K0 夹具音频文件真实存在（否则后面测的是文件缺失而不是路由）", trackPath);
+        // 1KB 以上的可识别 PNG（1x1 灰点，重复填充到 >1KB 以过大小闸门）
+        std::vector<unsigned char> png = {
+            0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R',
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0x49, 'E', 'N', 'D', 0xa8, 0x42, 0x60, 0x82 };
+        while (png.size() < 1200) png.push_back(0);
+        const std::string query = "/api/cover/set?file=" + urlq(trackPath);
+        const std::string setR = call(query, nullptr, "POST", std::string(png.begin(), png.end()));
+        ck(contains(setR, "\"ok\":true"), "K1 /api/cover/set 接受 ≥1KB 可识别 PNG", setR);
+        {   // 归因：手动封面是否真的落盘（写到 <coverdir>/manual/ 下）
+            const fs::path man = tmp / "covers" / "manual";
+            std::printf("    cue: manual dir=%s files:", u8str(man).c_str());
+            std::error_code de;
+            if (fs::exists(man, de)) {
+                for (const auto& e : fs::directory_iterator(man, de))
+                    std::printf(" %s", e.path().filename().string().c_str());
+            } else std::printf(" (missing)");
+            std::printf("\n");
+        }
+        {
+            const std::string got = call("/api/cover?file=" + urlq(trackPath));
+            const bool magic = got.size() >= 8 && got[0] == (char)0x89 && got[1] == 'P' &&
+                               got[2] == 'N' && got[3] == 'G';
+            ck(magic && got.size() >= 1100,
+               "K2 设置后 /api/cover 读回的正是刚写入的 PNG（魔数 + 大小，不是占位图）",
+               "len=" + std::to_string(got.size()) + " magic=" + std::to_string((int)magic));
+            // 归因：读回失败时把来源说清楚（手动封面必须优先于自动封面）
+            if (!magic) {
+                const std::string probe = call("/api/cover/lookup?file=" + urlq(trackPath));
+                std::printf("    cue: /api/cover/lookup \u2192 %s\n", probe.substr(0, 120).c_str());
+            }
+        }
+        // K7/K8（v3.3.11 /api/meta 的 coverSource）：手动封面生效期应为 manual，
+        // 恢复自动后不应再是 manual —— 原生「自动」按钮的可见性就靠这条。
+        {
+            const std::string metaManual = call("/api/meta?file=" + urlq(trackPath));
+            ck(contains(metaManual, "\"coverSource\":\"manual\""),
+               "K7 手动封面生效时 /api/meta coverSource == manual", metaManual.substr(0, 120));
+        }
+        const std::string resetR = call("/api/cover/reset?file=" + urlq(trackPath),
+                                        nullptr, "POST");
+        ck(contains(resetR, "\"ok\":true"), "K3 /api/cover/reset 写 reset 标记", resetR);
+        {   // 恢复自动 ⟹ coverSource 不得再是 manual（按钮应隐藏）
+            const std::string metaAuto = call("/api/meta?file=" + urlq(trackPath));
+            ck(!contains(metaAuto, "\"coverSource\":\"manual\""),
+               "K8 恢复自动后 /api/meta coverSource 不再是 manual", metaAuto.substr(0, 120));
+        }
+        // 负向：不存在的文件必须拒绝（不能给任意路径写封面）
+        const std::string bad = call("/api/cover/set?file=" + urlq(u8str(tmp / "nope.flac")),
+                                     nullptr, "POST", std::string(png.begin(), png.end()));
+        ck(contains(bad, "\"ok\":false"), "K4 不存在的文件被拒绝", bad);
+        // 负向：过小/非图片被拒绝
+        const std::string tiny = call(query, nullptr, "POST", "short");
+        ck(contains(tiny, "\"ok\":false"), "K5 <1KB 载荷被拒绝", tiny);
+        // 负向：GET 不得触发落盘（防 <img src> 改封面）
+        const std::string getSet = call(query);
+        ck(!contains(getSet, "\"ok\":true"), "K6 GET /api/cover/set 不执行副作用", getSet.substr(0, 80));
     }
 
     // =====================================================================
