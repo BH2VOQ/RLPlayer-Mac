@@ -33,6 +33,35 @@ static NSString *RLPWorkbenchStatusPath(NSDictionary * _Nullable st) {
     return @"";
 }
 
+static NSString *RLPWorkbenchStatusString(NSDictionary * _Nullable st, NSArray<NSString *> *keys) {
+    if (![st isKindOfClass:[NSDictionary class]]) return @"";
+    for (NSString *k in keys) {
+        id v = st[k];
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
+            return (NSString *)v;
+        }
+    }
+    return @"";
+}
+
+@interface RLPWorkbenchCoverImageView : RLPCoverImageView
+@property (nonatomic, assign) BOOL showsPlaceholder;
+@end
+
+@implementation RLPWorkbenchCoverImageView
+- (NSSize)intrinsicContentSize { return NSZeroSize; }
+- (BOOL)wantsUpdateLayer { return NO; }
+- (void)setShowsPlaceholder:(BOOL)showsPlaceholder {
+    if (_showsPlaceholder == showsPlaceholder) return;
+    _showsPlaceholder = showsPlaceholder;
+    self.needsDisplay = YES;
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    if (self.showsPlaceholder) return;
+    [super drawRect:dirtyRect];
+}
+@end
+
 static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     id v = [settings isKindOfClass:[NSDictionary class]] ? settings[@"autoanl"] : nil;
     if ([v isKindOfClass:[NSString class]]) {
@@ -51,7 +80,12 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
 @property (nonatomic, strong) NSTextField *headerTitle;
 @property (nonatomic, strong) NSTextField *headerSubtitle;
 @property (nonatomic, strong) NSTextField *statusMessage;
-@property (nonatomic, strong) NSImageView *trackCover;
+@property (nonatomic, strong) RLPWorkbenchCoverImageView *trackCover;
+@property (nonatomic, strong) NSImageView *trackCoverPlaceholder;
+@property (nonatomic, strong) NSImage *trackCoverPlaceholderImage;
+@property (nonatomic, copy, nullable) NSString *trackCoverKey;
+@property (nonatomic, assign) NSUInteger trackCoverSeq;
+@property (nonatomic, assign) BOOL trackCoverInFlight;
 @property (nonatomic, strong) NSTextField *trackTitle;
 @property (nonatomic, strong) NSTextField *trackSub;
 @property (nonatomic, strong) NSTextField *sigSrc;
@@ -477,16 +511,40 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     topRow.alignment = NSLayoutAttributeCenterY;
     topRow.spacing = 12;
 
-    self.trackCover = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.trackCover = [[RLPWorkbenchCoverImageView alloc] initWithFrame:NSZeroRect];
+    self.trackCover.identifier = @"wb.trackcover";
+    self.trackCover.translatesAutoresizingMaskIntoConstraints = NO;
     self.trackCover.wantsLayer = YES;
     self.trackCover.layer.cornerRadius = t.rSm;
     self.trackCover.layer.masksToBounds = YES;
     self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+    self.trackCover.layer.borderWidth = 1.0;
+    self.trackCover.layer.borderColor = t.line.CGColor;
+    self.trackCoverPlaceholderImage = [NSImage imageWithSystemSymbolName:@"music.note"
+                                                  accessibilityDescription:RLPTr(@"封面")];
     self.trackCover.imageScaling = NSImageScaleProportionallyDown;
-    self.trackCover.image = [NSImage imageWithSystemSymbolName:@"music.note" accessibilityDescription:RLPTr(@"封面")];
+    self.trackCover.showsPlaceholder = YES;
+    self.trackCover.image = self.trackCoverPlaceholderImage;
     self.trackCover.contentTintColor = t.mut;
-    [self.trackCover.widthAnchor constraintEqualToConstant:56].active = YES;
-    [self.trackCover.heightAnchor constraintEqualToConstant:56].active = YES;
+    [self.trackCover setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.trackCover setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+    [self.trackCover setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.trackCover setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+
+    self.trackCoverPlaceholder = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    self.trackCoverPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+    self.trackCoverPlaceholder.imageScaling = NSImageScaleProportionallyDown;
+    self.trackCoverPlaceholder.image = self.trackCoverPlaceholderImage;
+    self.trackCoverPlaceholder.contentTintColor = t.mut;
+    [self.trackCover addSubview:self.trackCoverPlaceholder];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.trackCover.widthAnchor constraintEqualToConstant:56],
+        [self.trackCover.heightAnchor constraintEqualToConstant:56],
+        [self.trackCoverPlaceholder.centerXAnchor constraintEqualToAnchor:self.trackCover.centerXAnchor],
+        [self.trackCoverPlaceholder.centerYAnchor constraintEqualToAnchor:self.trackCover.centerYAnchor],
+        [self.trackCoverPlaceholder.widthAnchor constraintEqualToConstant:24],
+        [self.trackCoverPlaceholder.heightAnchor constraintEqualToConstant:24],
+    ]];
 
     NSStackView *metaCol = [[NSStackView alloc] init];
     metaCol.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -674,10 +732,138 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     RLPPostJSON(@"/api/pause?on=0", nil);
 }
 
+- (nullable NSImage *)validTrackCoverImageFromData:(nullable NSData *)data {
+    if (![data isKindOfClass:[NSData class]] || data.length == 0) return nil;
+    NSImage *img = [[NSImage alloc] initWithData:data];
+    if (!img || img.representations.count == 0) return nil;
+    const NSSize sz = img.size;
+    if (!(sz.width > 0.0 && sz.height > 0.0)) return nil;
+    return img;
+}
+
+- (void)showTrackCoverPlaceholder {
+    if (!self.trackCover) return;
+    RLPTheme *t = [RLPTheme current];
+    if (!self.trackCoverPlaceholderImage) {
+        self.trackCoverPlaceholderImage = [NSImage imageWithSystemSymbolName:@"music.note"
+                                                      accessibilityDescription:RLPTr(@"封面")];
+    }
+    self.trackCover.showsPlaceholder = YES;
+    self.trackCover.imageScaling = NSImageScaleProportionallyDown;
+    self.trackCover.image = self.trackCoverPlaceholderImage;
+    self.trackCover.contentTintColor = t.mut;
+    self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+    self.trackCover.layer.borderColor = t.line.CGColor;
+    if (self.trackCoverPlaceholder) {
+        self.trackCoverPlaceholder.image = self.trackCoverPlaceholderImage;
+        self.trackCoverPlaceholder.contentTintColor = t.mut;
+        self.trackCoverPlaceholder.hidden = NO;
+    }
+}
+
+- (void)applyTrackCoverImage:(NSImage *)img {
+    if (!self.trackCover || !img) {
+        [self showTrackCoverPlaceholder];
+        return;
+    }
+    self.trackCover.showsPlaceholder = NO;
+    self.trackCover.imageScaling = NSImageScaleProportionallyUpOrDown;
+    if (self.trackCoverPlaceholder) self.trackCoverPlaceholder.hidden = YES;
+    self.trackCover.image = img;
+}
+
+- (void)loadTrackCoverFallbackWithAlbumKey:(NSString *)albumKey
+                                   coverId:(NSString *)coverId
+                                  coverKey:(NSString *)coverKey
+                                       seq:(NSUInteger)seq {
+    __weak __typeof__(self) weakSelf = self;
+    if (coverId.length) {
+        [[RLPCoverLoader shared] coverForSourceId:coverId completion:^(NSImage * _Nullable srcImg) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || self_.viewDisappeared || seq != self_.trackCoverSeq ||
+                ![coverKey isEqualToString:(self_.trackCoverKey ?: @"")]) return;
+            self_.trackCoverInFlight = NO;
+            if (srcImg && srcImg.size.width > 0.0 && srcImg.size.height > 0.0) {
+                [self_ applyTrackCoverImage:srcImg];
+            } else {
+                [self_ showTrackCoverPlaceholder];
+            }
+        }];
+        return;
+    }
+    if (albumKey.length) {
+        [[RLPCoverLoader shared] coverForAlbumKey:albumKey completion:^(NSImage * _Nullable albImg) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || self_.viewDisappeared || seq != self_.trackCoverSeq ||
+                ![coverKey isEqualToString:(self_.trackCoverKey ?: @"")]) return;
+            self_.trackCoverInFlight = NO;
+            if (albImg && albImg.size.width > 0.0 && albImg.size.height > 0.0) {
+                [self_ applyTrackCoverImage:albImg];
+            } else {
+                [self_ showTrackCoverPlaceholder];
+            }
+        }];
+        return;
+    }
+    self.trackCoverInFlight = NO;
+    [self showTrackCoverPlaceholder];
+}
+
+- (void)updateTrackCoverFromStatus:(NSDictionary *)st {
+    if (!self.trackCover) return;
+    NSString *path = RLPWorkbenchStatusPath(st);
+    NSString *albumKey = RLPWorkbenchStatusString(st, @[@"albumKey", @"album_key", @"albumK"]);
+    NSString *coverId = RLPWorkbenchStatusString(st, @[@"coverId", @"cover_id"]);
+    NSString *coverKey = (path.length || albumKey.length || coverId.length)
+        ? [NSString stringWithFormat:@"%@\n%@\n%@", path, albumKey, coverId]
+        : @"";
+    if (!coverKey.length || ![RLPCoreClient shared].started) {
+        ++self.trackCoverSeq;
+        self.trackCoverInFlight = NO;
+        self.trackCoverKey = @"";
+        [self showTrackCoverPlaceholder];
+        return;
+    }
+    if ([coverKey isEqualToString:(self.trackCoverKey ?: @"")]) return;
+
+    self.trackCoverKey = coverKey;
+    const NSUInteger seq = ++self.trackCoverSeq;
+    self.trackCoverInFlight = YES;
+    [self showTrackCoverPlaceholder]; // 切歌/换曲先清旧图，避免短暂或失败时残留上一首封面
+
+    if (path.length) {
+        NSString *url = [NSString stringWithFormat:@"/api/cover?file=%@", RLPEnc(path)];
+        __weak __typeof__(self) weakSelf = self;
+        [[RLPCoreClient shared] getData:url completion:^(NSData * _Nullable data) {
+            __typeof__(self) self_ = weakSelf;
+            if (!self_ || self_.viewDisappeared || seq != self_.trackCoverSeq ||
+                ![coverKey isEqualToString:(self_.trackCoverKey ?: @"")]) return;
+            NSImage *img = [self_ validTrackCoverImageFromData:data];
+            if (img) {
+                self_.trackCoverInFlight = NO;
+                [self_ applyTrackCoverImage:img];
+                return;
+            }
+            [self_ loadTrackCoverFallbackWithAlbumKey:albumKey
+                                              coverId:coverId
+                                             coverKey:coverKey
+                                                  seq:seq];
+        }];
+        return;
+    }
+
+    [self loadTrackCoverFallbackWithAlbumKey:albumKey
+                                      coverId:coverId
+                                     coverKey:coverKey
+                                          seq:seq];
+}
+
 - (void)refreshTrackCard {
     NSDictionary *st = self.status ?: @{};
     NSString *path = RLPWorkbenchStatusPath(st);
-    NSString *title = [st[@"title"] isKindOfClass:[NSString class]] ? st[@"title"] : nil;
+    NSString *title = ([st[@"title"] isKindOfClass:[NSString class]] && ((NSString *)st[@"title"]).length)
+        ? st[@"title"]
+        : ([st[@"trackTitle"] isKindOfClass:[NSString class]] ? st[@"trackTitle"] : nil);
     NSString *artist = [st[@"artist"] isKindOfClass:[NSString class]] ? st[@"artist"] : nil;
     NSString *album = [st[@"album"] isKindOfClass:[NSString class]] ? st[@"album"] : nil;
     if (title.length) self.trackTitle.stringValue = title;
@@ -703,6 +889,7 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     NSString *dev = self.devicePopup.titleOfSelectedItem;
     NSString *backend = [self str:@"backend" def:@"coreaudio"];
     self.sigOut.stringValue = [NSString stringWithFormat:@"%@ · %@", dev.length ? dev : RLPTr(@"默认设备"), backend];
+    [self updateTrackCoverFromStatus:st];
 }
 
 #pragma mark - 三页签导航
@@ -3221,6 +3408,11 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     self.statusInFlight = NO;
     ++self.statusSeq;
     ++self.anlSeq;
+    ++self.trackCoverSeq;
+    if (self.trackCoverInFlight) {
+        self.trackCoverInFlight = NO;
+        self.trackCoverKey = nil;
+    }
     self.anlBusy = NO;
     [super viewDidDisappear];
 }
@@ -3472,6 +3664,9 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
             ? [NSString stringWithFormat:@"%@%@", RLPTr(@"外部 EQ："), extEq.lastPathComponent]
             : RLPTr(@"外部 EQ：未加载");
     }
+    if (self.trackCoverPlaceholderImage) {
+        self.trackCoverPlaceholderImage.accessibilityDescription = RLPTr(@"封面");
+    }
     [self refreshTrackCard];
     [self refreshChain];
     [self refreshAB];
@@ -3514,7 +3709,11 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     self.trackTitle.textColor = t.hero;
     if (self.trackCover) {
         self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
+        self.trackCover.layer.borderColor = t.line.CGColor;
         self.trackCover.contentTintColor = t.mut;
+    }
+    if (self.trackCoverPlaceholder) {
+        self.trackCoverPlaceholder.contentTintColor = t.mut;
     }
     [self selectStudioTab:self.activeTab ?: @"ab"];
     [self.eqView applyTheme];
