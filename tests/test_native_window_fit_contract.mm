@@ -21,6 +21,7 @@
 #import "RLPWorkbenchViewController.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
+#import "RLPPlaybackBarView.h"
 
 #include <cmath>
 #include <cstdio>
@@ -314,6 +315,104 @@ static void CheckTopbarGeometry(RLPMainWindowController *wc, const char *stage) 
     Ck(overlaps.count == 0,
        [[NSString stringWithFormat:@"R6-%s 顶栏控件两两不交叠", stage] UTF8String],
        [overlaps componentsJoinedByString:@"; "]);
+}
+
+static CGFloat RelativeSRGBLuminance(NSColor *color) {
+    if (!color) return -1.0;
+    NSColor *c = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!c) return -1.0;
+    return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent;
+}
+
+static void CheckFloatingBarAndPageExtension(RLPMainWindowController *wc, const char *stage,
+                                             CGFloat expectedWinW, CGFloat expectedWinH) {
+    [wc.window.contentView layoutSubtreeIfNeeded];
+    NSView *mainHost = (NSView *)[wc valueForKey:@"mainHost"];
+    NSView *topbar = (NSView *)[wc valueForKey:@"topbar"];
+    NSView *pageHost = (NSView *)[wc valueForKey:@"pageHost"];
+    RLPPlaybackBarView *bar = wc.playbackBar;
+
+    Ck(mainHost != nil && topbar != nil && pageHost != nil && bar != nil,
+       [[NSString stringWithFormat:@"B0-%s mainHost/topbar/pageHost/playbackBar 齐备", stage] UTF8String],
+       @"nil");
+    if (!mainHost || !topbar || !pageHost || !bar) return;
+
+    const BOOL winOk = SizeMatches(wc.window.frame.size, expectedWinW, expectedWinH) &&
+                       SizeMatches(wc.window.contentView.frame.size, expectedWinW, expectedWinH);
+    Ck(winOk,
+       [[NSString stringWithFormat:@"B1-%s 窗口不被撑大 (%.0fx%.0f)", stage, expectedWinW, expectedWinH] UTF8String],
+       FrameSummary(wc.window));
+
+    const NSRect mainB = mainHost.bounds;
+    const NSRect pageInMain = [pageHost convertRect:pageHost.bounds toView:mainHost];
+    const NSRect topInMain = [topbar convertRect:topbar.bounds toView:mainHost];
+    const NSRect barInMain = [bar convertRect:bar.bounds toView:mainHost];
+
+    const NSUInteger pageIdx = [mainHost.subviews indexOfObjectIdenticalTo:pageHost];
+    const NSUInteger barIdx = [mainHost.subviews indexOfObjectIdenticalTo:bar];
+    const BOOL zOrderOk = (pageIdx != NSNotFound && barIdx != NSNotFound && barIdx > pageIdx);
+
+    // AppKit default non-flipped coordinates: minY==0 is bottom of mainHost, maxY of pageHost aligns with topbar bottom.
+    const BOOL pageExtendsToBottom = Near(NSMinY(pageInMain), NSMinY(mainB), 1.0) &&
+                                     Near(NSMaxY(pageInMain), NSMinY(topInMain), 1.0) &&
+                                     NSIntersectsRect(pageInMain, barInMain) &&
+                                     NSContainsRect(NSInsetRect(pageInMain, -0.5, -0.5), barInMain);
+    Ck(pageExtendsToBottom && zOrderOk,
+       [[NSString stringWithFormat:@"B2-%s pageHost 延伸至 mainHost 底部且位于播放条下方 (旧码 minY=barTop+14 红)", stage] UTF8String],
+       [NSString stringWithFormat:@"main=%@ page=%@ top=%@ bar=%@ pageIdx=%lu barIdx=%lu",
+        NSStringFromRect(mainB), NSStringFromRect(pageInMain), NSStringFromRect(topInMain),
+        NSStringFromRect(barInMain), (unsigned long)pageIdx, (unsigned long)barIdx]);
+
+    const BOOL barFloatingOk = Near(NSMinY(barInMain), 14.0, 1.0) &&
+                               Near(NSHeight(barInMain), 66.0, 1.0) &&
+                               Near(NSMidX(barInMain), NSMidX(mainB), 1.5) &&
+                               NSMinX(barInMain) >= NSMinX(mainB) - 0.5 &&
+                               NSMaxX(barInMain) <= NSMaxX(mainB) + 0.5 &&
+                               bar.layer.cornerRadius >= 15.5 &&
+                               bar.layer.borderWidth >= 0.9 &&
+                               bar.layer.shadowOpacity > 0.05;
+    Ck(barFloatingOk,
+       [[NSString stringWithFormat:@"B3-%s playbackBar 悬浮(底14/高66/居中/不越界/圆角16/阴影)", stage] UTF8String],
+       [NSString stringWithFormat:@"bar=%@ main=%@ cr=%.1f bw=%.1f sh=%.2f",
+        NSStringFromRect(barInMain), NSStringFromRect(mainB),
+        bar.layer.cornerRadius, bar.layer.borderWidth, bar.layer.shadowOpacity]);
+
+    NSVisualEffectView *glass = (NSVisualEffectView *)FindById(bar, @"pb.glass");
+    const BOOL isGlass = [glass isKindOfClass:[NSVisualEffectView class]] && !glass.hidden;
+    const BOOL glassBelowContent = isGlass && (bar.subviews.firstObject == glass);
+    const BOOL glassMaterialOk = isGlass &&
+        (glass.material != NSVisualEffectMaterialHUDWindow) &&
+        (glass.material == NSVisualEffectMaterialUnderWindowBackground ||
+         glass.material == NSVisualEffectMaterialSidebar) &&
+        (glass.blendingMode == NSVisualEffectBlendingModeWithinWindow) &&
+        SizeMatches(glass.frame.size, NSWidth(bar.bounds), NSHeight(bar.bounds));
+
+    const CGFloat bgAlpha = bar.layer.backgroundColor ? CGColorGetAlpha(bar.layer.backgroundColor) : 0.0;
+    NSColor *bgColor = bar.layer.backgroundColor ? [NSColor colorWithCGColor:bar.layer.backgroundColor] : nil;
+    NSTextField *titleLab = (NSTextField *)[bar valueForKey:@"titleLabel"];
+    NSTextField *subLab = (NSTextField *)[bar valueForKey:@"subLabel"];
+    const CGFloat bgLum = RelativeSRGBLuminance(bgColor);
+    const CGFloat titleLum = RelativeSRGBLuminance(titleLab ? titleLab.textColor : nil);
+    const CGFloat subLum = RelativeSRGBLuminance(subLab ? subLab.textColor : nil);
+
+    RLPTheme *theme = [RLPTheme current];
+    const BOOL alphaAndReadabilityOk = theme.isLight
+        ? (bgAlpha <= 0.35 + 1e-3 && bgAlpha < 0.6 && titleLum >= 0.0 && titleLum <= 0.35)
+        : (bgAlpha < 0.6 && bgLum >= 0.0 && bgLum <= 0.35 && titleLum >= 0.65 && subLum >= 0.35);
+
+    std::printf("  [bar-glass %-18s] win=%.0fx%.0f main=%s page=%s bar=%s glassMat=%ld below=%d alpha=%.2f bgLum=%.2f titleLum=%.2f\n",
+                stage, expectedWinW, expectedWinH,
+                NSStringFromRect(mainB).UTF8String,
+                NSStringFromRect(pageInMain).UTF8String,
+                NSStringFromRect(barInMain).UTF8String,
+                isGlass ? (long)glass.material : -1L,
+                glassBelowContent, bgAlpha, bgLum, titleLum);
+
+    Ck(isGlass && glassBelowContent && glassMaterialOk && alphaAndReadabilityOk,
+       [[NSString stringWithFormat:@"B4-%s pb.glass 半透明磨砂(非HUDWindow/alpha<0.6/内容在玻璃之上/主题可读)", stage] UTF8String],
+       [NSString stringWithFormat:@"isGlass=%d below=%d mat=%ld blend=%ld alpha=%.2f bgLum=%.2f titleLum=%.2f subLum=%.2f",
+        isGlass, glassBelowContent, isGlass ? (long)glass.material : -1L,
+        isGlass ? (long)glass.blendingMode : -1L, bgAlpha, bgLum, titleLum, subLum]);
 }
 
 static NSTableView *SidebarTableView(RLPSidebarViewController *sb, NSScrollView **outScroll) {
@@ -1400,6 +1499,28 @@ int main() {
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
             RLPSetLanguage(@"zh");
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            Pump(0.1);
+        }
+
+        // ---- B1..B4: 900x600 / 1180x760 × 浅/深主题 播放条悬浮磨砂 + pageHost 延伸至底部 ----
+        {
+            [wc.sidebar selectKey:@"albums"];
+            Pump(0.2);
+            for (NSDictionary *cfg in @[
+                @{ @"name": @"light@900",  @"w": @900,  @"h": @600,  @"theme": @"light" },
+                @{ @"name": @"dark@900",   @"w": @900,  @"h": @600,  @"theme": @"dark" },
+                @{ @"name": @"light@1180", @"w": @1180, @"h": @760,  @"theme": @"light" },
+                @{ @"name": @"dark@1180",  @"w": @1180, @"h": @760,  @"theme": @"dark" },
+            ]) {
+                [RLPTheme setThemeName:cfg[@"theme"]];
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
+                ResizeWindow(wc, [cfg[@"w"] doubleValue], [cfg[@"h"] doubleValue]);
+                Pump(0.15);
+                CheckFloatingBarAndPageExtension(wc, [cfg[@"name"] UTF8String],
+                                                 [cfg[@"w"] doubleValue], [cfg[@"h"] doubleValue]);
+            }
+            [RLPTheme setThemeName:@"light"];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
             Pump(0.1);
         }
 

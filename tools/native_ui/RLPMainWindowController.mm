@@ -32,6 +32,7 @@
 #import "RLPCoreClient.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
+#import <objc/runtime.h>
 
 /// 顶栏：标题/计数是纯 frame 子视图，Auto Layout pass 会把它们归零，
 /// 所以每次 layout 后重放一次位置（离屏渲染也走这条路）。
@@ -125,6 +126,79 @@ static const CGFloat kSidebarWidth = 226.0;   // --sidew
 static const CGFloat kPlaybackHeight = 66.0;  // .bar height
 static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 topbarHeight()）
 static void * const kRLPRightDrawerKVOContext = (void *)&kRLPRightDrawerKVOContext;
+
+static char kRLPScrollBaseBottomInsetKey;
+static char kRLPScrollLastAppliedBottomInsetKey;
+
+static void RLPCollectTopLevelScrollViews(NSView *root, NSMutableArray<NSScrollView *> *out) {
+    if (!root) return;
+    if ([root isKindOfClass:[NSScrollView class]]) {
+        [out addObject:(NSScrollView *)root];
+        return;   // 只调页面级顶层 NSScrollView，不动卡片/输入框内部的嵌套滚动视图
+    }
+    for (NSView *sub in root.subviews) {
+        RLPCollectTopLevelScrollViews(sub, out);
+    }
+}
+
+/// 页面容器：延伸到 mainHost 底部，让页面内容真正从悬浮播放条后方滚过；
+/// 并为延伸到播放条区域下方的顶层 NSScrollView 预留底部 contentInset，避免末行被永久遮挡。
+@interface RLPPageHostView : NSView
+@property (nonatomic, weak) NSView *floatingBar;
+- (void)syncScrollInsets;
+@end
+
+@implementation RLPPageHostView
+- (void)syncScrollInsets {
+    if (NSHeight(self.bounds) < 1.0) return;
+    CGFloat barTopFromBottom = 14.0 + kPlaybackHeight;   // 默认 14 + 66 = 80pt
+    if (self.floatingBar && self.floatingBar.superview == self.superview &&
+        NSHeight(self.floatingBar.frame) > 1.0) {
+        const NSRect barRect = [self.floatingBar convertRect:self.floatingBar.bounds toView:self];
+        if (NSMaxY(barRect) > 1.0) {
+            barTopFromBottom = NSMaxY(barRect);
+        }
+    }
+    NSMutableArray<NSScrollView *> *scrolls = [NSMutableArray array];
+    RLPCollectTopLevelScrollViews(self, scrolls);
+    for (NSScrollView *sv in scrolls) {
+        if (sv.isHiddenOrHasHiddenAncestor) continue;
+        if (NSWidth(sv.bounds) < 1.0 || NSHeight(sv.bounds) < 120.0) continue;
+        if (sv.hasHorizontalScroller && !sv.hasVerticalScroller) continue;
+        const NSRect svInHost = [sv convertRect:sv.bounds toView:self];
+        const CGFloat svMinY = NSMinY(svInHost);
+        const CGFloat curBottom = sv.contentInsets.bottom;
+        NSNumber *lastApplied = objc_getAssociatedObject(sv, &kRLPScrollLastAppliedBottomInsetKey);
+        NSNumber *savedBase = objc_getAssociatedObject(sv, &kRLPScrollBaseBottomInsetKey);
+        CGFloat baseBottom = curBottom;
+        if (lastApplied && savedBase && fabs((double)curBottom - lastApplied.doubleValue) <= 0.5) {
+            baseBottom = savedBase.doubleValue;
+        } else {
+            objc_setAssociatedObject(sv, &kRLPScrollBaseBottomInsetKey,
+                                     @(baseBottom), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        const CGFloat minClearanceTop = barTopFromBottom + MAX(14.0, baseBottom);
+        const CGFloat targetBottom = (svMinY < barTopFromBottom + 14.0 - 0.5)
+            ? MAX(baseBottom, minClearanceTop - svMinY)
+            : baseBottom;
+        if (sv.automaticallyAdjustsContentInsets) {
+            sv.automaticallyAdjustsContentInsets = NO;
+        }
+        if (fabs((double)curBottom - (double)targetBottom) > 0.5) {
+            NSEdgeInsets ins = sv.contentInsets;
+            ins.bottom = targetBottom;
+            sv.contentInsets = ins;
+        }
+        objc_setAssociatedObject(sv, &kRLPScrollLastAppliedBottomInsetKey,
+                                 @(targetBottom), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+- (void)layout {
+    [super layout];
+    [self syncScrollInsets];
+}
+@end
 
 @interface RLPMainWindowController () <NSSearchFieldDelegate>
 @property (nonatomic, strong, readwrite) RLPSidebarViewController *sidebar;
@@ -365,12 +439,14 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     _sidebar = [[RLPSidebarViewController alloc] init];
     _albums = [[RLPAlbumsViewController alloc] init];
     _playbackBar = [[RLPPlaybackBarView alloc] init];
+    [_playbackBar applyTheme];
     _playbackBar.wantsLayer = YES;
     _playbackBar.layer.cornerRadius = 16;
     _playbackBar.layer.borderWidth = 1;
+    _playbackBar.layer.borderColor = t.line.CGColor;
     _playbackBar.layer.masksToBounds = NO;
     _playbackBar.layer.shadowColor = NSColor.blackColor.CGColor;
-    _playbackBar.layer.shadowOpacity = 0.13;
+    _playbackBar.layer.shadowOpacity = t.isLight ? 0.13 : 0.34;
     _playbackBar.layer.shadowRadius = 19;
     _playbackBar.layer.shadowOffset = CGSizeMake(0, -6);
     // ⚠️ 顺序关键（本轮实测踩到）：`_playbackBar` 在 `init` 里就被创建，而它的 `setup`
@@ -386,7 +462,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     _topbar = [[RLPTopbarView alloc] initWithFrame:NSZeroRect];
     _topbar.wantsLayer = YES;
     _topbar.layer.backgroundColor = t.bg.CGColor;
-    _pageHost = [[NSView alloc] initWithFrame:NSZeroRect];
+    _pageHost = [[RLPPageHostView alloc] initWithFrame:NSZeroRect];
+    _pageHost.identifier = @"pageHost";
+    ((RLPPageHostView *)_pageHost).floatingBar = _playbackBar;
     _pageHost.wantsLayer = YES;
     _pageHost.layer.backgroundColor = t.bg.CGColor;
 
@@ -509,7 +587,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [_pageHost.leadingAnchor constraintEqualToAnchor:_mainHost.leadingAnchor],
         [_pageHost.trailingAnchor constraintEqualToAnchor:_mainHost.trailingAnchor],
         [_pageHost.topAnchor constraintEqualToAnchor:_topbar.bottomAnchor],
-        [_pageHost.bottomAnchor constraintEqualToAnchor:_playbackBar.topAnchor constant:-14],
+        // Apple Music 式悬浮条：内容容器延伸到 mainHost 底部（播放条后方），
+        // 由 RLPPageHostView 为滚动视图底部预留 contentInsets，避免末行被永久遮挡。
+        [_pageHost.bottomAnchor constraintEqualToAnchor:_mainHost.bottomAnchor],
     ]];
 
     // ---- 右侧抽屉（web #right）----
@@ -589,6 +669,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     // 还回来，若那块显示器在期间被拔掉，还回来的 frame 落在已不存在的坐标（拔屏死区），没有别的路径再夹它。
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWindowDidExitFullScreen:)
                                                  name:NSWindowDidExitFullScreenNotification object:self.window];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPageScrollWillStart:)
+                                                 name:NSScrollViewWillStartLiveScrollNotification object:nil];
 
     if (![_sidebar selectKey:@"albums"]) {
         [self showContentForKey:@"albums"];
@@ -625,6 +707,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [v.topAnchor constraintEqualToAnchor:self.pageHost.topAnchor],
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
+    [self.pageHost setNeedsLayout:YES];
+    [(RLPPageHostView *)self.pageHost syncScrollInsets];
     [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
@@ -729,6 +813,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [v.topAnchor constraintEqualToAnchor:self.pageHost.topAnchor],
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
+    [self.pageHost setNeedsLayout:YES];
+    [(RLPPageHostView *)self.pageHost syncScrollInsets];
     // 顺序重要：先同步标题（会清空计数），再 activate（页面此时上报计数）
     [self syncTopbarTitle];
     if (hadPreviousContent) {
@@ -895,6 +981,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     RLPSettingsViewController *settings = (RLPSettingsViewController *)self.pageCache[@"settings"];
     if (![settings isKindOfClass:[RLPSettingsViewController class]]) return;
     [settings selectPane:(NSString *)note.object];
+    [self.pageHost setNeedsLayout:YES];
+    [(RLPPageHostView *)self.pageHost syncScrollInsets];
 }
 
 - (void)onNavigateKey:(NSNotification *)note {
@@ -984,6 +1072,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         [v.topAnchor constraintEqualToAnchor:self.pageHost.topAnchor],
         [v.bottomAnchor constraintEqualToAnchor:self.pageHost.bottomAnchor],
     ]];
+    [self.pageHost setNeedsLayout:YES];
+    [(RLPPageHostView *)self.pageHost syncScrollInsets];
     [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
 }
@@ -1297,6 +1387,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.rightDrawer applyTheme];
     [self syncDrawerButtons];
     if(self.npPage.isViewLoaded)[self.npPage applyTheme];
+    self.playbackBar.layer.borderWidth = 1;
     self.playbackBar.layer.borderColor = t.line.CGColor;
     // 悬浮胶囊条的投影与圆角属于"形状"，不属于"颜色"：主题切换不该把它抹掉。
     self.playbackBar.layer.cornerRadius = 16;
@@ -1314,6 +1405,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         if ([vc respondsToSelector:@selector(applyTheme)]) [(id)vc applyTheme];
     }
     if ([self.currentContent respondsToSelector:@selector(applyTheme)]) [(id)self.currentContent applyTheme];
+    [self.pageHost setNeedsLayout:YES];
+    [(RLPPageHostView *)self.pageHost syncScrollInsets];
 }
 
 #pragma mark - 语言实时切换
@@ -1551,6 +1644,13 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.rightDrawer deactivate];
     [self.npPage stopPolling];
     [self stopScanPolling];
+}
+
+- (void)onPageScrollWillStart:(NSNotification *)note {
+    NSView *sv = [note.object isKindOfClass:[NSView class]] ? (NSView *)note.object : nil;
+    if (sv && [sv isDescendantOf:self.pageHost]) {
+        [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    }
 }
 
 - (void)onScreenParametersChanged:(NSNotification *)note {
