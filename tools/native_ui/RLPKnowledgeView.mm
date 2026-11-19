@@ -24,6 +24,41 @@
 - (BOOL)isFlipped { return YES; }
 @end
 
+@interface RLPKVBodyScrollView : NSScrollView
+@property (nonatomic, assign) BOOL handlingScrollWheel;
+@end
+@implementation RLPKVBodyScrollView
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.handlingScrollWheel) return;
+    self.handlingScrollWheel = YES;
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipH = clip ? clip.bounds.size.height : 0.0;
+    const CGFloat docH = doc ? doc.frame.size.height : 0.0;
+    const CGFloat maxY = MAX(0.0, docH - clipH);
+    const CGFloat beforeY = clip ? clip.bounds.origin.y : 0.0;
+
+    [super scrollWheel:event];
+
+    const CGFloat afterY = clip ? clip.bounds.origin.y : 0.0;
+    CGFloat rawDy = event.scrollingDeltaY;
+    if (!event.hasPreciseScrollingDeltas && fabs(rawDy) > 0.001) {
+        rawDy *= 12.0;
+    }
+    const BOOL verticalTrackpad = event.hasPreciseScrollingDeltas && (fabs(event.scrollingDeltaY) >= fabs(event.scrollingDeltaX));
+    const BOOL canSyncFallback = (!self.window || !self.window.visible || !event.window || verticalTrackpad);
+    if (clip && canSyncFallback && fabs(afterY - beforeY) < 0.01 && maxY > 0.5 && fabs(rawDy) > 0.01) {
+        const CGFloat nextY = MAX(0.0, MIN(maxY, beforeY - rawDy));
+        if (fabs(nextY - beforeY) > 0.001) {
+            [clip scrollToPoint:NSMakePoint(0.0, nextY)];
+            [self reflectScrolledClipView:clip];
+        }
+    }
+    self.handlingScrollWheel = NO;
+    // 抽屉内滚轮到此消费结束，不向上层/外层 NSScrollView 或侧栏透传。
+}
+@end
+
 @interface RLPKVActionButton : NSButton
 @property (nonatomic, copy) NSString *actionTag;
 @end
@@ -34,6 +69,7 @@
 - (void)renderMetaFixture:(NSDictionary *)fixture;
 - (void)loadDrawerContext:(NSDictionary *)context;
 - (void)updateDrawerContext:(NSDictionary *)context;
+- (void)scrollToTop;
 - (void)setCloseHandler:(void (^)(void))handler;
 - (void)setSelectKindHandler:(void (^)(NSString *kind))handler;
 - (void)setRefreshKindHandler:(void (^)(NSString *kind))handler;
@@ -221,7 +257,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
 @property (nonatomic, strong) NSTextField *status;
 @property (nonatomic, strong) NSTextField *workHintSub;
 
-@property (nonatomic, strong) NSScrollView *bodyScroll;
+@property (nonatomic, strong) RLPKVBodyScrollView *bodyScroll;
 @property (nonatomic, strong) RLPKVFlippedView *docView;
 @property (nonatomic, strong) RLPKVFlippedView *sectionsHost;
 @property (nonatomic, strong) NSStackView *fieldStack;
@@ -252,6 +288,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
 @property (nonatomic, copy) NSString *plainExportText;
 @property (nonatomic, assign) CGFloat docTotalHeight;
 @property (nonatomic, assign) BOOL resetDrawerScrollToTop;
+@property (nonatomic, assign) BOOL inRelayout;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *renderedSections;
 @property (nonatomic, assign) BOOL isDrawerAttached;
 
@@ -276,6 +313,17 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
     [super viewDidMoveToSuperview];
     self.isDrawerAttached = [self.superview.identifier isEqualToString:@"npDrawer"];
     [self applyTheme];
+    [self relayoutAll];
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (self.bodyScroll) {
+        self.bodyScroll.scrollerStyle = NSScrollerStyleLegacy;
+        self.bodyScroll.automaticallyAdjustsContentInsets = NO;
+        self.bodyScroll.contentInsets = NSEdgeInsetsZero;
+        self.bodyScroll.scrollerInsets = NSEdgeInsetsZero;
+    }
     [self relayoutAll];
 }
 
@@ -343,13 +391,21 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
     [self.headerView addSubview:self.workHintSub];
 
     // 只建立唯一一个 NSScrollView（保持单层滚动、不破坏 npDrawer 开关前后 NSScrollView 计数）
-    self.bodyScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    self.bodyScroll = [[RLPKVBodyScrollView alloc] initWithFrame:NSZeroRect];
     self.bodyScroll.identifier = @"npDrawerScroll";
     self.bodyScroll.hasVerticalScroller = YES;
     self.bodyScroll.hasHorizontalScroller = NO;
     self.bodyScroll.autohidesScrollers = NO;
+    self.bodyScroll.scrollerStyle = NSScrollerStyleLegacy;
+    self.bodyScroll.automaticallyAdjustsContentInsets = NO;
+    self.bodyScroll.contentInsets = NSEdgeInsetsZero;
+    self.bodyScroll.scrollerInsets = NSEdgeInsetsZero;
     self.bodyScroll.drawsBackground = NO;
     self.bodyScroll.borderType = NSNoBorder;
+    if ([self.bodyScroll.contentView respondsToSelector:@selector(setAutomaticallyAdjustsContentInsets:)]) {
+        self.bodyScroll.contentView.automaticallyAdjustsContentInsets = NO;
+    }
+    self.bodyScroll.contentView.contentInsets = NSEdgeInsetsZero;
     [self addSubview:self.bodyScroll];
 
     self.docView = [[RLPKVFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 400, 200)];
@@ -416,6 +472,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
 
 - (void)loadKind:(NSString *)kind name:(NSString *)name artist:(NSString *)artist {
     [self cancelLoading];
+    self.resetDrawerScrollToTop = YES;
     self.workMode = NO;
     self.composer = @"";
     self.fixturePayload = nil;
@@ -486,10 +543,12 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
     [self rebuildSections];
 }
 
-- (void)loadDrawerContext:(NSDictionary *)context {
+- (void)applyDrawerContextDictionary:(NSDictionary *)context resetScroll:(BOOL)resetScroll {
     self.drawerContext = [context isKindOfClass:[NSDictionary class]] ? [context copy] : nil;
     self.isDrawerAttached = YES;
-    self.resetDrawerScrollToTop = YES;   // 新内容从顶部开始，避免沿用上一曲的底部偏移
+    if (resetScroll) {
+        self.resetDrawerScrollToTop = YES;   // 新内容从顶部开始，避免沿用上一曲的底部偏移
+    }
     self.fixturePayload = nil;
     if (context) {
         NSString *ak = RLPKVStr(context[@"activeKind"]);
@@ -511,8 +570,24 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
     [self rebuildSections];
 }
 
+- (void)loadDrawerContext:(NSDictionary *)context {
+    [self applyDrawerContextDictionary:context resetScroll:YES];
+}
+
 - (void)updateDrawerContext:(NSDictionary *)context {
-    [self loadDrawerContext:context];
+    [self applyDrawerContextDictionary:context resetScroll:NO];
+}
+
+- (void)scrollToTop {
+    self.resetDrawerScrollToTop = YES;
+    [self relayoutAll];
+    NSClipView *clip = self.bodyScroll.contentView;
+    if (clip) {
+        if (fabs(clip.bounds.origin.x) > 0.01 || fabs(clip.bounds.origin.y) > 0.01) {
+            [clip scrollToPoint:NSZeroPoint];
+        }
+        [self.bodyScroll reflectScrolledClipView:clip];
+    }
 }
 
 - (void)setCloseHandler:(void (^)(void))handler {
@@ -777,6 +852,7 @@ static void RLPKVAllowCompress(NSTextField *tf) {
 
 - (void)loadWorkName:(NSString *)name composer:(NSString *)composer {
     [self cancelLoading];
+    self.resetDrawerScrollToTop = YES;
     self.workMode = YES;
     self.kind = @"work";
     self.name = name ?: @"";
@@ -1665,22 +1741,21 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
 }
 
 - (void)scrollWheel:(NSEvent *)event {
-    // 抽屉的空白区域也属于知识面板；滚轮落在 scroll 视口时显式转交 NSScrollView，
-    // 避免 NSScrollView 因父视图/遮罩命中测试拿不到 wheel 而表现为“滚动失效”。
-    if (self.bodyScroll && !self.bodyScroll.hidden) {
-        NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-        if (NSPointInRect(p, self.bodyScroll.frame)) {
-            [self.bodyScroll scrollWheel:event];
-            return;
-        }
+    // 抽屉/知识面板的任意位置（含头部、留白及滚动视口）都只把滚轮路由进 bodyScroll；
+    // 禁止双重转发，也绝不调用 [super scrollWheel:] 透传给父页面 NSScrollView 或侧栏。
+    if (self.bodyScroll && !self.bodyScroll.hidden && !self.bodyScroll.handlingScrollWheel) {
+        [self.bodyScroll scrollWheel:event];
+        return;
     }
-    [super scrollWheel:event];
 }
 
 - (void)relayoutAll {
+    if (self.inRelayout) return;
     const CGFloat W = self.bounds.size.width;
     const CGFloat H = self.bounds.size.height;
     if (W < 40.0 || H < 40.0) return;
+    self.inRelayout = YES;
+    @try {
 
     const CGFloat padX = 16.0;
     const CGFloat contentW = MAX(40.0, W - padX * 2.0);
@@ -1751,11 +1826,22 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
     hy += 4.0;
     self.headerView.frame = NSMakeRect(0, 0, W, hy);
 
-    // 2. 滚动视口占满头部以下全高
+    // 2. 滚动视口占满头部以下全高（同步 tile 保证 clipH / docW / 滚动条即时准确）
     const CGFloat scrollH = MAX(40.0, H - hy);
+    self.bodyScroll.scrollerStyle = NSScrollerStyleLegacy;
+    self.bodyScroll.automaticallyAdjustsContentInsets = NO;
+    self.bodyScroll.contentInsets = NSEdgeInsetsZero;
+    self.bodyScroll.scrollerInsets = NSEdgeInsetsZero;
+    if ([self.bodyScroll.contentView respondsToSelector:@selector(setAutomaticallyAdjustsContentInsets:)]) {
+        self.bodyScroll.contentView.automaticallyAdjustsContentInsets = NO;
+    }
+    self.bodyScroll.contentView.contentInsets = NSEdgeInsetsZero;
     self.bodyScroll.frame = NSMakeRect(0, hy, W, scrollH);
-    const CGFloat docW = MAX(40.0, self.bodyScroll.contentView.bounds.size.width > 20.0
-                             ? self.bodyScroll.contentView.bounds.size.width : W);
+    [self.bodyScroll tile];
+
+    const NSSize clipSz = self.bodyScroll.contentView.bounds.size;
+    const CGFloat docW = MAX(40.0, clipSz.width > 20.0 ? clipSz.width : W);
+    const CGFloat clipH = (clipSz.height > 10.0) ? clipSz.height : scrollH;
     const CGFloat docPadX = 14.0;
     const CGFloat docInnerW = MAX(40.0, docW - docPadX * 2.0);
     CGFloat dy = 12.0;
@@ -1891,21 +1977,32 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
     }
 
     self.docTotalHeight = dy;
-    const CGFloat docH = MAX(scrollH, dy + 10.0);
+    const CGFloat docH = MAX(clipH, dy + 10.0);
     self.docView.frame = NSMakeRect(0, 0, docW, docH);
+    [self.bodyScroll tile];
     NSClipView *clip = self.bodyScroll.contentView;
-    const CGFloat maxY = MAX(0.0, docH - clip.bounds.size.height);
+    const CGFloat liveClipH = (clip.bounds.size.height > 10.0) ? clip.bounds.size.height : clipH;
+    const CGFloat maxY = MAX(0.0, docH - liveClipH);
     NSPoint origin = clip.bounds.origin;
+    origin.x = 0.0;
     if (self.resetDrawerScrollToTop) {
         origin.y = 0.0;
-        self.resetDrawerScrollToTop = NO;
+        if (liveClipH > 10.0 && ((!self.isLoadingKnowledge && !self.isLoadingSummary) || self.docTotalHeight > 24.0)) {
+            self.resetDrawerScrollToTop = NO;
+        }
     } else if (origin.y > maxY) {
         origin.y = maxY;
     }
     if (origin.y < 0.0) origin.y = 0.0;
-    if (fabs(origin.y - clip.bounds.origin.y) > 0.5) {
+    if (fabs(origin.x - clip.bounds.origin.x) > 0.01 || fabs(origin.y - clip.bounds.origin.y) > 0.01) {
         [clip scrollToPoint:origin];
-        [self.bodyScroll reflectScrolledClipView:clip];
+    }
+    [self.bodyScroll reflectScrolledClipView:clip];
+    if (self.bodyScroll.verticalScroller) {
+        self.bodyScroll.verticalScroller.hidden = NO;
+    }
+    } @finally {
+        self.inRelayout = NO;
     }
 }
 
