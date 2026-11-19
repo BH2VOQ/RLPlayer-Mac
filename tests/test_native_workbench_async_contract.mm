@@ -10,9 +10,10 @@
 //   4. 音质监控总开关关闭后重开，同曲应可再次自动分析
 //   5. viewDidDisappear 后到达的旧 /api/status 不得触发新的 /api/health
 //   6. /api/profiles GET 失败（nil / ok:false）应保留旧列表与激活项
-//   9. 顶部 trackCover：/api/status 加载封面、切歌清旧图、乱序丢弃、无封面/错图占位、暗色主题与 900x600/1180x760 布局
+//   9. 顶部 trackCover：/api/status 加载封面、切歌清旧图、乱序丢弃、无封面/错图占位、暗色主题与 900x600(96pt)/1180x760(116pt) 布局
 //   9-11. 顶部输出设备切换器：900×600/1180×760 可见不越界、fake A/B/C 切 B 发 POST 并刷新摘要、
 //         失败回滚 A、空列表空态、devices 异步 seq 丢弃、英文文案完整、与 devicePopup 同步
+//   12. 专业台重设计版式几何契约（R1–R3）：Hero 高度/封面(96/116)/首屏可见/独立信号链与 A-B 卡/响应式机架无溢出与无重叠
 //
 // 纪律：真实 RLPWorkbenchViewController + swizzle +[RLPCoreClient shared] 指向可控异步 mock，
 //       不改写 production RLPCoreClient 实现、不启服务、不触碰 8899、不碰音频设备、不建可见窗口。
@@ -34,6 +35,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 }
 
 @interface RLPWorkbenchViewController (AsyncContractTestAccess)
+@property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSStackView *stack;
 @property (nonatomic, strong) NSStackView *topDeviceBar;
 @property (nonatomic, strong) NSTextField *topDeviceLabel;
@@ -42,6 +44,18 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, strong) NSPopUpButton *devicePopup;
 @property (nonatomic, strong) NSTextField *sigOut;
 @property (nonatomic, strong) NSTextField *statusMessage;
+@property (nonatomic, strong) NSTextField *heroSpecLabel;
+@property (nonatomic, strong) NSButton *trackPlayBtn;
+@property (nonatomic, strong) NSView *chainCard;
+@property (nonatomic, strong) NSStackView *rackHeaderRow;
+@property (nonatomic, strong) NSStackView *rackStack;
+@property (nonatomic, strong) NSView *rackPCM;
+@property (nonatomic, strong) NSView *rackDSD;
+@property (nonatomic, strong) NSView *rackOutput;
+@property (nonatomic, assign) NSInteger rackColumns;
+@property (nonatomic, assign) BOOL chainCompact;
+@property (nonatomic, assign) BOOL abCompact;
+@property (nonatomic, strong) NSMutableArray<NSView *> *abSlotCards;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
 @property (nonatomic, assign) NSUInteger devicesSeq;
 @property (nonatomic, assign) BOOL peqBypassed;
@@ -803,7 +817,7 @@ int main() {
         }
 
         // -----------------------------------------------------------------
-        // 9. 顶部 trackCover：真实封面加载、切歌清旧图、乱序丢弃、失败占位与双尺寸布局
+        // 9. 顶部 trackCover：真实封面加载、切歌清旧图、乱序丢弃、失败占位与双尺寸 Hero 布局
         // -----------------------------------------------------------------
         {
             RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
@@ -818,10 +832,10 @@ int main() {
             const CGFloat cardHeightBefore = trackCard ? trackCard.frame.size.height : 0.0;
             const CGFloat topRowHeightBefore = topRow ? topRow.frame.size.height : 0.0;
             Ck(vc.trackCover != nil && placeholderImg != nil && placeholderImg.isTemplate &&
-               std::fabs(vc.trackCover.frame.size.width - 56.0) <= 0.5 &&
-               vc.trackCover.frame.size.height >= 56.0 && vc.trackCover.frame.size.height <= 64.0 &&
-               trackCard != nil && cardHeightBefore > 0.0 && topRowHeightBefore >= 56.0 && topRowHeightBefore <= 64.0,
-               "9-precondition: initial trackCover is 56x56..64 template placeholder",
+               std::fabs(vc.trackCover.frame.size.width - 96.0) <= 4.0 &&
+               std::fabs(vc.trackCover.frame.size.height - 96.0) <= 4.0 &&
+               trackCard != nil && cardHeightBefore >= 120.0 && topRowHeightBefore >= 120.0,
+               "9-precondition: initial trackCover at 900x600 is 96x96 template placeholder in >=120pt hero",
                [NSString stringWithFormat:@"cover=%@ img=%@ tpl=%d size=%@ cardH=%.1f rowH=%.1f",
                 vc.trackCover, placeholderImg, placeholderImg.isTemplate,
                 NSStringFromSize(vc.trackCover.frame.size), cardHeightBefore, topRowHeightBefore]);
@@ -852,12 +866,13 @@ int main() {
             Ck(vc.trackCover.image != nil && vc.trackCover.image != placeholderImg &&
                !vc.trackCover.image.isTemplate &&
                NSEqualSizes(vc.trackCover.image.size, NSMakeSize(120, 80)) &&
-               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
+               std::fabs(vc.trackCover.frame.size.width - 96.0) <= 4.0 &&
+               std::fabs(vc.trackCover.frame.size.height - 96.0) <= 4.0 &&
                (vc.trackCoverPlaceholder == nil || vc.trackCoverPlaceholder.hidden) &&
-               std::fabs((topRow ? topRow.frame.size.height : 0.0) - topRowHeightBefore) <= 0.5 &&
-               std::fabs(trackCard.frame.size.height - cardHeightBefore) <= 0.5 &&
+               std::fabs((topRow ? topRow.frame.size.height : 0.0) - topRowHeightBefore) <= 2.0 &&
+               std::fabs(trackCard.frame.size.height - cardHeightBefore) <= 2.0 &&
                [g_spy.getDataLog containsObject:urlA],
-               "9a: track A status loads real cover NSImage and keeps 56x56 & card height",
+               "9a: track A status loads real cover NSImage and keeps 96x96 & card height at 900x600",
                [NSString stringWithFormat:@"img=%@ tpl=%d imgSz=%@ frameSz=%@ rowH=%.1f/%.1f cardH=%.1f/%.1f log=%@",
                 vc.trackCover.image, vc.trackCover.image.isTemplate,
                 NSStringFromSize(vc.trackCover.image.size), NSStringFromSize(vc.trackCover.frame.size),
@@ -897,9 +912,10 @@ int main() {
             Ck(vc.trackCover.image != nil && vc.trackCover.image != placeholderImg &&
                !vc.trackCover.image.isTemplate &&
                NSEqualSizes(vc.trackCover.image.size, NSMakeSize(80, 120)) &&
-               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
+               std::fabs(vc.trackCover.frame.size.width - 96.0) <= 4.0 &&
+               std::fabs(vc.trackCover.frame.size.height - 96.0) <= 4.0 &&
                (vc.trackCoverPlaceholder == nil || vc.trackCoverPlaceholder.hidden),
-               "9b: B cover callback shows B NSImage and keeps 56x56",
+               "9b: B cover callback shows B NSImage and keeps 96x96 at 900x600",
                [NSString stringWithFormat:@"imgSz=%@ frameSz=%@",
                 NSStringFromSize(vc.trackCover.image.size), NSStringFromSize(vc.trackCover.frame.size)]);
 
@@ -928,7 +944,8 @@ int main() {
             Pump(0.05);
             Ck(vc.trackCover.image == placeholderImg &&
                (vc.trackCoverPlaceholder == nil || !vc.trackCoverPlaceholder.hidden) &&
-               NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)),
+               std::fabs(vc.trackCover.frame.size.width - 96.0) <= 4.0 &&
+               std::fabs(vc.trackCover.frame.size.height - 96.0) <= 4.0,
                "9d-nil: track without cover displays placeholder and does not keep B's old image",
                [NSString stringWithFormat:@"img=%@ frameSz=%@", vc.trackCover.image, NSStringFromSize(vc.trackCover.frame.size)]);
 
@@ -952,7 +969,7 @@ int main() {
                (vc.trackCoverPlaceholder == nil || !vc.trackCoverPlaceholder.hidden),
                "9d-idle: empty current track resets cover to placeholder", @"");
 
-            // 9e: 暗色主题可读性与 900x600 / 1180x760 布局不重叠、不撑高
+            // 9e: 暗色主题可读性与 900x600 (96pt) / 1180x760 (116pt) Hero 内部零交叠、不越界
             [RLPTheme setThemeName:@"dark"];
             [vc applyTheme];
             Ck(vc.trackCover.layer.backgroundColor != nil &&
@@ -961,40 +978,64 @@ int main() {
 
             [vc applyStatusPayload:@{
                 @"ok": @YES, @"playing": @YES, @"current": pathA,
+                @"inRate": @96000, @"outBits": @24,
                 @"title": @"Very Long Track Title That Should Truncate Without Overlapping Right Action Buttons In Narrow Layout",
                 @"artist": @"Artist Name", @"album": @"Album Name",
             } forSeq:vc.statusSeq + 1];
             Pump(0.05);
             BOOL layoutOk900 = NO, layoutOk1180 = NO;
+            NSString *heroLayoutDetail = @"";
             for (NSNumber *wNum in @[@900, @1180]) {
                 const CGFloat w = [wNum doubleValue];
                 const CGFloat h = (w < 1000.0) ? 600.0 : 760.0;
+                const CGFloat expectedCover = (w < 1000.0) ? 96.0 : 116.0;
                 vc.view.frame = NSMakeRect(0, 0, w, h);
                 [vc.view layoutSubtreeIfNeeded];
                 NSRect coverR = [vc.trackCover convertRect:vc.trackCover.bounds toView:trackCard];
                 NSRect titleR = [vc.trackTitle convertRect:vc.trackTitle.bounds toView:trackCard];
                 NSRect subR = [vc.trackSub convertRect:vc.trackSub.bounds toView:trackCard];
+                NSRect specR = vc.heroSpecLabel ? [vc.heroSpecLabel convertRect:vc.heroSpecLabel.bounds toView:trackCard] : NSZeroRect;
                 NSRect detailR = detailBtn ? [detailBtn convertRect:detailBtn.bounds toView:trackCard] : NSZeroRect;
                 NSRect playR = playBtn ? [playBtn convertRect:playBtn.bounds toView:trackCard] : NSZeroRect;
-                BOOL ok = NSEqualSizes(vc.trackCover.frame.size, NSMakeSize(56, 56)) &&
-                          std::fabs((topRow ? topRow.frame.size.height : 0.0) - topRowHeightBefore) <= 0.5 &&
-                          std::fabs(trackCard.frame.size.height - cardHeightBefore) <= 0.5 &&
+                NSRect devBarR = vc.topDeviceBar ? [vc.topDeviceBar convertRect:vc.topDeviceBar.bounds toView:trackCard] : NSZeroRect;
+                NSRect cardInset = NSInsetRect(trackCard.bounds, -0.5, -0.5);
+                BOOL ok = std::fabs(vc.trackCover.frame.size.width - expectedCover) <= 4.0 &&
+                          std::fabs(vc.trackCover.frame.size.height - expectedCover) <= 4.0 &&
+                          trackCard.frame.size.height >= 120.0 &&
+                          NSContainsRect(cardInset, coverR) &&
+                          NSContainsRect(cardInset, titleR) &&
+                          NSContainsRect(cardInset, detailR) &&
+                          NSContainsRect(cardInset, playR) &&
+                          NSContainsRect(cardInset, devBarR) &&
                           !NSIntersectsRect(coverR, titleR) &&
                           !NSIntersectsRect(coverR, subR) &&
+                          !NSIntersectsRect(coverR, specR) &&
                           !NSIntersectsRect(coverR, detailR) &&
+                          !NSIntersectsRect(coverR, devBarR) &&
                           !NSIntersectsRect(titleR, subR) &&
+                          !NSIntersectsRect(titleR, specR) &&
                           !NSIntersectsRect(titleR, detailR) &&
                           !NSIntersectsRect(titleR, playR) &&
+                          !NSIntersectsRect(titleR, devBarR) &&
                           !NSIntersectsRect(subR, detailR) &&
                           !NSIntersectsRect(subR, playR) &&
-                          !NSIntersectsRect(detailR, playR);
+                          !NSIntersectsRect(subR, devBarR) &&
+                          !NSIntersectsRect(specR, detailR) &&
+                          !NSIntersectsRect(specR, playR) &&
+                          !NSIntersectsRect(specR, devBarR) &&
+                          !NSIntersectsRect(detailR, playR) &&
+                          !NSIntersectsRect(detailR, devBarR) &&
+                          !NSIntersectsRect(playR, devBarR);
+                heroLayoutDetail = [heroLayoutDetail stringByAppendingFormat:@"[%.0fx%.0f cover=%.1fx%.1f card=%.1fx%.1f dev=%.1fx%.1f] ",
+                                    w, h, vc.trackCover.frame.size.width, vc.trackCover.frame.size.height,
+                                    trackCard.frame.size.width, trackCard.frame.size.height,
+                                    devBarR.size.width, devBarR.size.height];
                 if (w < 1000.0) layoutOk900 = ok;
                 else layoutOk1180 = ok;
             }
             Ck(layoutOk900 && layoutOk1180 && NSEqualSizes(vc.trackCover.image.size, NSMakeSize(120, 80)),
-               "9e-layout: 900x600 and 1180x760 preserve hero height, 56x56 cover, and zero overlap under dark theme",
-               [NSString stringWithFormat:@"ok900=%d ok1180=%d cardH=%.1f/%.1f",
-                layoutOk900, layoutOk1180, trackCard.frame.size.height, cardHeightBefore]);
+               "9e-layout: 900x600 (96pt cover) and 1180x760 (116pt cover) preserve hero >=120 and zero overlap under dark theme",
+               [NSString stringWithFormat:@"ok900=%d ok1180=%d %@", layoutOk900, layoutOk1180, heroLayoutDetail]);
 
             // 9f: 无路径仅有 albumKey 时通过 RLPCoverLoader 加载
             NSString *albKey = @"alb-wb-cover-1";
@@ -1285,6 +1326,258 @@ int main() {
                "11d: stale /api/devices response is discarded by seq",
                [NSString stringWithFormat:@"hasStale=%d count=%lu items=%@",
                 hasStale, (unsigned long)vc.devices.count, vc.topDevicePopup.itemTitles]);
+        }
+
+        // -----------------------------------------------------------------
+        // 12. 专业台重设计 R1–R3 几何契约（Hero 封面 96/116、首屏、信号链/A-B/机架无溢出与无重叠）
+        // -----------------------------------------------------------------
+        {
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.holdDevicesGet = NO;
+            g_spy.returnNilForDevicesGet = NO;
+            g_spy.devicesGetList = @[
+                @{@"id": @"devLong", @"name": @"Very Long Reference DAC Audio Interface USB Exclusive Output Name", @"default": @YES},
+                @{@"id": @"devB", @"name": @"B", @"default": @NO},
+            ];
+            g_spy.settingsKV = [@{
+                @"device": @"devLong",
+                @"backend": @"coreaudio",
+                @"filter": @"poly-sinc-gauss-long",
+                @"shaper": @"LNS15",
+            } mutableCopy];
+            g_spy.statusGetResponse = @{
+                @"ok": @YES,
+                @"playing": @YES,
+                @"paused": @NO,
+                @"current": @"/tmp/mock-geom-track.flac",
+                @"title": @"A Very Long Classical Movement Title That Should Cleanly Truncate Inside Hero",
+                @"artist": @"Symphony Orchestra",
+                @"album": @"Reference Recording",
+                @"inRate": @192000,
+                @"outBits": @24,
+                @"bitPerfect": @"yes",
+            };
+
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc reloadDevices];
+            [vc reloadSettings];
+            [vc reloadStatus];
+            Pump(0.05);
+
+            // 检查 card 内所有可见直系/深层子控件横向均不超过 card bounds
+            BOOL (^CardChildrenFitWidth)(NSView *, NSMutableArray<NSString *> *) =
+                ^BOOL(NSView *card, NSMutableArray<NSString *> *badOut) {
+                if (!card) return NO;
+                __block BOOL ok = YES;
+                __block void (^__weak weakWalk)(NSView *);
+                void (^walk)(NSView *) = ^(NSView *cur) {
+                    for (NSView *sub in cur.subviews) {
+                        if (sub.isHidden) continue;
+                        NSRect r = [sub convertRect:sub.bounds toView:card];
+                        if (r.size.width > 0.5 && r.size.height > 0.5) {
+                            if (NSMinX(r) < -1.0 || NSMaxX(r) > card.bounds.size.width + 1.0) {
+                                ok = NO;
+                                [badOut addObject:[NSString stringWithFormat:@"%@(%@) r=%@ cardW=%.1f",
+                                                   sub.identifier ?: NSStringFromClass(sub.class),
+                                                   card.identifier ?: @"", NSStringFromRect(r),
+                                                   card.bounds.size.width]];
+                            }
+                        }
+                        if (![sub isKindOfClass:NSControl.class]) {
+                            weakWalk(sub);
+                        }
+                    }
+                };
+                weakWalk = walk;
+                walk(card);
+                return ok;
+            };
+
+            CGFloat (^DistBottomFromStackTop)(NSView *) = ^CGFloat(NSView *v) {
+                NSRect r = [v convertRect:v.bounds toView:vc.stack];
+                return vc.stack.isFlipped ? NSMaxY(r) : (NSMaxY(vc.stack.bounds) - NSMinY(r));
+            };
+
+            NSView *trackCard = FindSubviewByIdentifier(vc.view, @"wb.trackcard");
+            NSView *chainCard = vc.chainCard ?: FindSubviewByIdentifier(vc.view, @"wb.chaincard");
+            NSView *tabsBar = FindSubviewByIdentifier(vc.view, @"wb.tabs");
+            NSView *abCard = FindSubviewByIdentifier(vc.view, @"wb.ab");
+            NSView *profilesCard = FindSubviewByIdentifier(vc.view, @"wb.profiles");
+            NSView *rackHdr = vc.rackHeaderRow ?: FindSubviewByIdentifier(vc.view, @"wb.rack.header");
+            NSView *rackView = vc.rackStack ?: FindSubviewByIdentifier(vc.view, @"wb.rack");
+            NSView *rackPCM = vc.rackPCM ?: FindSubviewByIdentifier(vc.view, @"wb.rack.pcm");
+            NSView *rackDSD = vc.rackDSD ?: FindSubviewByIdentifier(vc.view, @"wb.rack.dsd");
+            NSView *rackOut = vc.rackOutput ?: FindSubviewByIdentifier(vc.view, @"wb.rack.output");
+            NSView *quickEq = FindSubviewByIdentifier(vc.view, @"wb.quickeq");
+
+            BOOL r1Ok = NO, r2Ok = NO, r3Ok = YES;
+            NSMutableArray<NSString *> *badDetails = [NSMutableArray array];
+
+            for (NSDictionary *cfg in @[
+                @{@"lang": @"zh", @"theme": @"light"},
+                @{@"lang": @"en", @"theme": @"dark"},
+            ]) {
+                RLPSetLanguage(cfg[@"lang"]);
+                [RLPTheme setThemeName:cfg[@"theme"]];
+                [vc applyTheme];
+                [vc applyLanguage];
+
+                for (NSValue *szVal in @[
+                    [NSValue valueWithSize:NSMakeSize(900, 600)],
+                    [NSValue valueWithSize:NSMakeSize(1180, 760)],
+                    [NSValue valueWithSize:NSMakeSize(680, 600)],
+                ]) {
+                    const NSSize sz = szVal.sizeValue;
+                    vc.view.frame = NSMakeRect(0, 0, sz.width, sz.height);
+                    [vc.view layoutSubtreeIfNeeded];
+                    NSView *clipView = vc.scroll.contentView ?: vc.view;
+                    const CGFloat clipW = clipView.bounds.size.width;
+                    const CGFloat expCover = (sz.width >= 1140.0) ? 116.0 : 96.0;
+
+                    const BOOL coverMatch =
+                        std::fabs(vc.trackCover.frame.size.width - expCover) <= 4.0 &&
+                        std::fabs(vc.trackCover.frame.size.height - expCover) <= 4.0;
+                    const BOOL heroHeightOk = trackCard && trackCard.frame.size.height >= 120.0;
+
+                    NSArray *topCards = @[
+                        (id)trackCard ?: [NSNull null], (id)chainCard ?: [NSNull null], (id)tabsBar ?: [NSNull null],
+                        (id)abCard ?: [NSNull null], (id)profilesCard ?: [NSNull null], (id)rackHdr ?: [NSNull null],
+                        (id)rackView ?: [NSNull null], (id)rackPCM ?: [NSNull null], (id)rackDSD ?: [NSNull null],
+                        (id)rackOut ?: [NSNull null], (id)quickEq ?: [NSNull null],
+                    ];
+                    BOOL allCardsFit = (vc.stack.frame.size.width <= clipW + 1.0);
+                    for (id obj in topCards) {
+                        if (obj == [NSNull null]) { allCardsFit = NO; continue; }
+                        NSView *v = (NSView *)obj;
+                        NSRect rClip = [v convertRect:v.bounds toView:clipView];
+                        if (v.isHiddenOrHasHiddenAncestor || rClip.size.width <= 0.5 || rClip.size.height <= 0.5 ||
+                            NSMinX(rClip) < -0.5 || NSMaxX(rClip) > clipW + 0.5) {
+                            allCardsFit = NO;
+                            [badDetails addObject:[NSString stringWithFormat:@"%@[%.0fx%.0f %@/%@]: card %@ rClip=%@ clipW=%.1f",
+                                                   @"oob", sz.width, sz.height, cfg[@"lang"], cfg[@"theme"],
+                                                   v.identifier, NSStringFromRect(rClip), clipW]];
+                        }
+                    }
+
+                    // 独立区不重叠：hero / chain / tabs / ab / profiles / rackHeader / rack / quickEq
+                    NSRect heroR = [trackCard convertRect:trackCard.bounds toView:vc.stack];
+                    NSRect chainR = [chainCard convertRect:chainCard.bounds toView:vc.stack];
+                    NSRect rackR = [rackView convertRect:rackView.bounds toView:vc.stack];
+                    NSRect abR = [abCard convertRect:abCard.bounds toView:vc.stack];
+                    const BOOL disjointMajor =
+                        !NSIntersectsRect(NSInsetRect(heroR, 0.5, 0.5), NSInsetRect(chainR, 0.5, 0.5)) &&
+                        !NSIntersectsRect(NSInsetRect(heroR, 0.5, 0.5), NSInsetRect(rackR, 0.5, 0.5)) &&
+                        !NSIntersectsRect(NSInsetRect(chainR, 0.5, 0.5), NSInsetRect(rackR, 0.5, 0.5)) &&
+                        !NSIntersectsRect(NSInsetRect(abR, 0.5, 0.5), NSInsetRect(rackR, 0.5, 0.5));
+
+                    // 机架 3 列不互相重叠且内部控件不溢出
+                    NSRect pcmR = [rackPCM convertRect:rackPCM.bounds toView:vc.stack];
+                    NSRect dsdR = [rackDSD convertRect:rackDSD.bounds toView:vc.stack];
+                    NSRect outR = [rackOut convertRect:rackOut.bounds toView:vc.stack];
+                    const BOOL rackDisjoint =
+                        !NSIntersectsRect(NSInsetRect(pcmR, 0.5, 0.5), NSInsetRect(dsdR, 0.5, 0.5)) &&
+                        !NSIntersectsRect(NSInsetRect(pcmR, 0.5, 0.5), NSInsetRect(outR, 0.5, 0.5)) &&
+                        !NSIntersectsRect(NSInsetRect(dsdR, 0.5, 0.5), NSInsetRect(outR, 0.5, 0.5));
+                    const NSInteger expCols = (sz.width < 940.0) ? 2 : 3;
+                    const BOOL colsMatch = (vc.rackColumns == expCols);
+
+                    BOOL abSlotsOk = (vc.abSlotCards.count == 4);
+                    NSMutableArray<NSValue *> *abRects = [NSMutableArray array];
+                    NSRect abInset = abCard ? NSInsetRect(abCard.bounds, -0.5, -0.5) : NSZeroRect;
+                    for (NSView *slot in vc.abSlotCards) {
+                        NSRect sInAB = [slot convertRect:slot.bounds toView:abCard];
+                        NSRect sInClip = [slot convertRect:slot.bounds toView:clipView];
+                        if (slot.isHiddenOrHasHiddenAncestor || !NSContainsRect(abInset, sInAB) ||
+                            NSMaxX(sInClip) > clipW + 0.5 || !CardChildrenFitWidth(slot, badDetails)) {
+                            abSlotsOk = NO;
+                            [badDetails addObject:[NSString stringWithFormat:@"abSlot %@ inAB=%@ inClip=%@",
+                                                   slot.identifier, NSStringFromRect(sInAB), NSStringFromRect(sInClip)]];
+                        }
+                        [abRects addObject:[NSValue valueWithRect:sInAB]];
+                    }
+                    for (NSUInteger i = 0; i < abRects.count; ++i) {
+                        for (NSUInteger j = i + 1; j < abRects.count; ++j) {
+                            if (NSIntersectsRect(NSInsetRect([abRects[i] rectValue], 0.5, 0.5),
+                                                 NSInsetRect([abRects[j] rectValue], 0.5, 0.5))) {
+                                abSlotsOk = NO;
+                            }
+                        }
+                    }
+
+                    const BOOL childrenOk =
+                        CardChildrenFitWidth(trackCard, badDetails) &&
+                        CardChildrenFitWidth(chainCard, badDetails) &&
+                        CardChildrenFitWidth(rackPCM, badDetails) &&
+                        CardChildrenFitWidth(rackDSD, badDetails) &&
+                        CardChildrenFitWidth(rackOut, badDetails);
+
+                    if (!(coverMatch && heroHeightOk && allCardsFit && disjointMajor && rackDisjoint && colsMatch && abSlotsOk && childrenOk)) {
+                        r3Ok = NO;
+                        [badDetails addObject:[NSString stringWithFormat:@"[%.0fx%.0f %@/%@ cov=%.1f heroH=%.1f fit=%d maj=%d rack=%d cols=%ld/%ld ab=%d ch=%d]",
+                                               sz.width, sz.height, cfg[@"lang"], cfg[@"theme"],
+                                               vc.trackCover.frame.size.width, trackCard.frame.size.height,
+                                               allCardsFit, disjointMajor, rackDisjoint,
+                                               (long)vc.rackColumns, (long)expCols, abSlotsOk, childrenOk]];
+                    }
+
+                    if ((NSInteger)sz.width == 900 && [cfg[@"lang"] isEqualToString:@"zh"] && [cfg[@"theme"] isEqualToString:@"light"]) {
+                        const BOOL firstScreenOk =
+                            !vc.trackTitle.isHiddenOrHasHiddenAncestor && !vc.topDevicePopup.isHiddenOrHasHiddenAncestor &&
+                            DistBottomFromStackTop(vc.trackCover) <= sz.height &&
+                            DistBottomFromStackTop(vc.trackTitle) <= sz.height &&
+                            DistBottomFromStackTop(vc.topDevicePopup) <= sz.height &&
+                            NSMaxX([vc.trackTitle convertRect:vc.trackTitle.bounds toView:clipView]) <= clipW + 0.5 &&
+                            NSMaxX([vc.topDevicePopup convertRect:vc.topDevicePopup.bounds toView:clipView]) <= clipW + 0.5;
+                        r1Ok = (coverMatch && heroHeightOk && firstScreenOk);
+                        std::printf("  [R1 900x600] cover=%s hero=%s titleBottom=%.1f devBottom=%.1f clipW=%.1f\n",
+                                    NSStringFromSize(vc.trackCover.frame.size).UTF8String,
+                                    NSStringFromSize(trackCard.frame.size).UTF8String,
+                                    DistBottomFromStackTop(vc.trackTitle),
+                                    DistBottomFromStackTop(vc.topDevicePopup), clipW);
+                    }
+                    if ((NSInteger)sz.width == 1180 && [cfg[@"lang"] isEqualToString:@"zh"] && [cfg[@"theme"] isEqualToString:@"light"]) {
+                        r2Ok = (coverMatch && heroHeightOk && disjointMajor && colsMatch);
+                        std::printf("  [R2 1180x760] cover=%s hero=%s rackCols=%ld rack=%s clipW=%.1f\n",
+                                    NSStringFromSize(vc.trackCover.frame.size).UTF8String,
+                                    NSStringFromSize(trackCard.frame.size).UTF8String,
+                                    (long)vc.rackColumns, NSStringFromSize(rackView.frame.size).UTF8String, clipW);
+                    }
+                }
+            }
+
+            // 展开所有高级折叠区并切 EQ / Monitor 页签也必须 <= clipW
+            [RLPTheme setThemeName:@"light"];
+            RLPSetLanguage(@"zh");
+            [vc applyTheme];
+            [vc applyLanguage];
+            vc.view.frame = NSMakeRect(0, 0, 900, 600);
+            for (NSString *togId in @[@"wb.pcm.adv.toggle", @"wb.dsd.adv.toggle", @"wb.output.adv.toggle", @"wb.profile.toggle"]) {
+                NSButton *btn = (NSButton *)FindSubviewByIdentifier(vc.view, togId);
+                if (btn) [btn performClick:nil];
+            }
+            [vc.view layoutSubtreeIfNeeded];
+            NSView *clipView = vc.scroll.contentView ?: vc.view;
+            const CGFloat clipW900 = clipView.bounds.size.width;
+            const BOOL advOk = CardChildrenFitWidth(rackPCM, badDetails) &&
+                               CardChildrenFitWidth(rackDSD, badDetails) &&
+                               CardChildrenFitWidth(rackOut, badDetails) &&
+                               (vc.stack.frame.size.width <= clipW900 + 1.0);
+            [vc selectStudioTab:@"eq"];
+            [vc.view layoutSubtreeIfNeeded];
+            NSView *eqCard = FindSubviewByIdentifier(vc.view, @"wb.eq");
+            const BOOL eqOk = eqCard && NSMaxX([eqCard convertRect:eqCard.bounds toView:clipView]) <= clipW900 + 0.5;
+            [vc selectStudioTab:@"monitor"];
+            [vc.view layoutSubtreeIfNeeded];
+            NSView *monCard = FindSubviewByIdentifier(vc.view, @"wb.monitor");
+            const BOOL monOk = monCard && NSMaxX([monCard convertRect:monCard.bounds toView:clipView]) <= clipW900 + 0.5;
+            [vc selectStudioTab:@"ab"];
+
+            Ck(r1Ok, "12a (R1): 900x600 hero height >=120, cover 96+-4, title & device visible in first screen without clipping", @"");
+            Ck(r2Ok, "12b (R2): 1180x760 cover 116+-4, 3-col rack & hero never overlap", @"");
+            Ck(r3Ok && advOk && eqOk && monOk,
+               "12c (R3): 900x600/1180x760/680x600 + zh/en + light/dark + adv/eq/monitor all stay maxX<=clip with disjoint A/B slots",
+               [badDetails componentsJoinedByString:@" | "]);
         }
 
         method_setImplementation(shared, origShared);

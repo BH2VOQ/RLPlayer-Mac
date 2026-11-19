@@ -9,7 +9,8 @@
 //   R3 900x600 下进入 meta（含展开高级选项）、再回 station，frame 仍 900x600；再 set 1180x760 仍 1180x760；
 //   R4 1394x880 下切换聆听室 / 专业工作台（setUiMode），frame 不变；
 //   R5 覆盖 orderFront 可见路径（Accessory，不 makeKey），可见后 frame 仍不被内容改变；
-//   R6 900x600 下顶栏控件（search / top.mode / top.queue / top.scan / top.np 及标题区）都在 topbar bounds 内且两两不交叠。
+//   R6 900x600 下顶栏控件（search / top.mode / top.queue / top.scan / top.np 及标题区）都在 topbar bounds 内且两两不交叠；
+//   R7 900x600 与 1180x760 下进入 pro 工作台：window frame 不被撑大，Hero >=120pt、封面 96/116、首屏可见、信号链/A-B/机架无溢出不重叠。
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #import "RLPCoreClient.h"
@@ -40,6 +41,26 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @interface RLPFitSpyClient : NSObject
 @property (nonatomic, copy) NSString *uiMode;
 @property (nonatomic, copy) NSArray<NSDictionary *> *savedQueuesFixture;
+@property (nonatomic, copy, nullable) NSArray<NSDictionary *> *customDevicesFixture;
+@property (nonatomic, copy, nullable) NSDictionary *customStatusFixture;
+@end
+
+@interface RLPWorkbenchViewController (FitContractAccess)
+@property (nonatomic, strong) NSScrollView *scroll;
+@property (nonatomic, strong) NSStackView *stack;
+@property (nonatomic, strong) NSImageView *trackCover;
+@property (nonatomic, strong) NSTextField *trackTitle;
+@property (nonatomic, strong) NSTextField *heroSpecLabel;
+@property (nonatomic, strong) NSStackView *topDeviceBar;
+@property (nonatomic, strong) NSPopUpButton *topDevicePopup;
+@property (nonatomic, strong) NSView *chainCard;
+@property (nonatomic, strong) NSStackView *rackStack;
+@property (nonatomic, strong) NSView *rackPCM;
+@property (nonatomic, strong) NSView *rackDSD;
+@property (nonatomic, strong) NSView *rackOutput;
+@property (nonatomic, assign) NSInteger rackColumns;
+@property (nonatomic, assign) BOOL abCompact;
+@property (nonatomic, strong) NSMutableArray<NSView *> *abSlotCards;
 @end
 
 @implementation RLPFitSpyClient
@@ -99,6 +120,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         };
     }
     if ([path hasPrefix:@"/api/status"]) {
+        if (self.customStatusFixture) return self.customStatusFixture;
         return @{ @"ok": @YES, @"playing": @NO, @"paused": @NO, @"volDb": @(-120) };
     }
     if ([path hasPrefix:@"/api/queue"]) {
@@ -137,7 +159,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
     if ([path hasPrefix:@"/api/lib/stats"]) return @{ @"ok": @YES, @"roots": @[] };
     if ([path hasPrefix:@"/api/lib/roots"]) return @{ @"ok": @YES, @"roots": @[] };
     if ([path hasPrefix:@"/api/sq/list"]) return @{ @"ok": @YES, @"queues": self.savedQueuesFixture ?: @[] };
-    if ([path hasPrefix:@"/api/devices"]) return @{ @"ok": @YES, @"devices": @[] };
+    if ([path hasPrefix:@"/api/devices"]) return @{ @"ok": @YES, @"devices": self.customDevicesFixture ?: @[] };
     if ([path hasPrefix:@"/api/filters"]) return @{ @"ok": @YES, @"items": @[] };
     if ([path hasPrefix:@"/api/preset/caps"]) return @{ @"ok": @YES, @"known": @YES, @"pcmReady": @YES, @"dsdReady": @YES };
     if ([path hasPrefix:@"/api/cast/state"]) return @{ @"ok": @YES, @"running": @NO, @"device": @"" };
@@ -935,6 +957,161 @@ int main() {
             CheckSidebarTopEntry(wc, "en-listen@900", &stationRow);
             CheckSidebarEnglishLabel(wc, "en-listen@900", stationRow, @"Listening Room");
 
+            RLPSetLanguage(@"zh");
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            Pump(0.1);
+        }
+
+        // ---- R7: pro 模式真实主窗下 900x600 / 1180x760 工作台重设计几何契约 ----
+        {
+            g_spy.customDevicesFixture = @[
+                @{ @"id": @"dev-ref", @"name": @"Reference USB DAC (CoreAudio Exclusive 32-bit)", @"default": @YES },
+                @{ @"id": @"dev-alt", @"name": @"Studio Monitor Output", @"default": @NO },
+            ];
+            g_spy.customStatusFixture = @{
+                @"ok": @YES, @"playing": @YES, @"paused": @NO, @"volDb": @(-120),
+                @"current": @"/Music/ref/01.flac",
+                @"title": @"Symphony No. 9 in D Minor — Adagio molto e cantabile",
+                @"artist": @"Berlin Philharmonic",
+                @"album": @"High Resolution Reference",
+                @"inRate": @192000, @"outBits": @24, @"bitPerfect": @"yes",
+            };
+
+            NSView *pageHost = (NSView *)[wc valueForKey:@"pageHost"];
+            [wc setUiMode:@"pro" persist:NO];
+            [wc.sidebar selectKey:@"station"];
+            Pump(0.2);
+
+            for (NSDictionary *stageCfg in @[
+                @{ @"name": @"pro-zh-light@900",  @"w": @900,  @"h": @600, @"lang": @"zh", @"theme": @"light", @"cov": @96,  @"cols": @2 },
+                @{ @"name": @"pro-en-dark@900",   @"w": @900,  @"h": @600, @"lang": @"en", @"theme": @"dark",  @"cov": @96,  @"cols": @2 },
+                @{ @"name": @"pro-zh-light@1180", @"w": @1180, @"h": @760, @"lang": @"zh", @"theme": @"light", @"cov": @116, @"cols": @3 },
+                @{ @"name": @"pro-en-dark@1180",  @"w": @1180, @"h": @760, @"lang": @"en", @"theme": @"dark",  @"cov": @116, @"cols": @3 },
+            ]) {
+                const CGFloat winW = [stageCfg[@"w"] doubleValue];
+                const CGFloat winH = [stageCfg[@"h"] doubleValue];
+                const CGFloat expCov = [stageCfg[@"cov"] doubleValue];
+                const NSInteger expCols = [stageCfg[@"cols"] integerValue];
+                RLPSetLanguage(stageCfg[@"lang"]);
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+                [RLPTheme setThemeName:stageCfg[@"theme"]];
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
+                ResizeWindow(wc, winW, winH);
+                Pump(0.2);
+                [wc.window.contentView layoutSubtreeIfNeeded];
+
+                RLPWorkbenchViewController *wb = [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class]
+                    ? (RLPWorkbenchViewController *)wc.currentContent : nil;
+                NSView *heroCard = wb ? FindById(wb.view, @"wb.trackcard") : nil;
+                NSView *chainCard = wb ? (wb.chainCard ?: FindById(wb.view, @"wb.chaincard")) : nil;
+                NSView *tabsBar = wb ? FindById(wb.view, @"wb.tabs") : nil;
+                NSView *abCard = wb ? FindById(wb.view, @"wb.ab") : nil;
+                NSView *profCard = wb ? FindById(wb.view, @"wb.profiles") : nil;
+                NSView *rackHdr = wb ? FindById(wb.view, @"wb.rack.header") : nil;
+                NSView *rackView = wb ? (wb.rackStack ?: FindById(wb.view, @"wb.rack")) : nil;
+                NSView *rackPCM = wb ? (wb.rackPCM ?: FindById(wb.view, @"wb.rack.pcm")) : nil;
+                NSView *rackDSD = wb ? (wb.rackDSD ?: FindById(wb.view, @"wb.rack.dsd")) : nil;
+                NSView *rackOut = wb ? (wb.rackOutput ?: FindById(wb.view, @"wb.rack.output")) : nil;
+                NSView *quickEq = wb ? FindById(wb.view, @"wb.quickeq") : nil;
+
+                NSView *clipView = (wb && wb.scroll.contentView) ? wb.scroll.contentView : pageHost;
+                const CGFloat clipW = clipView ? clipView.bounds.size.width : 0.0;
+                const CGFloat clipH = pageHost ? pageHost.bounds.size.height : winH;
+
+                const BOOL winFitOk = SizeMatches(wc.window.frame.size, winW, winH) &&
+                                      SizeMatches(wc.window.contentView.frame.size, winW, winH);
+                const BOOL covOk = wb && wb.trackCover &&
+                                   Near(wb.trackCover.frame.size.width, expCov, 4.0) &&
+                                   Near(wb.trackCover.frame.size.height, expCov, 4.0);
+                const BOOL heroH = heroCard && heroCard.frame.size.height >= 120.0;
+
+                BOOL allMaxXOk = (wb != nil) && (wb.stack.frame.size.width <= clipW + 1.0);
+                NSMutableArray<NSString *> *clipErrs = [NSMutableArray array];
+                for (NSView *v in @[ heroCard ?: (id)[NSNull null], chainCard ?: (id)[NSNull null],
+                                     tabsBar ?: (id)[NSNull null], abCard ?: (id)[NSNull null],
+                                     profCard ?: (id)[NSNull null], rackHdr ?: (id)[NSNull null],
+                                     rackView ?: (id)[NSNull null], rackPCM ?: (id)[NSNull null],
+                                     rackDSD ?: (id)[NSNull null], rackOut ?: (id)[NSNull null],
+                                     quickEq ?: (id)[NSNull null] ]) {
+                    if ((id)v == [NSNull null]) { allMaxXOk = NO; continue; }
+                    NSRect rc = [v convertRect:v.bounds toView:clipView];
+                    if (v.isHiddenOrHasHiddenAncestor || rc.size.width <= 0.5 ||
+                        NSMinX(rc) < -0.5 || NSMaxX(rc) > clipW + 0.5) {
+                        allMaxXOk = NO;
+                        [clipErrs addObject:[NSString stringWithFormat:@"%@=%@", v.identifier, NSStringFromRect(rc)]];
+                    }
+                }
+
+                BOOL abOk = wb && (wb.abSlotCards.count == 4);
+                NSMutableArray<NSValue *> *abRects = [NSMutableArray array];
+                NSRect abInset = abCard ? NSInsetRect(abCard.bounds, -0.5, -0.5) : NSZeroRect;
+                for (NSView *slot in wb.abSlotCards) {
+                    NSRect sr = [slot convertRect:slot.bounds toView:abCard];
+                    NSRect sc = [slot convertRect:slot.bounds toView:clipView];
+                    if (slot.isHiddenOrHasHiddenAncestor || !NSContainsRect(abInset, sr) || NSMaxX(sc) > clipW + 0.5) {
+                        abOk = NO;
+                        [clipErrs addObject:[NSString stringWithFormat:@"%@=%@", slot.identifier, NSStringFromRect(sc)]];
+                    }
+                    [abRects addObject:[NSValue valueWithRect:sr]];
+                }
+                for (NSUInteger i = 0; i < abRects.count; ++i) {
+                    for (NSUInteger j = i + 1; j < abRects.count; ++j) {
+                        if (NSIntersectsRect(NSInsetRect([abRects[i] rectValue], 0.5, 0.5),
+                                             NSInsetRect([abRects[j] rectValue], 0.5, 0.5))) {
+                            abOk = NO;
+                        }
+                    }
+                }
+
+                NSRect heroInStack = (wb && heroCard) ? [heroCard convertRect:heroCard.bounds toView:wb.stack] : NSZeroRect;
+                NSRect chainInStack = (wb && chainCard) ? [chainCard convertRect:chainCard.bounds toView:wb.stack] : NSZeroRect;
+                NSRect rackInStack = (wb && rackView) ? [rackView convertRect:rackView.bounds toView:wb.stack] : NSZeroRect;
+                NSRect pcmInStack = (wb && rackPCM) ? [rackPCM convertRect:rackPCM.bounds toView:wb.stack] : NSZeroRect;
+                NSRect dsdInStack = (wb && rackDSD) ? [rackDSD convertRect:rackDSD.bounds toView:wb.stack] : NSZeroRect;
+                NSRect outInStack = (wb && rackOut) ? [rackOut convertRect:rackOut.bounds toView:wb.stack] : NSZeroRect;
+                const BOOL nonOverlap = wb &&
+                    !NSIntersectsRect(NSInsetRect(heroInStack, 0.5, 0.5), NSInsetRect(chainInStack, 0.5, 0.5)) &&
+                    !NSIntersectsRect(NSInsetRect(heroInStack, 0.5, 0.5), NSInsetRect(rackInStack, 0.5, 0.5)) &&
+                    !NSIntersectsRect(NSInsetRect(chainInStack, 0.5, 0.5), NSInsetRect(rackInStack, 0.5, 0.5)) &&
+                    !NSIntersectsRect(NSInsetRect(pcmInStack, 0.5, 0.5), NSInsetRect(dsdInStack, 0.5, 0.5)) &&
+                    !NSIntersectsRect(NSInsetRect(pcmInStack, 0.5, 0.5), NSInsetRect(outInStack, 0.5, 0.5)) &&
+                    !NSIntersectsRect(NSInsetRect(dsdInStack, 0.5, 0.5), NSInsetRect(outInStack, 0.5, 0.5)) &&
+                    (wb.rackColumns == expCols);
+
+                CGFloat heroDistBottom = 9999.0;
+                if (wb && heroCard) {
+                    heroDistBottom = wb.stack.isFlipped
+                        ? NSMaxY(heroInStack)
+                        : (NSMaxY(wb.stack.bounds) - NSMinY(heroInStack));
+                }
+                const BOOL firstScreenHero = wb && !wb.trackTitle.isHiddenOrHasHiddenAncestor &&
+                                             !wb.topDevicePopup.isHiddenOrHasHiddenAncestor &&
+                                             heroDistBottom <= clipH + 0.5;
+
+                std::printf("  [R7 %s] win=%.0fx%.0f clip=%.1fx%.1f cover=%.1fx%.1f hero=%.1fx%.1f bottom=%.1f rackCols=%ld\n",
+                            [stageCfg[@"name"] UTF8String],
+                            wc.window.frame.size.width, wc.window.frame.size.height,
+                            clipW, clipH,
+                            wb ? wb.trackCover.frame.size.width : 0.0,
+                            wb ? wb.trackCover.frame.size.height : 0.0,
+                            heroCard ? heroCard.frame.size.width : 0.0,
+                            heroCard ? heroCard.frame.size.height : 0.0,
+                            heroDistBottom,
+                            wb ? (long)wb.rackColumns : -1L);
+
+                Ck(winFitOk && covOk && heroH && allMaxXOk && abOk && nonOverlap && firstScreenHero,
+                   [[NSString stringWithFormat:@"R7-%@ pro 工作台主窗 fit + Hero/封面/设备/信号链/A-B/机架几何正确",
+                     stageCfg[@"name"]] UTF8String],
+                   [NSString stringWithFormat:@"fit=%d cov=%d(%.1f) heroH=%d allX=%d ab=%d nonOv=%d cols=%ld/%ld fs=%d(%.1f/%.1f) errs=%@",
+                    winFitOk, covOk, wb ? wb.trackCover.frame.size.width : 0.0, heroH,
+                    allMaxXOk, abOk, nonOverlap, wb ? (long)wb.rackColumns : -1L, (long)expCols,
+                    firstScreenHero, heroDistBottom, clipH, [clipErrs componentsJoinedByString:@"; "]]);
+            }
+
+            g_spy.customDevicesFixture = nil;
+            g_spy.customStatusFixture = nil;
+            [RLPTheme setThemeName:@"light"];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
             RLPSetLanguage(@"zh");
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
             Pump(0.1);
