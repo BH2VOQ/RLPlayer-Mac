@@ -12,6 +12,7 @@
 //
 // 纪律：隔离 state/library；backend=null、volume=-120；不启动真实 app 服务、不碰 8899、不模拟键鼠。
 #import <AppKit/AppKit.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import "RLPCoreClient.h"
 #import "RLPListeningRoom.h"
@@ -24,7 +25,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#import <objc/runtime.h>
 #include <unistd.h>
 
 static int gFail = 0, gPass = 0;
@@ -168,6 +168,371 @@ static NSScrollView *FindRoomScrollView(NSView *root) {
         if ([v isKindOfClass:[NSScrollView class]]) return (NSScrollView *)v;
     }
     return nil;
+}
+
+static NSString *DescribeCGColor(CGColorRef cg) {
+    if (!cg) return @"nil";
+    NSColor *c = [[NSColor colorWithCGColor:cg] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!c) return @"non-srgb";
+    return [NSString stringWithFormat:@"rgba(%d,%d,%d,%.2f)",
+            (int)std::lround(c.redComponent * 255.0),
+            (int)std::lround(c.greenComponent * 255.0),
+            (int)std::lround(c.blueComponent * 255.0),
+            c.alphaComponent];
+}
+
+static BOOL CGColorsRoughlyEqual(CGColorRef a, CGColorRef b) {
+    if (!a && !b) return YES;
+    if (!a || !b) return NO;
+    NSColor *ca = [[NSColor colorWithCGColor:a] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    NSColor *cb = [[NSColor colorWithCGColor:b] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!ca || !cb) return CGColorEqualToColor(a, b);
+    return std::fabs(ca.redComponent - cb.redComponent) < 0.01 &&
+           std::fabs(ca.greenComponent - cb.greenComponent) < 0.01 &&
+           std::fabs(ca.blueComponent - cb.blueComponent) < 0.01 &&
+           std::fabs(ca.alphaComponent - cb.alphaComponent) < 0.01;
+}
+
+typedef void (*RLPAddCursorRectImp)(id, SEL, NSRect, NSCursor *);
+static RLPAddCursorRectImp gOrigAddCursorRect = NULL;
+static BOOL gCapturedHandCursor = NO;
+static NSView *gCursorTargetView = nil;
+
+static void RLPTestAddCursorRect(id self, SEL _cmd, NSRect rect, NSCursor *cursor) {
+    if (self == gCursorTargetView && cursor == [NSCursor pointingHandCursor] &&
+        rect.size.width > 0.0 && rect.size.height > 0.0) {
+        gCapturedHandCursor = YES;
+    }
+    if (gOrigAddCursorRect) gOrigAddCursorRect(self, _cmd, rect, cursor);
+}
+
+static BOOL CheckViewHasHandCursor(NSView *view) {
+    Method m = class_getInstanceMethod([NSView class], @selector(addCursorRect:cursor:));
+    gOrigAddCursorRect = (RLPAddCursorRectImp)method_getImplementation(m);
+    gCapturedHandCursor = NO;
+    gCursorTargetView = view;
+    method_setImplementation(m, (IMP)RLPTestAddCursorRect);
+    @try {
+        [view resetCursorRects];
+    } @finally {
+        method_setImplementation(m, (IMP)gOrigAddCursorRect);
+        gOrigAddCursorRect = NULL;
+        gCursorTargetView = nil;
+    }
+    return gCapturedHandCursor;
+}
+
+@interface RLPCardClickSpy : NSObject
+@property (nonatomic, assign) NSInteger hits;
+- (void)onCardAction:(id)sender;
+@end
+
+@implementation RLPCardClickSpy
+- (void)onCardAction:(id)sender {
+    (void)sender;
+    ++self.hits;
+}
+@end
+
+static void TestListeningRoomButtonAffordance() {
+    std::printf("=== TestListeningRoomButtonAffordance（按钮感/hover/光标/chevron/≥28pt/可点卡区分）===\n");
+    NSString *origTheme = [RLPTheme themeName];
+
+    for (NSString *theme in @[@"dark", @"light"]) {
+        [RLPTheme setThemeName:theme];
+        RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];
+        (void)vc.view;
+        [vc rebuildAlbumGrid]; // 空态卡片与空态按钮一并检查
+
+        NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                   styleMask:NSWindowStyleMaskBorderless
+                                                     backing:NSBackingStoreBuffered defer:NO];
+        NSView *host = win.contentView;
+        [host addSubview:vc.view];
+        vc.view.translatesAutoresizingMaskIntoConstraints = NO;
+        [NSLayoutConstraint activateConstraints:@[
+            [vc.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+            [vc.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+            [vc.view.topAnchor constraintEqualToAnchor:host.topAnchor],
+            [vc.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+        ]];
+
+        for (NSNumber *wn in @[@1180, @900]) {
+            const CGFloat w = wn.doubleValue;
+            [win setContentSize:NSMakeSize(w, w > 1000 ? 760.0 : 600.0)];
+            [host layoutSubtreeIfNeeded];
+            [host layoutSubtreeIfNeeded];
+
+            NSArray<NSArray *> *specs = @[
+                @[@"room.folders",        @"room.folders.chevron",        @YES, @"音乐文件夹"],
+                @[@"room.deviceRefresh",  @"",                            @NO,  @"设备刷新"],
+                @[@"room.devicePopup",    @"room.devicePopup.chevron",    @YES, @"设备下拉"],
+                @[@"room.output.button",  @"room.output.chevron",         @YES, @"输出入口"],
+                @[@"room.play.button",    @"room.play.chevron",           @YES, @"播放入口"],
+                @[@"room.style.button",   @"room.style.chevron",          @YES, @"听音风格入口"],
+                @[@"room.playToggle",     @"",                            @NO,  @"继续播放"],
+                @[@"room.openAlbum",      @"room.openAlbum.chevron",      @YES, @"打开专辑页"],
+                @[@"room.queueAll",       @"room.queueAll.chevron",       @YES, @"查看全部"],
+                @[@"room.openAlbums",     @"room.openAlbums.chevron",     @YES, @"打开音乐库"],
+                @[@"room.libraryAction",  @"room.libraryAction.chevron",  @YES, @"添加音乐目录"],
+                @[@"room.more",           @"room.more.chevron",           @YES, @"更多"],
+                @[@"room.albumEmptyAction", @"room.albumEmptyAction.chevron", @YES, @"空态添加目录"],
+            ];
+
+            for (NSArray *sp in specs) {
+                NSString *bid = sp[0];
+                NSString *cid = sp[1];
+                const BOOL needChev = [sp[2] boolValue];
+                NSString *label = sp[3];
+                NSView *ctrl = FindById(vc.view, bid);
+                CK(ctrl != nil && !ctrl.hidden,
+                   [[NSString stringWithFormat:@"BTN[%@:%d] %@ (%@) 存在且可见", theme, (int)w, label, bid] UTF8String],
+                   @"nil or hidden");
+                if (!ctrl) continue;
+
+                const NSRect fr = ctrl.frame;
+                const BOOL sizeOk = (NSHeight(fr) >= 28.0 && NSWidth(fr) >= 28.0);
+                CGColorRef bg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+                CGColorRef bd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+                const CGFloat bw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+                const CGFloat cr = ctrl.layer ? ctrl.layer.cornerRadius : 0.0;
+                const BOOL bgOk = (ctrl.wantsLayer && bg != NULL && CGColorGetAlpha(bg) > 0.01);
+                const BOOL bdOk = (ctrl.wantsLayer && bw >= 1.0 && bd != NULL && CGColorGetAlpha(bd) > 0.01 && cr >= 4.0);
+                const BOOL trackOk = (ctrl.trackingAreas.count >= 1);
+                const BOOL handOk = CheckViewHasHandCursor(ctrl);
+
+                // 验证真实 hover 状态切换：mouseEntered 变色，mouseExited 恢复
+                NSColor *restBg = bg ? [NSColor colorWithCGColor:bg] : nil;
+                NSColor *restBd = bd ? [NSColor colorWithCGColor:bd] : nil;
+                NSEvent *enterEv = [NSEvent enterExitEventWithType:NSEventTypeMouseEntered
+                                                          location:NSZeroPoint
+                                                     modifierFlags:0
+                                                         timestamp:0
+                                                      windowNumber:win.windowNumber
+                                                           context:nil
+                                                       eventNumber:0
+                                                    trackingNumber:0
+                                                          userData:NULL];
+                NSEvent *exitEv = [NSEvent enterExitEventWithType:NSEventTypeMouseExited
+                                                         location:NSZeroPoint
+                                                    modifierFlags:0
+                                                        timestamp:0
+                                                     windowNumber:win.windowNumber
+                                                          context:nil
+                                                      eventNumber:0
+                                                   trackingNumber:0
+                                                         userData:NULL];
+                [ctrl mouseEntered:enterEv];
+                CGColorRef hovBg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+                CGColorRef hovBd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+                const CGFloat hovBw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+                const BOOL hoverChanged = (!CGColorsRoughlyEqual(restBg.CGColor, hovBg) ||
+                                           !CGColorsRoughlyEqual(restBd.CGColor, hovBd) ||
+                                           std::fabs(hovBw - bw) >= 0.2);
+                [ctrl mouseExited:exitEv];
+                CGColorRef afterBg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+                CGColorRef afterBd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+                const CGFloat afterBw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+                const BOOL hoverRestored = CGColorsRoughlyEqual(restBg.CGColor, afterBg) &&
+                                           CGColorsRoughlyEqual(restBd.CGColor, afterBd) &&
+                                           std::fabs(afterBw - bw) < 0.05;
+
+                BOOL chevOk = YES;
+                NSString *chevInfo = @"n/a";
+                if (needChev) {
+                    NSView *chev = FindById(ctrl, cid);
+                    if (!chev || chev.hidden || chev.alphaValue <= 0.5 ||
+                        NSWidth(chev.frame) <= 0.0 || NSHeight(chev.frame) <= 0.0) {
+                        chevOk = NO;
+                        chevInfo = chev ? [NSString stringWithFormat:@"hidden=%d frame=%@", chev.hidden, NSStringFromRect(chev.frame)] : @"missing";
+                    } else {
+                        NSRect cf = [chev convertRect:chev.bounds toView:ctrl];
+                        const BOOL inside = NSContainsRect(NSInsetRect(ctrl.bounds, -1.0, -1.0), cf);
+                        const BOOL onRight = NSMidX(cf) > NSMidX(ctrl.bounds);
+                        chevOk = inside && onRight;
+                        chevInfo = NSStringFromRect(cf);
+                    }
+                }
+
+                std::printf("  [BTN %-5s w=%4d %-22s] frame=%s h=%.1f bg=%s border=%s(w=%.1f,r=%.1f) track=%lu hand=%d hov=%d/%d chev=%s\n",
+                            theme.UTF8String, (int)w, bid.UTF8String,
+                            NSStringFromRect(fr).UTF8String, NSHeight(fr),
+                            DescribeCGColor(bg).UTF8String, DescribeCGColor(bd).UTF8String, bw, cr,
+                            (unsigned long)ctrl.trackingAreas.count, handOk, hoverChanged, hoverRestored,
+                            chevInfo.UTF8String);
+
+                CK(sizeOk && bgOk && bdOk && trackOk && handOk && hoverChanged && hoverRestored && chevOk,
+                   [[NSString stringWithFormat:@"BTN[%@:%d] %@ 满足按钮感/≥28pt/描边/hover/手型/chevron", theme, (int)w, bid] UTF8String],
+                   [NSString stringWithFormat:@"h=%.1f bgOk=%d bdOk=%d track=%lu hand=%d hov=%d/%d chevOk=%d(%@)",
+                    NSHeight(fr), bgOk, bdOk, (unsigned long)ctrl.trackingAreas.count, handOk,
+                    hoverChanged, hoverRestored, chevOk, chevInfo]);
+            }
+
+            // 整卡可点 vs 纯展示 / 混合下拉卡片区分
+            NSView *capsCard = FindById(vc.view, @"room.caps");
+            NSView *devCard  = FindById(vc.view, @"room.device");
+            NSView *outCard  = FindById(vc.view, @"room.output");
+            NSView *playCard = FindById(vc.view, @"room.play");
+            NSView *styCard  = FindById(vc.view, @"room.style");
+            CK(capsCard && devCard && outCard && playCard && styCard,
+               [[NSString stringWithFormat:@"CARD[%@:%d] 四张控制卡与能力展示卡存在", theme, (int)w] UTF8String], @"");
+            if (capsCard && devCard && outCard && playCard && styCard) {
+                const BOOL capsPassive = (capsCard.trackingAreas.count == 0) && !CheckViewHasHandCursor(capsCard);
+                const BOOL devPassiveShell = (devCard.trackingAreas.count == 0) && !CheckViewHasHandCursor(devCard);
+                CK(capsPassive && devPassiveShell,
+                   [[NSString stringWithFormat:@"CARD[%@:%d] 纯展示卡(room.caps)与含下拉容器卡(room.device)外壳无整卡手型误触", theme, (int)w] UTF8String],
+                   [NSString stringWithFormat:@"capsTrack=%lu devTrack=%lu",
+                    (unsigned long)capsCard.trackingAreas.count, (unsigned long)devCard.trackingAreas.count]);
+
+                for (NSView *ic in @[outCard, playCard, styCard]) {
+                    CGColorRef restBorder = ic.layer.borderColor;
+                    CGColorRef capsBorder = capsCard.layer.borderColor;
+                    const BOOL distinctRest = !CGColorsRoughlyEqual(restBorder, capsBorder);
+                    const BOOL icTrack = ic.trackingAreas.count >= 1;
+                    const BOOL icHand = CheckViewHasHandCursor(ic);
+                    [ic mouseEntered:[NSEvent enterExitEventWithType:NSEventTypeMouseEntered
+                                                            location:NSZeroPoint
+                                                       modifierFlags:0
+                                                           timestamp:0
+                                                        windowNumber:win.windowNumber
+                                                             context:nil
+                                                         eventNumber:0
+                                                      trackingNumber:0
+                                                            userData:NULL]];
+                    const BOOL icHover = (ic.layer.borderWidth >= 1.4) && !CGColorsRoughlyEqual(restBorder, ic.layer.borderColor);
+                    [ic mouseExited:[NSEvent enterExitEventWithType:NSEventTypeMouseExited
+                                                           location:NSZeroPoint
+                                                      modifierFlags:0
+                                                          timestamp:0
+                                                       windowNumber:win.windowNumber
+                                                            context:nil
+                                                        eventNumber:0
+                                                     trackingNumber:0
+                                                           userData:NULL]];
+                    const BOOL icRestore = (ic.layer.borderWidth <= 1.1) && CGColorsRoughlyEqual(restBorder, ic.layer.borderColor);
+                    std::printf("  [CARD %-5s w=%4d %-14s] restBorder=%s(w=%.1f) capsBorder=%s(w=%.1f) track=%lu hand=%d hov=%d/%d\n",
+                                theme.UTF8String, (int)w, ic.identifier.UTF8String,
+                                DescribeCGColor(restBorder).UTF8String, ic.layer.borderWidth,
+                                DescribeCGColor(capsBorder).UTF8String, capsCard.layer.borderWidth,
+                                (unsigned long)ic.trackingAreas.count, icHand, icHover, icRestore);
+                    CK(distinctRest && icTrack && icHand && icHover && icRestore,
+                       [[NSString stringWithFormat:@"CARD[%@:%d] 可点卡片 %@ 与纯展示有边框区分且支持整卡 hover 反馈", theme, (int)w, ic.identifier] UTF8String],
+                       [NSString stringWithFormat:@"distinct=%d track=%lu hand=%d hov=%d/%d border=%@ vs caps=%@",
+                        distinctRest, (unsigned long)ic.trackingAreas.count, icHand, icHover, icRestore,
+                        DescribeCGColor(restBorder), DescribeCGColor(capsBorder)]);
+                }
+
+                // 验证整卡点击语义（点击卡片上的 NSTextField 标签可打开弹层，不吞点击；内嵌 NSPopUpButton 不误触整卡）
+                if ([theme isEqualToString:@"dark"] && (int)w == 1180) {
+                    RLPQuickStartViewController *ovc = [[RLPOfflineOutputController alloc] init];
+                    (void)ovc.view;
+                    NSWindow *cwin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                                 styleMask:NSWindowStyleMaskBorderless
+                                                                   backing:NSBackingStoreBuffered defer:NO];
+                    [cwin.contentView addSubview:ovc.view];
+                    ovc.view.translatesAutoresizingMaskIntoConstraints = NO;
+                    [NSLayoutConstraint activateConstraints:@[
+                        [ovc.view.leadingAnchor constraintEqualToAnchor:cwin.contentView.leadingAnchor],
+                        [ovc.view.trailingAnchor constraintEqualToAnchor:cwin.contentView.trailingAnchor],
+                        [ovc.view.topAnchor constraintEqualToAnchor:cwin.contentView.topAnchor],
+                        [ovc.view.bottomAnchor constraintEqualToAnchor:cwin.contentView.bottomAnchor],
+                    ]];
+                    [cwin.contentView layoutSubtreeIfNeeded];
+
+                    NSView *clickOutCard = FindById(ovc.view, @"room.output");
+                    NSTextField *captionField = nil;
+                    for (NSView *sv in clickOutCard.subviews) {
+                        if ([sv isKindOfClass:[NSTextField class]]) { captionField = (NSTextField *)sv; break; }
+                    }
+                    if (clickOutCard && captionField) {
+                        NSPoint pInCard = NSMakePoint(NSMidX(captionField.frame), NSMidY(captionField.frame));
+                        NSPoint pInWin = [clickOutCard convertPoint:pInCard toView:nil];
+                        NSEvent *downEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                                             location:pInWin modifierFlags:0 timestamp:0
+                                                         windowNumber:cwin.windowNumber context:nil
+                                                          eventNumber:1 clickCount:1 pressure:1.0];
+                        NSEvent *upEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                                           location:pInWin modifierFlags:0 timestamp:0
+                                                       windowNumber:cwin.windowNumber context:nil
+                                                        eventNumber:2 clickCount:1 pressure:0.0];
+                        [cwin postEvent:upEv atStart:YES];
+                        [clickOutCard mouseDown:downEv];
+                        CK(ovc.popover != nil,
+                           "CARD_CLICK 点击可点卡静态标签（NSTextField）触发整卡弹层而非被 NSControl 吞掉",
+                           @"popover is nil");
+                        [ovc.popover close];
+                        ovc.popover = nil;
+                    }
+
+                    // 用同一 interactive card 类验证：内嵌 NSPopUpButton 时点击下拉不误触整卡 action，点空白触发
+                    Class cardCls = clickOutCard.class;
+                    NSView *guardCard = cardCls ? [[cardCls alloc] initWithFrame:NSMakeRect(0, 0, 220, 110)] : nil;
+                    if (guardCard) {
+                        RLPCardClickSpy *spy = [[RLPCardClickSpy alloc] init];
+                        [guardCard setValue:spy forKey:@"target"];
+                        SEL actSel = @selector(onCardAction:);
+                        ((void (*)(id, SEL, SEL))objc_msgSend)(guardCard, @selector(setAction:), actSel);
+                        NSPopUpButton *innerPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(12, 40, 196, 30) pullsDown:NO];
+                        [guardCard addSubview:innerPop];
+                        NSWindow *gwin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 260, 140)
+                                                                     styleMask:NSWindowStyleMaskBorderless
+                                                                       backing:NSBackingStoreBuffered defer:NO];
+                        guardCard.translatesAutoresizingMaskIntoConstraints = YES;
+                        guardCard.frame = NSMakeRect(10, 10, 220, 110);
+                        [gwin.contentView addSubview:guardCard];
+                        [gwin.contentView layoutSubtreeIfNeeded];
+
+                        NSPoint popPt = [guardCard convertPoint:NSMakePoint(NSMidX(innerPop.frame), NSMidY(innerPop.frame)) toView:nil];
+                        NSEvent *popDown = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                                              location:popPt modifierFlags:0 timestamp:0
+                                                          windowNumber:gwin.windowNumber context:nil
+                                                           eventNumber:3 clickCount:1 pressure:1.0];
+                        [guardCard mouseDown:popDown];
+                        const NSInteger hitsAfterPop = spy.hits;
+
+                        NSPoint bgPt = [guardCard convertPoint:NSMakePoint(20, 12) toView:nil];
+                        NSEvent *bgDown = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                                             location:bgPt modifierFlags:0 timestamp:0
+                                                         windowNumber:gwin.windowNumber context:nil
+                                                          eventNumber:4 clickCount:1 pressure:1.0];
+                        NSEvent *bgUp = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                                           location:bgPt modifierFlags:0 timestamp:0
+                                                       windowNumber:gwin.windowNumber context:nil
+                                                        eventNumber:5 clickCount:1 pressure:0.0];
+                        [gwin postEvent:bgUp atStart:YES];
+                        [guardCard mouseDown:bgDown];
+                        CK(hitsAfterPop == 0 && spy.hits == 1,
+                           "CARD_CLICK_GUARD 点击内部 NSPopUpButton 不误触整卡 action，点击卡片空白正常触发",
+                           [NSString stringWithFormat:@"afterPop=%ld afterBg=%ld", (long)hitsAfterPop, (long)spy.hits]);
+                    }
+                }
+            }
+
+            // 按钮不得过大挤压/重叠：检查卡内关键控件无重叠、无越界
+            NSView *devRefresh = FindById(vc.view, @"room.deviceRefresh");
+            NSView *devPopup = FindById(vc.view, @"room.devicePopup");
+            NSView *npCard = FindById(vc.view, @"room.nowplaying");
+            NSView *npTog = FindById(vc.view, @"room.playToggle");
+            NSView *npOpn = FindById(vc.view, @"room.openAlbum");
+            if (devCard && devRefresh && devPopup && npCard && npTog && npOpn) {
+                NSRect rRef = [devRefresh convertRect:devRefresh.bounds toView:devCard];
+                NSRect rPop = [devPopup convertRect:devPopup.bounds toView:devCard];
+                NSRect rTog = [npTog convertRect:npTog.bounds toView:npCard];
+                NSRect rOpn = [npOpn convertRect:npOpn.bounds toView:npCard];
+                const BOOL noOverlap = NSIsEmptyRect(NSIntersectionRect(rRef, rPop)) &&
+                                       NSIsEmptyRect(NSIntersectionRect(rTog, rOpn));
+                const BOOL insideCard = NSMaxX(rRef) <= NSWidth(devCard.bounds) + 1.0 &&
+                                        NSMaxX(rPop) <= NSWidth(devCard.bounds) + 1.0 &&
+                                        NSMaxX(rOpn) <= NSWidth(npCard.bounds) + 1.0;
+                CK(noOverlap && insideCard,
+                   [[NSString stringWithFormat:@"CARD[%@:%d] 强化按钮后不重叠、不挤压溢出父卡", theme, (int)w] UTF8String],
+                   [NSString stringWithFormat:@"ref=%@ pop=%@ tog=%@ opn=%@",
+                    NSStringFromRect(rRef), NSStringFromRect(rPop), NSStringFromRect(rTog), NSStringFromRect(rOpn)]);
+            }
+        }
+    }
+
+    if (origTheme.length) [RLPTheme setThemeName:origTheme];
 }
 
 static NSImage *MakeTestCover512() {
@@ -729,6 +1094,7 @@ int main(int argc, char **argv) {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
         TestMountedRoomGeometry();
+        TestListeningRoomButtonAffordance();
         if (argc == 2 && std::strcmp(argv[1], "--geometry-only") == 0) return gFail ? 1 : 0;
         std::printf("=== test_native_listening_contract（聆听室 v3.3.11 契约 · 离线/null 核心）===\n");
 

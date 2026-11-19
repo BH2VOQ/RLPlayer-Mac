@@ -182,6 +182,201 @@ static void CollectSettingsGroups(NSView *root, NSMutableArray<NSView *> *out) {
     }
 }
 
+static NSView *FindStationViewById(NSView *root, NSString *ident) {
+    if (!root) return nil;
+    if ([root.identifier isEqualToString:ident]) return root;
+    for (NSView *sub in root.subviews) {
+        NSView *r = FindStationViewById(sub, ident);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static NSString *FormatStationColor(CGColorRef cg) {
+    if (!cg) return @"nil";
+    NSColor *c = [[NSColor colorWithCGColor:cg] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!c) return @"non-srgb";
+    return [NSString stringWithFormat:@"rgba(%d,%d,%d,%.2f)",
+            (int)std::lround(c.redComponent * 255.0),
+            (int)std::lround(c.greenComponent * 255.0),
+            (int)std::lround(c.blueComponent * 255.0),
+            c.alphaComponent];
+}
+
+static BOOL StationColorsClose(CGColorRef a, CGColorRef b) {
+    if (!a && !b) return YES;
+    if (!a || !b) return NO;
+    NSColor *ca = [[NSColor colorWithCGColor:a] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    NSColor *cb = [[NSColor colorWithCGColor:b] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!ca || !cb) return CGColorEqualToColor(a, b);
+    return std::fabs(ca.redComponent - cb.redComponent) < 0.01 &&
+           std::fabs(ca.greenComponent - cb.greenComponent) < 0.01 &&
+           std::fabs(ca.blueComponent - cb.blueComponent) < 0.01 &&
+           std::fabs(ca.alphaComponent - cb.alphaComponent) < 0.01;
+}
+
+typedef void (*RLP900AddCursorRectImp)(id, SEL, NSRect, NSCursor *);
+static RLP900AddCursorRectImp g900OrigAddCursorRect = NULL;
+static BOOL g900CapturedHandCursor = NO;
+static NSView *g900CursorTarget = nil;
+
+static void RLP900TestAddCursorRect(id self, SEL _cmd, NSRect rect, NSCursor *cursor) {
+    if (self == g900CursorTarget && cursor == [NSCursor pointingHandCursor] &&
+        rect.size.width > 0.0 && rect.size.height > 0.0) {
+        g900CapturedHandCursor = YES;
+    }
+    if (g900OrigAddCursorRect) g900OrigAddCursorRect(self, _cmd, rect, cursor);
+}
+
+static BOOL StationViewHasHandCursor(NSView *view) {
+    Method m = class_getInstanceMethod([NSView class], @selector(addCursorRect:cursor:));
+    g900OrigAddCursorRect = (RLP900AddCursorRectImp)method_getImplementation(m);
+    g900CapturedHandCursor = NO;
+    g900CursorTarget = view;
+    method_setImplementation(m, (IMP)RLP900TestAddCursorRect);
+    @try {
+        [view resetCursorRects];
+    } @finally {
+        method_setImplementation(m, (IMP)g900OrigAddCursorRect);
+        g900OrigAddCursorRect = NULL;
+        g900CursorTarget = nil;
+    }
+    return g900CapturedHandCursor;
+}
+
+static void VerifyStationControls(const char *stage, RLPMainWindowController *wc) {
+    NSViewController *pageVC = wc.currentContent;
+    NSView *pageHost = [wc valueForKey:@"pageHost"];
+    if (!pageVC || !pageVC.view || !pageHost) return;
+    NSView *root = pageVC.view;
+    const CGFloat hostW = NSWidth(pageHost.bounds);
+
+    NSArray<NSArray *> *specs = @[
+        @[@"room.folders",       @"room.folders.chevron",       @YES],
+        @[@"room.deviceRefresh", @"",                           @NO],
+        @[@"room.devicePopup",   @"room.devicePopup.chevron",   @YES],
+        @[@"room.output.button", @"room.output.chevron",        @YES],
+        @[@"room.play.button",   @"room.play.chevron",          @YES],
+        @[@"room.style.button",  @"room.style.chevron",         @YES],
+        @[@"room.playToggle",    @"",                           @NO],
+        @[@"room.openAlbum",     @"room.openAlbum.chevron",     @YES],
+        @[@"room.queueAll",      @"room.queueAll.chevron",      @YES],
+        @[@"room.openAlbums",    @"room.openAlbums.chevron",    @YES],
+        @[@"room.libraryAction", @"room.libraryAction.chevron", @YES],
+        @[@"room.more",          @"room.more.chevron",          @YES],
+    ];
+
+    for (NSArray *sp in specs) {
+        NSString *bid = sp[0];
+        NSString *cid = sp[1];
+        const BOOL needChev = [sp[2] boolValue];
+        NSView *ctrl = FindStationViewById(root, bid);
+        Ck(ctrl != nil && !ctrl.hidden,
+           [[NSString stringWithFormat:@"STATION %s [%@] 按钮控件存在且可见", stage, bid] UTF8String],
+           @"nil or hidden");
+        if (!ctrl) continue;
+
+        NSRect frInHost = [ctrl convertRect:ctrl.bounds toView:pageHost];
+        CGColorRef bg = ctrl.layer ? ctrl.layer.backgroundColor : NULL;
+        CGColorRef bd = ctrl.layer ? ctrl.layer.borderColor : NULL;
+        const CGFloat bw = ctrl.layer ? ctrl.layer.borderWidth : 0.0;
+        const CGFloat cr = ctrl.layer ? ctrl.layer.cornerRadius : 0.0;
+        const BOOL sizeOk = NSHeight(ctrl.frame) >= 28.0 && NSWidth(ctrl.frame) >= 28.0;
+        const BOOL fitsHost = NSMinX(frInHost) >= -1.0 && NSMaxX(frInHost) <= hostW + 1.0;
+        const BOOL styleOk = ctrl.wantsLayer && bg != NULL && CGColorGetAlpha(bg) > 0.01 &&
+                             bw >= 1.0 && bd != NULL && CGColorGetAlpha(bd) > 0.01 && cr >= 4.0;
+        const BOOL trackOk = ctrl.trackingAreas.count >= 1;
+        const BOOL handOk = StationViewHasHandCursor(ctrl);
+
+        BOOL chevOk = YES;
+        if (needChev) {
+            NSView *chev = FindStationViewById(ctrl, cid);
+            chevOk = chev != nil && !chev.hidden && chev.alphaValue > 0.5 &&
+                     NSWidth(chev.frame) > 0.0 && NSHeight(chev.frame) > 0.0;
+        }
+
+        std::printf("  [station %-12s %-20s] frame=%s h=%.1f hostMaxX=%.1f/%.1f bg=%s bd=%s(w=%.1f) track=%lu hand=%d chev=%d\n",
+                    stage, bid.UTF8String, NSStringFromRect(ctrl.frame).UTF8String,
+                    NSHeight(ctrl.frame), NSMaxX(frInHost), hostW,
+                    FormatStationColor(bg).UTF8String, FormatStationColor(bd).UTF8String, bw,
+                    (unsigned long)ctrl.trackingAreas.count, handOk, chevOk);
+
+        Ck(sizeOk && fitsHost && styleOk && trackOk && handOk && chevOk,
+           [[NSString stringWithFormat:@"STATION %s [%@] 高度>=28/不溢出/背景描边/hover与手型/chevron", stage, bid] UTF8String],
+           [NSString stringWithFormat:@"h=%.1f fits=%d style=%d track=%lu hand=%d chev=%d",
+            NSHeight(ctrl.frame), fitsHost, styleOk, (unsigned long)ctrl.trackingAreas.count, handOk, chevOk]);
+    }
+
+    NSView *capsCard = FindStationViewById(root, @"room.caps");
+    NSView *devCard  = FindStationViewById(root, @"room.device");
+    NSView *outCard  = FindStationViewById(root, @"room.output");
+    NSView *playCard = FindStationViewById(root, @"room.play");
+    NSView *styCard  = FindStationViewById(root, @"room.style");
+    if (capsCard && devCard && outCard && playCard && styCard) {
+        const BOOL passiveOk = (capsCard.trackingAreas.count == 0 && !StationViewHasHandCursor(capsCard) &&
+                                devCard.trackingAreas.count == 0 && !StationViewHasHandCursor(devCard));
+        BOOL interactiveCardsOk = YES;
+        for (NSView *ic in @[outCard, playCard, styCard]) {
+            CGColorRef restBd = ic.layer.borderColor;
+            const BOOL trackOk = ic.trackingAreas.count >= 1;
+            const BOOL handOk = StationViewHasHandCursor(ic);
+            const BOOL distinct = !StationColorsClose(restBd, capsCard.layer.borderColor);
+            [ic mouseEntered:[NSEvent enterExitEventWithType:NSEventTypeMouseEntered
+                                                    location:NSZeroPoint
+                                               modifierFlags:0
+                                                   timestamp:0
+                                                windowNumber:wc.window.windowNumber
+                                                     context:nil
+                                                 eventNumber:0
+                                              trackingNumber:0
+                                                    userData:NULL]];
+            const BOOL hovOk = (ic.layer.borderWidth >= 1.4) && !StationColorsClose(restBd, ic.layer.borderColor);
+            [ic mouseExited:[NSEvent enterExitEventWithType:NSEventTypeMouseExited
+                                                   location:NSZeroPoint
+                                              modifierFlags:0
+                                                  timestamp:0
+                                               windowNumber:wc.window.windowNumber
+                                                    context:nil
+                                                eventNumber:0
+                                             trackingNumber:0
+                                                   userData:NULL]];
+            const BOOL resOk = (ic.layer.borderWidth <= 1.1) && StationColorsClose(restBd, ic.layer.borderColor);
+            std::printf("  [station-card %-10s %-12s] bd=%s(w=%.1f) capsBd=%s(w=%.1f) track=%lu hand=%d hov=%d/%d\n",
+                        stage, ic.identifier.UTF8String,
+                        FormatStationColor(restBd).UTF8String, ic.layer.borderWidth,
+                        FormatStationColor(capsCard.layer.borderColor).UTF8String, capsCard.layer.borderWidth,
+                        (unsigned long)ic.trackingAreas.count, handOk, hovOk, resOk);
+            if (!trackOk || !handOk || !distinct || !hovOk || !resOk) {
+                interactiveCardsOk = NO;
+            }
+        }
+        Ck(passiveOk && interactiveCardsOk,
+           [[NSString stringWithFormat:@"STATION %s 可点卡片与纯展示/下拉容器区分明显且 hover 可反馈/恢复", stage] UTF8String],
+           [NSString stringWithFormat:@"passive=%d interactive=%d", passiveOk, interactiveCardsOk]);
+    }
+
+    NSView *devRefresh = FindStationViewById(root, @"room.deviceRefresh");
+    NSView *devPopup = FindStationViewById(root, @"room.devicePopup");
+    NSView *npCard = FindStationViewById(root, @"room.nowplaying");
+    NSView *npTog = FindStationViewById(root, @"room.playToggle");
+    NSView *npOpn = FindStationViewById(root, @"room.openAlbum");
+    if (devCard && devRefresh && devPopup && npCard && npTog && npOpn) {
+        NSRect rRef = [devRefresh convertRect:devRefresh.bounds toView:devCard];
+        NSRect rPop = [devPopup convertRect:devPopup.bounds toView:devCard];
+        NSRect rTog = [npTog convertRect:npTog.bounds toView:npCard];
+        NSRect rOpn = [npOpn convertRect:npOpn.bounds toView:npCard];
+        const BOOL layoutSafe = NSIsEmptyRect(NSIntersectionRect(rRef, rPop)) &&
+                                NSIsEmptyRect(NSIntersectionRect(rTog, rOpn)) &&
+                                NSMaxX(rRef) <= NSWidth(devCard.bounds) + 1.0 &&
+                                NSMaxX(rPop) <= NSWidth(devCard.bounds) + 1.0 &&
+                                NSMaxX(rOpn) <= NSWidth(npCard.bounds) + 1.0;
+        Ck(layoutSafe,
+           [[NSString stringWithFormat:@"STATION %s 强化按钮后无重叠且不溢出所属卡片", stage] UTF8String],
+           [NSString stringWithFormat:@"ref=%@ pop=%@ tog=%@ opn=%@",
+            NSStringFromRect(rRef), NSStringFromRect(rPop), NSStringFromRect(rTog), NSStringFromRect(rOpn)]);
+    }
+}
+
 static void VerifyPageP1AndP2(const char *stage, RLPMainWindowController *wc, NSString *key, CGFloat expectedWinW, CGFloat expectedWinH) {
     NSViewController *pageVC = wc.currentContent;
     NSView *pageHost = [wc valueForKey:@"pageHost"];
@@ -355,6 +550,8 @@ int main() {
             VerifyPageP1AndP2("tour@900", wc, key, 900.0, 600.0);
             if ([key isEqualToString:@"albums"]) {
                 VerifyAlbumsP3("tour@900", wc);
+            } else if ([key isEqualToString:@"station"]) {
+                VerifyStationControls("tour@900", wc);
             }
         }
 
@@ -417,6 +614,8 @@ int main() {
         [wc.sidebar selectKey:@"station"];
         Pump(0.2);
         ResizeWindow(wc, 1180.0, 760.0);
+        VerifyPageP1AndP2("P5-station1180", wc, @"station", 1180.0, 760.0);
+        VerifyStationControls("P5-station1180", wc);
         [wc.sidebar selectKey:@"albums"];
         Pump(0.2);
         [wc.window.contentView layoutSubtreeIfNeeded];
