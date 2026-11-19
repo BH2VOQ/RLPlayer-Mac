@@ -61,6 +61,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy) NSString *srcActive;
 @property (nonatomic, assign) NSInteger srcSeq;
 @property (nonatomic, copy, nullable) NSString *srcNextError;
+@property (nonatomic, copy, nullable) NSDictionary *diagChannelsFixture;
 @end
 
 static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
@@ -274,6 +275,14 @@ static NSDictionary<NSString *, NSString *> *RLPParseFormBody(NSString *body) {
         };
     }
     if ([path hasPrefix:@"/api/cast/state"]) return @{ @"ok": @YES, @"running": @NO, @"device": @"" };
+    if ([path hasPrefix:@"/api/diag/channels"]) {
+        return self.diagChannelsFixture ?: @{
+            @"ok": @YES,
+            @"checkedAt": @"2026-11-19T07:40:00Z",
+            @"update": @{ @"channel": @"global", @"ok": @YES, @"http": @200, @"latency": @123, @"timedOut": @NO, @"error": @"" },
+            @"feedback": @{ @"ok": @YES, @"http": @200, @"latency": @88, @"timedOut": @NO, @"error": @"" },
+        };
+    }
     return @{ @"ok": @YES };
 }
 @end
@@ -1320,6 +1329,120 @@ int main() {
         [RLPTheme setUiStyle:@"apple"];
         [wcD stopAllActivity];
         [wcD.window close];
+
+        // =========================================================================
+        // 部分 E：诊断页 反馈/更新通道检查（sp_diagchannelsbtn + sp_diagchannels · 900x600）
+        // =========================================================================
+        std::printf("\n[Suite E] 诊断页 反馈/更新通道检查（900x600 · fake transport）\n");
+        [g_spy.requests removeAllObjects];
+        g_spy.diagChannelsFixture = @{
+            @"ok": @YES,
+            @"checkedAt": @"2026-11-19T07:40:00Z",
+            @"update": @{ @"channel": @"cn", @"ok": @YES, @"http": @200, @"latency": @123, @"timedOut": @NO, @"error": @"" },
+            @"feedback": @{ @"ok": @YES, @"http": @200, @"latency": @88, @"timedOut": @NO, @"error": @"" },
+        };
+        RLPMainWindowController *wcE = [[RLPMainWindowController alloc] init];
+        wcE.window.releasedWhenClosed = NO;
+        [wcE.window setFrameAutosaveName:@""];
+        ResetMainWindowFrame(wcE, 900.0, 600.0);
+        [wcE.sidebar selectKey:@"settings"];
+        Pump(0.15);
+        RLPSettingsViewController *settingsE = (RLPSettingsViewController *)wcE.currentContent;
+        Ck([settingsE isKindOfClass:[RLPSettingsViewController class]],
+           "E0 900x600 打开设置页成功", NSStringFromClass(wcE.currentContent.class));
+        if (settingsE) {
+            [settingsE selectPane:@"diag"];
+            LayoutHost(wcE.window.contentView, 0.2);
+            NSView *diagCard = FindById(settingsE.view, @"sp_diaggroup");
+            NSButton *chanBtn = (NSButton *)FindById(settingsE.view, @"sp_diagchannelsbtn");
+            NSTextField *chanLbl = (NSTextField *)FindById(settingsE.view, @"sp_diagchannels");
+            Ck(diagCard != nil && [chanBtn isKindOfClass:[NSButton class]] &&
+               [chanLbl isKindOfClass:[NSTextField class]] &&
+               [chanBtn isDescendantOf:diagCard] && [chanLbl isDescendantOf:diagCard],
+               "E1 诊断页存在检查反馈/更新通道按钮与 sp_diagchannels 状态文本",
+               @"missing sp_diagchannelsbtn/sp_diagchannels");
+
+            if ([chanBtn isKindOfClass:[NSButton class]] && [chanLbl isKindOfClass:[NSTextField class]]) {
+                // 1) 真实生产接口路径（走 Spy /api/diag/channels 异步回调，不阻塞 UI）
+                [chanBtn performClick:nil];
+                Ck(!chanBtn.enabled && [chanLbl.stringValue containsString:@"正在检查"],
+                   "E2 点击后按钮进入异步检查态（立即返回不阻塞 UI）",
+                   [NSString stringWithFormat:@"en=%d text=%@", (int)chanBtn.enabled, chanLbl.stringValue ?: @""]);
+                LayoutHost(wcE.window.contentView, 0.2);
+                Ck([g_spy.requests containsObject:@"GET /api/diag/channels"],
+                   "E3 生产路径请求 GET /api/diag/channels",
+                   [g_spy.requests componentsJoinedByString:@", "]);
+                Ck(chanBtn.enabled &&
+                   [chanLbl.stringValue isEqualToString:@"更新：HTTP 200 123ms / 反馈：HTTP 200 88ms"],
+                   "E4 200/200 状态文本逐字匹配：更新：HTTP 200 123ms / 反馈：HTTP 200 88ms",
+                   chanLbl.stringValue ?: @"");
+
+                // 2) fake transport 测试接缝：超时 / 404 / 403 / reset
+                __block NSDictionary *stubPayload = nil;
+                void (^chanStub)(void (^)(NSDictionary *)) = ^(void (^done)(NSDictionary *)) {
+                    NSDictionary *p = stubPayload;
+                    dispatch_async(dispatch_get_main_queue(), ^{ done(p); });
+                };
+                @try {
+                    [settingsE setValue:chanStub forKey:@"diagChannelsTransport"];
+                } @catch (NSException *ex) {
+                    Ck(NO, "E5-pre 注入 diagChannelsTransport", ex.reason ?: @"");
+                }
+
+                stubPayload = @{
+                    @"ok": @YES,
+                    @"update": @{ @"channel": @"global", @"ok": @NO, @"http": @0, @"latency": @4001, @"timedOut": @YES, @"error": @"timeout" },
+                    @"feedback": @{ @"ok": @YES, @"http": @200, @"latency": @88, @"timedOut": @NO, @"error": @"" },
+                };
+                [chanBtn performClick:nil];
+                LayoutHost(wcE.window.contentView, 0.15);
+                Ck([chanLbl.stringValue containsString:@"更新：超时"] &&
+                   [chanLbl.stringValue containsString:@"反馈：HTTP 200 88ms"],
+                   "E5 超时场景显示更新超时与反馈 HTTP 200",
+                   chanLbl.stringValue ?: @"");
+
+                stubPayload = @{
+                    @"ok": @YES,
+                    @"update": @{ @"channel": @"cn", @"ok": @NO, @"http": @404, @"latency": @19, @"timedOut": @NO, @"error": @"HTTP 404" },
+                    @"feedback": @{ @"ok": @NO, @"http": @403, @"latency": @23, @"timedOut": @NO, @"error": @"HTTP 403" },
+                };
+                [chanBtn performClick:nil];
+                LayoutHost(wcE.window.contentView, 0.15);
+                Ck([chanLbl.stringValue containsString:@"HTTP 404"] &&
+                   [chanLbl.stringValue containsString:@"HTTP 403"],
+                   "E6 404/403 场景如实显示 HTTP 错误码",
+                   chanLbl.stringValue ?: @"");
+
+                stubPayload = @{
+                    @"ok": @YES,
+                    @"update": @{ @"channel": @"global", @"ok": @NO, @"http": @0, @"latency": @42, @"timedOut": @NO, @"error": @"Recv failure: Connection reset by peer" },
+                    @"feedback": @{ @"ok": @YES, @"http": @200, @"latency": @88, @"timedOut": @NO, @"error": @"" },
+                };
+                [chanBtn performClick:nil];
+                LayoutHost(wcE.window.contentView, 0.15);
+                Ck([chanLbl.stringValue containsString:@"Connection reset by peer"] &&
+                   [chanLbl.stringValue containsString:@"反馈：HTTP 200 88ms"],
+                   "E7 连接 reset 场景如实显示失败且不谎报",
+                   chanLbl.stringValue ?: @"");
+
+                NSScrollView *diagScroll = PaneScroll(settingsE);
+                NSClipView *diagClip = diagScroll.contentView;
+                NSView *diagDoc = diagScroll.documentView;
+                const CGFloat clipW = diagClip ? NSWidth(diagClip.bounds) : 0.0;
+                const CGFloat docW = diagDoc ? NSWidth(diagDoc.frame) : 0.0;
+                const NSRect btnR = [chanBtn convertRect:chanBtn.bounds toView:diagClip];
+                const NSRect lblR = [chanLbl convertRect:chanLbl.bounds toView:diagClip];
+                Ck(clipW > 100.0 && docW <= clipW + 1.0 &&
+                   NSMaxX(btnR) <= clipW + 1.0 && NSMaxX(lblR) <= clipW + 1.0 &&
+                   wcE.window.frame.size.width <= 901.0,
+                   "E8 长错误文案在 900x600 诊断页不溢出且不撑宽窗口",
+                   [NSString stringWithFormat:@"win=%.1f clip=%.1f doc=%.1f btn=%.1f lbl=%.1f",
+                    wcE.window.frame.size.width, clipW, docW, NSMaxX(btnR), NSMaxX(lblR)]);
+                [settingsE setValue:nil forKey:@"diagChannelsTransport"];
+            }
+        }
+        [wcE stopAllActivity];
+        [wcE.window close];
 
         std::printf("\n结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;

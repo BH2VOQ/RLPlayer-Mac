@@ -355,6 +355,36 @@ int main() {
         ck(r1.manifest_json == r.manifest_json, "调用前后 r.manifest_json 未被改动");
     }
 
+    // ------------------------------------------------------------------
+    section("11. diag.json 含通道失败状态时：bundle_json 完整保留失败详情");
+    {
+        const std::string diagWithChannels =
+            "{\"ok\":true,\"channels\":{\"ok\":true,\"checkedAt\":\"2026-11-19T07:40:00Z\","
+            "\"update\":{\"channel\":\"global\",\"url\":\"https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json\","
+            "\"ok\":false,\"http\":0,\"latency\":42,\"timedOut\":false,\"error\":\"Recv failure: Connection reset by peer\"},"
+            "\"feedback\":{\"url\":\"https://rlplayer.rainlain.com/api/v1/feedback/macos/watchdog\","
+            "\"ok\":true,\"http\":200,\"latency\":88,\"timedOut\":false,\"error\":\"\"}}}";
+        BundleSpec spec;
+        spec.case_id = "RLP-20261119-074000-chfail";
+        spec.created_utc = "2026-11-19T07:40:00Z";
+        spec.required = {kDiagName};
+        std::vector<BundleEntry> items;
+        items.push_back(make_entry(kDiagName, diagWithChannels, EntryKind::Json, 100));
+        AssembleResult rc = assemble(spec, std::move(items), "channel check\n");
+        ck(rc.ok, "含 channels 的诊断包组装成功", rc.err);
+        const std::string jc = bundle_json(rc);
+        ck(!jc.empty() && utf8_valid(jc), "bundle_json 输出合法 UTF-8");
+        const rta::net::Json parsedBundle = rta::net::json_parse(jc);
+        const rta::net::Json parsedDiag = rta::net::json_parse(parsedBundle["files"][kDiagName].s());
+        ck(parsedDiag["channels"]["update"]["ok"].b == false, "诊断包保留 update.ok=false");
+        ck((int)parsedDiag["channels"]["update"]["http"].n() == 0, "诊断包保留 update.http=0");
+        ck(parsedDiag["channels"]["update"]["error"].s() == "Recv failure: Connection reset by peer",
+           "诊断包保留 update.error 原文", parsedDiag["channels"]["update"]["error"].s());
+        ck(parsedDiag["channels"]["feedback"]["ok"].b == true &&
+           (int)parsedDiag["channels"]["feedback"]["http"].n() == 200,
+           "诊断包保留 feedback.ok=true & http=200");
+    }
+
     std::printf("\n----------------------------------------\n");
     std::printf("PASS %d / FAIL %d\n", g_pass, g_fails);
     return g_fails == 0 ? 0 : 1;
