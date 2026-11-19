@@ -109,10 +109,10 @@
 }
 @end
 
-/// 导航项 = **web 版左导航 + 顶部模式入口**。
+/// 导航项 = **web 版左导航 + 顶部模式单入口**。
 ///
 /// 顶部快捷区（分组标题之前，900/1180 下均在侧栏可视区顶部）：
-///   聆听室 (station, listen) / 数字音乐台 (station, pro)
+///   单入口 station（随 _uiMode 显示 聆听室 / 数字音乐台；由顶栏模式开关自动切换）
 /// 分组与顺序逐条对齐 web：
 ///   资料库   : 专辑 / 艺术家 / 曲目 / 文件夹 / 流媒体（web data-v=remote）
 ///   播放列表 : 播放队列 / 最近播放 / 我的最爱
@@ -120,10 +120,11 @@
 ///             空态是一整行可点的「＋ 新建歌单」（web .sqempty）
 ///   音频引擎 : 设置（原底部聆听室已统一上移到顶部，不留重复/不同步入口）
 static NSArray<NSDictionary *> *RLPSidebarItems(NSString *uiMode) {
-    (void)uiMode;
+    const BOOL isPro = [uiMode isEqualToString:@"pro"];
     return @[
-        @{@"name": @"聆听室",     @"icon": @"headphones",          @"key": @"station", @"stationMode": @"listen"},
-        @{@"name": @"数字音乐台", @"icon": @"slider.horizontal.3", @"key": @"station", @"stationMode": @"pro"},
+        @{@"name": isPro ? @"数字音乐台" : @"聆听室",
+          @"icon": isPro ? @"slider.horizontal.3" : @"headphones",
+          @"key": @"station"},
         @{@"sec": @"资料库"},
         @{@"name": @"专辑",     @"icon": @"square.stack", @"key": @"albums"},
         @{@"name": @"艺术家",   @"icon": @"person.2",     @"key": @"artists"},
@@ -180,7 +181,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 
 - (NSInteger)navRowCount {
     // 「我的歌单」的空态行（web .sqempty）是可点入口但不是 .nav，不计入导航项；
-    // 顶部「聆听室 / 数字音乐台」共用 station 视图路由，按唯一静态导航 key 计数。
+    // 顶部 station 单入口随模式显示，按唯一静态导航 key 计数。
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
     for (NSDictionary *it in _menuItems) {
         if (it[@"sec"] || [it[@"empty"] boolValue] || it[@"sqindex"]) continue;
@@ -191,18 +192,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 }
 
 - (BOOL)item:(NSDictionary *)item matchesKey:(NSString *)key {
-    if (!key.length || ![item[@"key"] isEqualToString:key]) return NO;
-    if ([key isEqualToString:@"station"] && item[@"stationMode"]) {
-        NSString *mode = [_uiMode isEqualToString:@"pro"] ? @"pro" : @"listen";
-        return [item[@"stationMode"] isEqualToString:mode];
-    }
-    return YES;
-}
-
-- (nullable NSString *)stationModeForRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_menuItems.count) return nil;
-    NSString *m = _menuItems[row][@"stationMode"];
-    return [m isKindOfClass:[NSString class]] ? m : nil;
+    return key.length && [item[@"key"] isEqualToString:key];
 }
 
 #pragma mark - 「我的歌单」：web #sqList 的原生复刻
@@ -507,8 +497,6 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (_pendingRow >= 0 && _pendingRow < (NSInteger)_menuItems.count && !RLPRowIsSection(_menuItems, _pendingRow)) {
         const NSInteger want = _pendingRow;
         _pendingRow = -1;
-        NSString *rowMode = [self stationModeForRow:want];
-        if (rowMode.length) _uiMode = [rowMode copy];
         _selectedRow = want;
         _lastSelectedRow = want;
         [_tableView reloadData];
@@ -682,10 +670,8 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if ([item[@"empty"] boolValue]) return [self emptySavedQueueCellForTableView:tableView];
     if (item[@"sqindex"]) return [self savedQueueCellForTableView:tableView row:row item:item];
 
-    NSString *stationMode = [item[@"stationMode"] isKindOfClass:[NSString class]] ? item[@"stationMode"] : nil;
-    NSString *cellId = @"Cell";
-    if ([stationMode isEqualToString:@"listen"]) cellId = @"side.station.listen";
-    else if ([stationMode isEqualToString:@"pro"]) cellId = @"side.station.pro";
+    const BOOL isStation = [item[@"key"] isEqualToString:@"station"];
+    NSString *cellId = isStation ? @"side.station" : @"Cell";
 
     NSTableCellView *cell = [tableView makeViewWithIdentifier:cellId owner:self];
     if (!cell) {
@@ -723,7 +709,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
         label.translatesAutoresizingMaskIntoConstraints = NO;
         [cell addSubview:label];
 
-        const CGFloat rightPad = stationMode.length ? -10.0 : -12.0;
+        const CGFloat rightPad = isStation ? -10.0 : -12.0;
         [NSLayoutConstraint activateConstraints:@[
             [iconView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:20],
             [iconView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
@@ -750,9 +736,9 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     label.font = selected ? [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]
                           : [NSFont systemFontOfSize:13];
     label.textColor = selected ? t.accentText : t.text;
-    cell.toolTip = [stationMode isEqualToString:@"pro"]
-        ? RLPTr(@"专业工作台")
-        : ([stationMode isEqualToString:@"listen"] ? RLPTr(@"聆听室") : nil);
+    cell.toolTip = isStation
+        ? ([_uiMode isEqualToString:@"pro"] ? RLPTr(@"专业工作台") : RLPTr(@"聆听室"))
+        : nil;
 
     NSView *pill = nil;
     for (NSView *sub in cell.subviews)
@@ -815,10 +801,6 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     if (!_tableView) { _pendingRow = row; return; }
     // 注意：即使行号没变也要发 onSelect —— 详情页压栈后 currentContent 已不是
     // 侧栏选中行对应的页，点同一行必须能路由回去（否则顶栏标题会被清成空）。
-    NSString *rowMode = [self stationModeForRow:row];
-    if (rowMode.length && ![_uiMode isEqualToString:rowMode]) {
-        _uiMode = [rowMode copy];
-    }
     _selectedRow = row;
     _lastSelectedRow = row;
     [_tableView reloadData];

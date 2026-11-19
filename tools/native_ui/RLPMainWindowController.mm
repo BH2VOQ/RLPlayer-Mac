@@ -33,10 +33,6 @@
 #import "RLPTheme.h"
 #import "RLPSupport.h"
 
-@interface RLPSidebarViewController (RLPTopEntryMode)
-- (nullable NSString *)stationModeForRow:(NSInteger)row;
-@end
-
 /// 顶栏：标题/计数是纯 frame 子视图，Auto Layout pass 会把它们归零，
 /// 所以每次 layout 后重放一次位置（离屏渲染也走这条路）。
 /// 窄窗口（如 900×600）或英文长标题/详情返回栈下，必须把左侧标题+计数截断在搜索框左缘之前，避免越界或重叠。
@@ -542,12 +538,6 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 
     __weak __typeof__(self) weakSelf = self;
     _sidebar.onSelect = ^(NSInteger row) {
-        NSString *targetMode = [weakSelf.sidebar respondsToSelector:@selector(stationModeForRow:)]
-            ? [weakSelf.sidebar stationModeForRow:row] : nil;
-        if (targetMode.length && ![weakSelf.uiMode isEqualToString:targetMode]) {
-            [weakSelf setUiMode:targetMode persist:YES];
-            return;
-        }
         [weakSelf showContentForRow:row];
     };
     _albums.onPlayAlbum = ^(NSString *key) {

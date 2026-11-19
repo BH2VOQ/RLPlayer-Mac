@@ -320,8 +320,8 @@ static NSTextField *FirstTextFieldInCell(NSView *cell) {
     return nil;
 }
 
-static void CheckSidebarTopEntries(RLPMainWindowController *wc, const char *stage,
-                                   NSInteger *outListenRow, NSInteger *outProRow) {
+static void CheckSidebarTopEntry(RLPMainWindowController *wc, const char *stage,
+                                 NSInteger *outStationRow) {
     [wc.window.contentView layoutSubtreeIfNeeded];
     NSScrollView *scroll = nil;
     NSTableView *tv = SidebarTableView(wc.sidebar, &scroll);
@@ -330,14 +330,13 @@ static void CheckSidebarTopEntries(RLPMainWindowController *wc, const char *stag
     const CGFloat sidebarH = wc.sidebar.view.bounds.size.height;
     const CGFloat thirdH = sidebarH / 3.0;
 
-    NSInteger listenRow = -1, proRow = -1, firstSecRow = -1;
-    NSInteger stationBeforeSec = 0, stationAfterSec = 0;
-    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    NSInteger stationRow = -1, firstSecRow = -1;
+    NSInteger stationCount = 0, stationBeforeSec = 0, stationAfterSec = 0, stationTitleCount = 0;
     NSMutableSet<NSString *> *uniqueTitles = [NSMutableSet set];
     NSMutableArray<NSString *> *dupTitles = [NSMutableArray array];
 
-    NSView *listenCell = nil, *proCell = nil, *firstSecCell = nil;
-    NSString *listenTitle = @"", *proTitle = @"", *firstSecTitle = @"";
+    NSView *stationCell = nil, *firstSecCell = nil;
+    NSString *stationTitle = @"", *firstSecTitle = @"";
     for (NSInteger r = 0; r < wc.sidebar.rowCount; ++r) {
         NSView *cell = [tv viewAtColumn:0 row:r makeIfNecessary:YES];
         if (!cell) cell = [tv.delegate tableView:tv viewForTableColumn:nil row:r];
@@ -356,139 +355,110 @@ static void CheckSidebarTopEntries(RLPMainWindowController *wc, const char *stag
         if (![cell.identifier isEqualToString:@"SQRow"] && txt.length) {
             if ([uniqueTitles containsObject:txt]) [dupTitles addObject:txt];
             [uniqueTitles addObject:txt];
-            [titles addObject:txt];
+        }
+        if ([txt isEqualToString:RLPTr(@"聆听室")] ||
+            [txt isEqualToString:RLPTr(@"数字音乐台")] ||
+            [txt isEqualToString:RLPTr(@"专业工作台")]) {
+            ++stationTitleCount;
         }
         if ([key isEqualToString:@"station"]) {
+            ++stationCount;
             if (firstSecRow < 0) ++stationBeforeSec;
             else ++stationAfterSec;
-            if ([cell.identifier isEqualToString:@"side.station.listen"] ||
-                [txt isEqualToString:RLPTr(@"聆听室")]) {
-                listenRow = r;
-                listenCell = cell;
-                listenTitle = txt;
-            } else if ([cell.identifier isEqualToString:@"side.station.pro"] ||
-                       [txt isEqualToString:RLPTr(@"数字音乐台")] ||
-                       [txt isEqualToString:RLPTr(@"专业工作台")]) {
-                proRow = r;
-                proCell = cell;
-                proTitle = txt;
+            if (stationRow < 0) {
+                stationRow = r;
+                stationCell = cell;
+                stationTitle = txt;
             }
         }
     }
 
-    if (outListenRow) *outListenRow = listenRow;
-    if (outProRow) *outProRow = proRow;
+    if (outStationRow) *outStationRow = stationRow;
 
-    const NSRect listenRowRect = (listenRow >= 0) ? [tv rectOfRow:listenRow] : NSZeroRect;
-    const NSRect proRowRect = (proRow >= 0) ? [tv rectOfRow:proRow] : NSZeroRect;
+    const NSRect stationRowRect = (stationRow >= 0) ? [tv rectOfRow:stationRow] : NSZeroRect;
     const NSRect secRowRect = (firstSecRow >= 0) ? [tv rectOfRow:firstSecRow] : NSZeroRect;
 
-    const NSRect listenInSidebar = (listenRow >= 0) ? [tv convertRect:listenRowRect toView:wc.sidebar.view] : NSZeroRect;
-    const NSRect proInSidebar = (proRow >= 0) ? [tv convertRect:proRowRect toView:wc.sidebar.view] : NSZeroRect;
-    const NSRect listenInScroll = (listenRow >= 0) ? [tv convertRect:listenRowRect toView:scroll] : NSZeroRect;
-    const NSRect proInScroll = (proRow >= 0) ? [tv convertRect:proRowRect toView:scroll] : NSZeroRect;
+    const NSRect stationInSidebar = (stationRow >= 0) ? [tv convertRect:stationRowRect toView:wc.sidebar.view] : NSZeroRect;
+    const NSRect stationInScroll = (stationRow >= 0) ? [tv convertRect:stationRowRect toView:scroll] : NSZeroRect;
 
-    const NSRect listenInWin = (listenRow >= 0) ? [tv convertRect:listenRowRect toView:root] : NSZeroRect;
-    const NSRect proInWin = (proRow >= 0) ? [tv convertRect:proRowRect toView:root] : NSZeroRect;
+    const NSRect stationInWin = (stationRow >= 0) ? [tv convertRect:stationRowRect toView:root] : NSZeroRect;
     const NSRect secInWin = (firstSecRow >= 0) ? [tv convertRect:secRowRect toView:root] : NSZeroRect;
     const NSRect searchInWin = search ? [search convertRect:search.bounds toView:root] : NSZeroRect;
 
-    const CGFloat listenTopDist = NSMaxY(wc.sidebar.view.bounds) - NSMaxY(listenInSidebar);
-    const CGFloat listenBottomDist = NSMaxY(wc.sidebar.view.bounds) - NSMinY(listenInSidebar);
-    const CGFloat proTopDist = NSMaxY(wc.sidebar.view.bounds) - NSMaxY(proInSidebar);
-    const CGFloat proBottomDist = NSMaxY(wc.sidebar.view.bounds) - NSMinY(proInSidebar);
+    const CGFloat stationTopDist = NSMaxY(wc.sidebar.view.bounds) - NSMaxY(stationInSidebar);
+    const CGFloat stationBottomDist = NSMaxY(wc.sidebar.view.bounds) - NSMinY(stationInSidebar);
 
-    std::printf("  [sidebar %s] sidebarH=%.1f third=%.1f | listen(row=%ld title='%s' frame=%s top=%.1f..%.1f) | "
-                "pro(row=%ld title='%s' frame=%s top=%.1f..%.1f) | sec0(row=%ld title='%s' frame=%s) | search=%s\n",
-                stage, sidebarH, thirdH,
-                (long)listenRow, listenTitle.UTF8String, NSStringFromRect(listenInSidebar).UTF8String,
-                listenTopDist, listenBottomDist,
-                (long)proRow, proTitle.UTF8String, NSStringFromRect(proInSidebar).UTF8String,
-                proTopDist, proBottomDist,
+    NSString *expectedTitle = [wc.uiMode isEqualToString:@"pro"] ? RLPTr(@"数字音乐台") : RLPTr(@"聆听室");
+
+    std::printf("  [sidebar %s] mode=%s sidebarH=%.1f third=%.1f | station(count=%ld row=%ld title='%s' frame=%s top=%.1f..%.1f) | "
+                "sec0(row=%ld title='%s' frame=%s) | search=%s\n",
+                stage, wc.uiMode.UTF8String ?: "", sidebarH, thirdH,
+                (long)stationCount, (long)stationRow, stationTitle.UTF8String,
+                NSStringFromRect(stationInSidebar).UTF8String, stationTopDist, stationBottomDist,
                 (long)firstSecRow, firstSecTitle.UTF8String, NSStringFromRect(secInWin).UTF8String,
                 NSStringFromRect(searchInWin).UTF8String);
 
     const BOOL scrolledToTop = (scroll != nil && scroll.contentView.bounds.origin.y <= 0.5);
     const NSRect scrollTol = NSInsetRect(scroll.bounds, -0.5, -0.5);
-    const BOOL inTopThird = (listenRow == 0 && proRow == 1 && firstSecRow == 2 &&
+    const BOOL inTopThird = (stationCount == 1 && stationRow == 0 && firstSecRow == 1 &&
+                             [stationTitle isEqualToString:expectedTitle] &&
                              scrolledToTop &&
-                             listenTopDist >= 0 && listenBottomDist <= thirdH &&
-                             proTopDist >= 0 && proBottomDist <= thirdH &&
-                             NSContainsRect(scrollTol, listenInScroll) &&
-                             NSContainsRect(scrollTol, proInScroll));
+                             stationTopDist >= 0 && stationBottomDist <= thirdH &&
+                             NSContainsRect(scrollTol, stationInScroll));
     Ck(inTopThird,
-       [[NSString stringWithFormat:@"V1-%s 侧栏顶部存在聆听室与数字音乐台入口且均在前 1/3 可视区内", stage] UTF8String],
-       [NSString stringWithFormat:@"listenRow=%ld(%.1f..%.1f) proRow=%ld(%.1f..%.1f) sec0=%ld scrollY=%.1f third=%.1f",
-        (long)listenRow, listenTopDist, listenBottomDist,
-        (long)proRow, proTopDist, proBottomDist, (long)firstSecRow,
+       [[NSString stringWithFormat:@"V1-%s 侧栏顶部仅保留唯一 station 入口 (row 0) 且位于前 1/3 可视区内", stage] UTF8String],
+       [NSString stringWithFormat:@"count=%ld row=%ld title='%@'(expect='%@') sec0=%ld top=%.1f..%.1f scrollY=%.1f third=%.1f",
+        (long)stationCount, (long)stationRow, stationTitle, expectedTitle, (long)firstSecRow,
+        stationTopDist, stationBottomDist,
         scroll ? scroll.contentView.bounds.origin.y : -1.0, thirdH]);
 
-    const BOOL cellsMounted = (listenCell.superview != nil && proCell.superview != nil && firstSecCell.superview != nil);
-    const NSRect listenCellInWin = cellsMounted ? [listenCell convertRect:listenCell.bounds toView:root] : NSZeroRect;
-    const NSRect proCellInWin = cellsMounted ? [proCell convertRect:proCell.bounds toView:root] : NSZeroRect;
+    const BOOL cellsMounted = (stationCell.superview != nil && firstSecCell.superview != nil);
+    const NSRect stationCellInWin = cellsMounted ? [stationCell convertRect:stationCell.bounds toView:root] : NSZeroRect;
     const NSRect secCellInWin = cellsMounted ? [firstSecCell convertRect:firstSecCell.bounds toView:root] : NSZeroRect;
     // NSTableView rectOfRow: returns contiguous row bands (sharing the border between adjacent rows),
     // while the cell views inside them are separated by intercellSpacing (2pt).
-    const BOOL noOverlap = (listenRow >= 0 && proRow >= 0 && firstSecRow >= 0 && search != nil &&
+    const BOOL noOverlap = (stationCount == 1 && stationRow == 0 && firstSecRow == 1 && search != nil &&
                             cellsMounted &&
-                            !NSIntersectsRect(NSInsetRect(listenInWin, 0.5, 0.5), NSInsetRect(proInWin, 0.5, 0.5)) &&
-                            !NSIntersectsRect(NSInsetRect(listenInWin, 0.5, 0.5), NSInsetRect(secInWin, 0.5, 0.5)) &&
-                            !NSIntersectsRect(NSInsetRect(proInWin, 0.5, 0.5), NSInsetRect(secInWin, 0.5, 0.5)) &&
-                            !NSIntersectsRect(NSInsetRect(listenInWin, 0.5, 0.5), NSInsetRect(searchInWin, 0.5, 0.5)) &&
-                            !NSIntersectsRect(NSInsetRect(proInWin, 0.5, 0.5), NSInsetRect(searchInWin, 0.5, 0.5)) &&
-                            NSMaxX(listenInWin) <= NSMinX(searchInWin) &&
-                            NSMaxX(proInWin) <= NSMinX(searchInWin) &&
-                            NSMinY(listenInWin) >= NSMaxY(proInWin) - 0.5 &&
-                            NSMinY(proInWin) >= NSMaxY(secInWin) - 0.5 &&
-                            NSMinY(listenInWin) > NSMinY(proInWin) &&
-                            NSMinY(proInWin) > NSMinY(secInWin) &&
-                            NSMinY(listenCellInWin) > NSMaxY(proCellInWin) &&
-                            NSMinY(proCellInWin) > NSMaxY(secCellInWin));
+                            !NSIntersectsRect(NSInsetRect(stationInWin, 0.5, 0.5), NSInsetRect(secInWin, 0.5, 0.5)) &&
+                            !NSIntersectsRect(NSInsetRect(stationInWin, 0.5, 0.5), NSInsetRect(searchInWin, 0.5, 0.5)) &&
+                            NSMaxX(stationInWin) <= NSMinX(searchInWin) &&
+                            NSMinY(stationInWin) >= NSMaxY(secInWin) - 0.5 &&
+                            NSMinY(stationInWin) > NSMinY(secInWin) &&
+                            NSMinY(stationCellInWin) > NSMaxY(secCellInWin));
     Ck(noOverlap,
-       [[NSString stringWithFormat:@"V3-%s 两顶部入口不互相重叠、不与搜索框及首分组标题重叠且位于分组标题之上", stage] UTF8String],
-       [NSString stringWithFormat:@"listen=%@ pro=%@ sec0=%@ search=%@",
-        NSStringFromRect(listenInWin), NSStringFromRect(proInWin),
-        NSStringFromRect(secInWin), NSStringFromRect(searchInWin)]);
+       [[NSString stringWithFormat:@"V4-%s 侧栏顶部入口不与搜索框及首分组标题重叠且位于分组标题之上", stage] UTF8String],
+       [NSString stringWithFormat:@"station=%@ sec0=%@ search=%@",
+        NSStringFromRect(stationInWin), NSStringFromRect(secInWin), NSStringFromRect(searchInWin)]);
 
-    Ck(stationBeforeSec == 2 && stationAfterSec == 0 && dupTitles.count == 0,
-       [[NSString stringWithFormat:@"V5-%s 无底部重复 station 入口且无重复侧栏标题", stage] UTF8String],
-       [NSString stringWithFormat:@"beforeSec=%ld afterSec=%ld dups=%@",
-        (long)stationBeforeSec, (long)stationAfterSec, [dupTitles componentsJoinedByString:@","]]);
-    (void)listenCell; (void)proCell; (void)firstSecCell;
+    Ck(stationCount == 1 && stationBeforeSec == 1 && stationAfterSec == 0 &&
+       stationTitleCount == 1 && dupTitles.count == 0,
+       [[NSString stringWithFormat:@"V5-%s 无数字音乐台/聆听室重复行且无重复侧栏标题", stage] UTF8String],
+       [NSString stringWithFormat:@"count=%ld beforeSec=%ld afterSec=%ld titleCount=%ld dups=%@",
+        (long)stationCount, (long)stationBeforeSec, (long)stationAfterSec,
+        (long)stationTitleCount, [dupTitles componentsJoinedByString:@","]]);
 }
 
-static void CheckSidebarEnglishLabels(RLPMainWindowController *wc, const char *stage,
-                                      NSInteger listenRow, NSInteger proRow) {
+static void CheckSidebarEnglishLabel(RLPMainWindowController *wc, const char *stage,
+                                     NSInteger stationRow, NSString *expectedText) {
     [wc.window.contentView layoutSubtreeIfNeeded];
     NSTableView *tv = SidebarTableView(wc.sidebar, nil);
-    NSView *listenCell = (listenRow >= 0) ? [tv viewAtColumn:0 row:listenRow makeIfNecessary:YES] : nil;
-    NSView *proCell = (proRow >= 0) ? [tv viewAtColumn:0 row:proRow makeIfNecessary:YES] : nil;
-    if (listenCell) [listenCell layoutSubtreeIfNeeded];
-    if (proCell) [proCell layoutSubtreeIfNeeded];
-    NSTextField *listenLab = FirstTextFieldInCell(listenCell);
-    NSTextField *proLab = FirstTextFieldInCell(proCell);
-    const CGFloat listenNeedW = listenLab ? listenLab.attributedStringValue.size.width : 9999.0;
-    const CGFloat proNeedW = proLab ? proLab.attributedStringValue.size.width : 9999.0;
-    const BOOL ok = (listenLab && proLab &&
-                     [listenLab.stringValue isEqualToString:@"Listening Room"] &&
-                     [proLab.stringValue isEqualToString:@"Digital Music Console"] &&
-                     listenLab.bounds.size.height <= 22.0 &&
-                     proLab.bounds.size.height <= 22.0 &&
-                     listenNeedW <= listenLab.bounds.size.width + 1.0 &&
-                     proNeedW <= proLab.bounds.size.width + 1.0 &&
-                     NSContainsRect(NSInsetRect(listenCell.bounds, -0.5, -0.5),
-                                    [listenLab convertRect:listenLab.bounds toView:listenCell]) &&
-                     NSContainsRect(NSInsetRect(proCell.bounds, -0.5, -0.5),
-                                    [proLab convertRect:proLab.bounds toView:proCell]));
-    std::printf("  [sidebar-en %s] listen='%s' needW=%.1f box=%s | pro='%s' needW=%.1f box=%s\n",
-                stage,
-                listenLab.stringValue.UTF8String ?: "", listenNeedW, NSStringFromRect(listenLab.frame).UTF8String,
-                proLab.stringValue.UTF8String ?: "", proNeedW, NSStringFromRect(proLab.frame).UTF8String);
+    NSView *cell = (stationRow >= 0) ? [tv viewAtColumn:0 row:stationRow makeIfNecessary:YES] : nil;
+    if (cell) [cell layoutSubtreeIfNeeded];
+    NSTextField *lab = FirstTextFieldInCell(cell);
+    const CGFloat needW = lab ? lab.attributedStringValue.size.width : 9999.0;
+    const BOOL ok = (lab &&
+                     [lab.stringValue isEqualToString:expectedText] &&
+                     lab.bounds.size.height <= 22.0 &&
+                     needW <= lab.bounds.size.width + 1.0 &&
+                     NSContainsRect(NSInsetRect(cell.bounds, -0.5, -0.5),
+                                    [lab convertRect:lab.bounds toView:cell]));
+    std::printf("  [sidebar-en %s] mode=%s row=%ld title='%s' needW=%.1f box=%s\n",
+                stage, wc.uiMode.UTF8String ?: "", (long)stationRow,
+                lab.stringValue.UTF8String ?: "", needW, NSStringFromRect(lab.frame).UTF8String);
     Ck(ok,
-       [[NSString stringWithFormat:@"V4-%s 英文模式下顶部两入口文案完整、单行不换行且不截断", stage] UTF8String],
-       [NSString stringWithFormat:@"listen='%@'(%.1f/%.1f h=%.1f) pro='%@'(%.1f/%.1f h=%.1f)",
-        listenLab.stringValue, listenNeedW, listenLab.bounds.size.width, listenLab.bounds.size.height,
-        proLab.stringValue, proNeedW, proLab.bounds.size.width, proLab.bounds.size.height]);
+       [[NSString stringWithFormat:@"V4-%s 英文模式下 row0 文案 '%@' 完整、单行不换行且不截断", stage, expectedText] UTF8String],
+       [NSString stringWithFormat:@"actual='%@' expect='%@' (%.1f/%.1f h=%.1f)",
+        lab.stringValue, expectedText, needW, lab.bounds.size.width, lab.bounds.size.height]);
 }
 
 int main() {
@@ -787,19 +757,20 @@ int main() {
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
         Pump(0.1);
 
-        // ---- V1..V5: 侧栏顶部「聆听室 / 数字音乐台」入口、路由、布局与同步契约 ----
+        // ---- V1..V5: 侧栏顶部单入口（聆听室 / 数字音乐台随模式切换）、路由、布局与同步契约 ----
         {
-            NSInteger listenRow = -1, proRow = -1;
+            NSInteger stationRow = -1;
             NSView *pageHost = (NSView *)[wc valueForKey:@"pageHost"];
             NSTextField *topTitle = (NSTextField *)[wc valueForKey:@"pageTitle"];
 
-            // 900x600 空歌单与溢出 12 歌单两档下验证 V1/V3/V5
+            // 900x600 空歌单与溢出 12 歌单两档下验证 V1/V4/V5
             ResizeWindow(wc, 900, 600);
+            [wc setUiMode:@"listen" persist:NO];
             [wc.sidebar selectKey:@"albums"];
             Pump(0.15);
-            CheckSidebarTopEntries(wc, "zh@900", &listenRow, &proRow);
+            CheckSidebarTopEntry(wc, "zh-listen@900", &stationRow);
 
-            // 溢出 12 个歌单（把设置/音频引擎挤到滚动视口之外）时，顶部入口仍必须留在视口前 1/3
+            // 溢出 12 个歌单（把设置/音频引擎挤到滚动视口之外）时，顶部单入口仍必须留在视口前 1/3
             NSMutableArray *manyQueues = [NSMutableArray array];
             for (int qi = 0; qi < 12; ++qi) {
                 [manyQueues addObject:@{ @"name": [NSString stringWithFormat:@"Playlist %02d", qi], @"n": @5 }];
@@ -807,91 +778,162 @@ int main() {
             g_spy.savedQueuesFixture = manyQueues;
             [wc.sidebar reloadSavedQueues];
             Pump(0.15);
-            CheckSidebarTopEntries(wc, "zh-overflow@900", &listenRow, &proRow);
+            CheckSidebarTopEntry(wc, "zh-overflow@900", &stationRow);
 
-            // V2: 通过 NSTableView 选中切到 pro -> RLPWorkbenchViewController + pageHost + top.mode 同步
+            // V2a: listen 模式下点击 row 0 -> RLPQuickStartViewController + pageHost + topTitle「聆听室」
             NSScrollView *sbScroll = nil;
             NSTableView *sbTable = SidebarTableView(wc.sidebar, &sbScroll);
-            if (sbTable && proRow >= 0) {
-                [sbTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)proRow] byExtendingSelection:NO];
+            if (sbTable && stationRow >= 0) {
+                [sbTable deselectAll:nil];
+                [sbTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)stationRow] byExtendingSelection:NO];
             } else {
-                [wc.sidebar selectRow:proRow];
+                [wc.sidebar selectRow:stationRow];
             }
             Pump(0.2);
-            Ck([wc.uiMode isEqualToString:@"pro"] &&
-               wc.modeControl.selectedSegment == 1 &&
-               wc.sidebar.selectedRow == proRow &&
-               [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class] &&
-               [wc.currentContent.view.identifier isEqualToString:@"page.station"] &&
-               wc.currentContent.view.superview == pageHost &&
-               pageHost.subviews.count == 1 &&
-               [topTitle.stringValue isEqualToString:RLPTr(@"数字音乐台")],
-               "V2a 点击顶部专业入口进入 RLPWorkbenchViewController 并同步 modeControl/pageHost/标题",
-               [NSString stringWithFormat:@"mode=%@ seg=%ld row=%ld/%ld vc=%@ hostCount=%lu title=%@",
-                wc.uiMode, (long)wc.modeControl.selectedSegment, (long)wc.sidebar.selectedRow, (long)proRow,
-                NSStringFromClass(wc.currentContent.class), (unsigned long)pageHost.subviews.count,
-                topTitle.stringValue ?: @""]);
-
-            // V2b: 点击顶部聆听室入口进入 RLPQuickStartViewController + pageHost + top.mode 同步
-            if (sbTable && listenRow >= 0) {
-                [sbTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)listenRow] byExtendingSelection:NO];
-            } else {
-                [wc.sidebar selectRow:listenRow];
-            }
-            Pump(0.2);
+            std::printf("  [V2a] mode=%s row=%ld title='%s' currentContent=%s\n",
+                        wc.uiMode.UTF8String ?: "", (long)wc.sidebar.selectedRow,
+                        topTitle.stringValue.UTF8String ?: "",
+                        NSStringFromClass(wc.currentContent.class).UTF8String);
             Ck([wc.uiMode isEqualToString:@"listen"] &&
                wc.modeControl.selectedSegment == 0 &&
-               wc.sidebar.selectedRow == listenRow &&
+               wc.sidebar.selectedRow == 0 &&
+               [wc.sidebar.selectedKey isEqualToString:@"station"] &&
                [wc.currentContent isKindOfClass:RLPQuickStartViewController.class] &&
                [wc.currentContent.view.identifier isEqualToString:@"page.station"] &&
                wc.currentContent.view.superview == pageHost &&
                pageHost.subviews.count == 1 &&
                [topTitle.stringValue isEqualToString:RLPTr(@"聆听室")],
-               "V2b 点击顶部聆听室入口进入 RLPQuickStartViewController 并同步 modeControl/pageHost/标题",
-               [NSString stringWithFormat:@"mode=%@ seg=%ld row=%ld/%ld vc=%@ hostCount=%lu title=%@",
-                wc.uiMode, (long)wc.modeControl.selectedSegment, (long)wc.sidebar.selectedRow, (long)listenRow,
-                NSStringFromClass(wc.currentContent.class), (unsigned long)pageHost.subviews.count,
-                topTitle.stringValue ?: @""]);
+               "V2a listen 模式下点击 row 0 进入 RLPQuickStartViewController 并同步 modeControl/pageHost/标题",
+               [NSString stringWithFormat:@"mode=%@ seg=%ld row=%ld/%ld key=%@ vc=%@ hostCount=%lu title=%@",
+                wc.uiMode, (long)wc.modeControl.selectedSegment, (long)wc.sidebar.selectedRow, (long)stationRow,
+                wc.sidebar.selectedKey ?: @"(nil)", NSStringFromClass(wc.currentContent.class),
+                (unsigned long)pageHost.subviews.count, topTitle.stringValue ?: @""]);
 
-            // V5b: 顶栏 modeControl 与设置页 RLPSwitchToProWorkbenchNotification 反向同步侧栏选中行
+            // V3a: 顶栏 modeControl 切到 pro -> 自动切到 RLPWorkbenchViewController 且 row 0 选中不变
             wc.modeControl.selectedSegment = 1;
             [wc.modeControl sendAction:wc.modeControl.action to:wc.modeControl.target];
             Pump(0.15);
-            const BOOL syncFromTopPro = (wc.sidebar.selectedRow == proRow && [wc.uiMode isEqualToString:@"pro"]);
+            std::printf("  [V3a->pro] mode=%s row=%ld title='%s' currentContent=%s\n",
+                        wc.uiMode.UTF8String ?: "", (long)wc.sidebar.selectedRow,
+                        topTitle.stringValue.UTF8String ?: "",
+                        NSStringFromClass(wc.currentContent.class).UTF8String);
+            Ck([wc.uiMode isEqualToString:@"pro"] &&
+               wc.modeControl.selectedSegment == 1 &&
+               wc.sidebar.selectedRow == 0 &&
+               [wc.sidebar.selectedKey isEqualToString:@"station"] &&
+               [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class] &&
+               [wc.currentContent.view.identifier isEqualToString:@"page.station"] &&
+               wc.currentContent.view.superview == pageHost &&
+               pageHost.subviews.count == 1 &&
+               [topTitle.stringValue isEqualToString:RLPTr(@"数字音乐台")],
+               "V3a 顶栏 modeControl 切 pro 自动切页到 RLPWorkbenchViewController 且 row 0 选中不变",
+               [NSString stringWithFormat:@"mode=%@ row=%ld key=%@ vc=%@ title=%@",
+                wc.uiMode, (long)wc.sidebar.selectedRow, wc.sidebar.selectedKey ?: @"(nil)",
+                NSStringFromClass(wc.currentContent.class), topTitle.stringValue ?: @""]);
+            CheckSidebarTopEntry(wc, "zh-pro-after-mode@900", &stationRow);
+
+            // V3b: 顶栏 modeControl 切回 listen -> 自动切回 RLPQuickStartViewController 且 row 0 选中不变
             wc.modeControl.selectedSegment = 0;
             [wc.modeControl sendAction:wc.modeControl.action to:wc.modeControl.target];
             Pump(0.15);
-            const BOOL syncFromTopListen = (wc.sidebar.selectedRow == listenRow && [wc.uiMode isEqualToString:@"listen"]);
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSwitchToProWorkbenchNotification" object:nil];
-            Pump(0.15);
-            const BOOL syncFromSettingsNote = (wc.sidebar.selectedRow == proRow &&
-                                               wc.modeControl.selectedSegment == 1 &&
-                                               [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class]);
-            Ck(syncFromTopPro && syncFromTopListen && syncFromSettingsNote,
-               "V5b 顶栏 modeControl 与设置工作台通知与侧栏顶部两入口共用同一状态且双向同步",
-               [NSString stringWithFormat:@"topPro=%d topListen=%d settingsNote=%d row=%ld seg=%ld",
-                (int)syncFromTopPro, (int)syncFromTopListen, (int)syncFromSettingsNote,
-                (long)wc.sidebar.selectedRow, (long)wc.modeControl.selectedSegment]);
+            std::printf("  [V3b->listen] mode=%s row=%ld title='%s' currentContent=%s\n",
+                        wc.uiMode.UTF8String ?: "", (long)wc.sidebar.selectedRow,
+                        topTitle.stringValue.UTF8String ?: "",
+                        NSStringFromClass(wc.currentContent.class).UTF8String);
+            Ck([wc.uiMode isEqualToString:@"listen"] &&
+               wc.modeControl.selectedSegment == 0 &&
+               wc.sidebar.selectedRow == 0 &&
+               [wc.sidebar.selectedKey isEqualToString:@"station"] &&
+               [wc.currentContent isKindOfClass:RLPQuickStartViewController.class] &&
+               [wc.currentContent.view.identifier isEqualToString:@"page.station"] &&
+               wc.currentContent.view.superview == pageHost &&
+               pageHost.subviews.count == 1 &&
+               [topTitle.stringValue isEqualToString:RLPTr(@"聆听室")],
+               "V3b 顶栏 modeControl 切回 listen 自动切回 RLPQuickStartViewController 且 row 0 选中不变",
+               [NSString stringWithFormat:@"mode=%@ row=%ld key=%@ vc=%@ title=%@",
+                wc.uiMode, (long)wc.sidebar.selectedRow, wc.sidebar.selectedKey ?: @"(nil)",
+                NSStringFromClass(wc.currentContent.class), topTitle.stringValue ?: @""]);
 
-            // 切回 1180x760 并检查 V1/V3/V5 + V4 英文模式文案完整
-            g_spy.savedQueuesFixture = @[];
-            [wc.sidebar reloadSavedQueues];
+            // V2b: pro 模式下从 albums 点击 row 0 -> RLPWorkbenchViewController + pageHost + topTitle「数字音乐台」
+            [wc setUiMode:@"pro" persist:NO];
+            [wc.sidebar selectKey:@"albums"];
+            Pump(0.15);
+            if (sbTable && stationRow >= 0) {
+                [sbTable deselectAll:nil];
+                [sbTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)stationRow] byExtendingSelection:NO];
+            } else {
+                [wc.sidebar selectRow:stationRow];
+            }
+            Pump(0.2);
+            std::printf("  [V2b] mode=%s row=%ld title='%s' currentContent=%s\n",
+                        wc.uiMode.UTF8String ?: "", (long)wc.sidebar.selectedRow,
+                        topTitle.stringValue.UTF8String ?: "",
+                        NSStringFromClass(wc.currentContent.class).UTF8String);
+            Ck([wc.uiMode isEqualToString:@"pro"] &&
+               wc.modeControl.selectedSegment == 1 &&
+               wc.sidebar.selectedRow == 0 &&
+               [wc.sidebar.selectedKey isEqualToString:@"station"] &&
+               [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class] &&
+               [wc.currentContent.view.identifier isEqualToString:@"page.station"] &&
+               wc.currentContent.view.superview == pageHost &&
+               pageHost.subviews.count == 1 &&
+               [topTitle.stringValue isEqualToString:RLPTr(@"数字音乐台")],
+               "V2b pro 模式下点击 row 0 进入 RLPWorkbenchViewController 并同步 modeControl/pageHost/标题",
+               [NSString stringWithFormat:@"mode=%@ seg=%ld row=%ld/%ld key=%@ vc=%@ hostCount=%lu title=%@",
+                wc.uiMode, (long)wc.modeControl.selectedSegment, (long)wc.sidebar.selectedRow, (long)stationRow,
+                wc.sidebar.selectedKey ?: @"(nil)", NSStringFromClass(wc.currentContent.class),
+                (unsigned long)pageHost.subviews.count, topTitle.stringValue ?: @""]);
+
+            // V3c: 设置页 RLPSwitchToProWorkbenchNotification 切到 pro 且选中 row 0
             [wc setUiMode:@"listen" persist:NO];
             [wc.sidebar selectKey:@"albums"];
+            Pump(0.1);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPSwitchToProWorkbenchNotification" object:nil];
+            Pump(0.15);
+            Ck(wc.sidebar.selectedRow == 0 &&
+               [wc.sidebar.selectedKey isEqualToString:@"station"] &&
+               wc.modeControl.selectedSegment == 1 &&
+               [wc.currentContent isKindOfClass:RLPWorkbenchViewController.class],
+               "V3c 设置页通知切 pro 工作台同步停在 row 0 且显示 RLPWorkbenchViewController",
+               [NSString stringWithFormat:@"row=%ld key=%@ seg=%ld vc=%@",
+                (long)wc.sidebar.selectedRow, wc.sidebar.selectedKey ?: @"(nil)",
+                (long)wc.modeControl.selectedSegment, NSStringFromClass(wc.currentContent.class)]);
+
+            // 切回 1180x760 与 900x600，分别在中文与英文（listen / pro）下核对 V1/V4/V5
+            g_spy.savedQueuesFixture = @[];
+            [wc.sidebar reloadSavedQueues];
             ResizeWindow(wc, 1180, 760);
+            [wc setUiMode:@"listen" persist:NO];
+            [wc.sidebar selectKey:@"albums"];
             Pump(0.2);
-            CheckSidebarTopEntries(wc, "zh@1180", &listenRow, &proRow);
+            CheckSidebarTopEntry(wc, "zh-listen@1180", &stationRow);
+
+            [wc setUiMode:@"pro" persist:NO];
+            [wc.sidebar selectKey:@"albums"];
+            Pump(0.15);
+            CheckSidebarTopEntry(wc, "zh-pro@1180", &stationRow);
 
             RLPSetLanguage(@"en");
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            [wc setUiMode:@"listen" persist:NO];
             Pump(0.15);
-            CheckSidebarTopEntries(wc, "en@1180", &listenRow, &proRow);
-            CheckSidebarEnglishLabels(wc, "en@1180", listenRow, proRow);
+            CheckSidebarTopEntry(wc, "en-listen@1180", &stationRow);
+            CheckSidebarEnglishLabel(wc, "en-listen@1180", stationRow, @"Listening Room");
+
+            [wc setUiMode:@"pro" persist:NO];
+            Pump(0.15);
+            CheckSidebarTopEntry(wc, "en-pro@1180", &stationRow);
+            CheckSidebarEnglishLabel(wc, "en-pro@1180", stationRow, @"Digital Music Console");
 
             ResizeWindow(wc, 900, 600);
             Pump(0.15);
-            CheckSidebarTopEntries(wc, "en@900", &listenRow, &proRow);
-            CheckSidebarEnglishLabels(wc, "en@900", listenRow, proRow);
+            CheckSidebarTopEntry(wc, "en-pro@900", &stationRow);
+            CheckSidebarEnglishLabel(wc, "en-pro@900", stationRow, @"Digital Music Console");
+
+            [wc setUiMode:@"listen" persist:NO];
+            Pump(0.15);
+            CheckSidebarTopEntry(wc, "en-listen@900", &stationRow);
+            CheckSidebarEnglishLabel(wc, "en-listen@900", stationRow, @"Listening Room");
 
             RLPSetLanguage(@"zh");
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
