@@ -54,6 +54,10 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
 @property (nonatomic, strong) NSImageView *trackCover;
 @property (nonatomic, strong) NSTextField *trackTitle;
 @property (nonatomic, strong) NSTextField *trackSub;
+@property (nonatomic, strong) NSStackView *topDeviceBar;
+@property (nonatomic, strong) NSTextField *topDeviceLabel;
+@property (nonatomic, strong) NSPopUpButton *topDevicePopup;
+@property (nonatomic, strong) NSButton *topDeviceRefreshBtn;
 @property (nonatomic, strong) NSTextField *sigSrc;
 @property (nonatomic, strong) NSTextField *sigDsp;
 @property (nonatomic, strong) NSTextField *sigOut;
@@ -223,6 +227,7 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
 @property (nonatomic, assign) NSUInteger filtersSeq;
 @property (nonatomic, assign) NSUInteger ratesSeq;
 @property (nonatomic, assign) NSUInteger devicesSeq;
+@property (nonatomic, assign) NSUInteger deviceWriteSeq;
 @property (nonatomic, assign) NSUInteger profilesSeq;
 @property (nonatomic, assign) NSUInteger signalSeq;
 @property (nonatomic, assign) NSUInteger peqReadSeq;
@@ -241,6 +246,9 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
 - (void)reloadStatus;
 - (void)reloadFilters;
 - (void)reloadDevices;
+- (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
+- (void)populateDevicePopups;
+- (void)syncDeviceSelectionOnly;
 - (void)reloadAll;
 - (void)refreshChain;
 - (void)refreshAB;
@@ -531,6 +539,76 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
         detailBtn.title = RLPTr(@"本次播放路径…");
     }];
 
+    // 顶部显眼输出设备切换器（与输出规格卡的 devicePopup 共享同一状态）
+    NSStackView *devBar = [[NSStackView alloc] init];
+    devBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    devBar.alignment = NSLayoutAttributeCenterY;
+    devBar.spacing = 10;
+    devBar.wantsLayer = YES;
+    devBar.layer.backgroundColor = t.cardAlt.CGColor;
+    devBar.layer.borderWidth = 1;
+    devBar.layer.borderColor = t.hairline.CGColor;
+    devBar.layer.cornerRadius = t.rSm;
+    devBar.edgeInsets = NSEdgeInsetsMake(8, 12, 8, 12);
+    devBar.identifier = @"wb.top.devicebar";
+    self.topDeviceBar = devBar;
+
+    self.topDeviceLabel = RLPLabel(RLPTr(@"输出设备"), [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.text);
+    self.topDeviceLabel.identifier = @"wb.top.devicelabel";
+    self.topDeviceLabel.tag = 0;
+    [self.topDeviceLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topDeviceLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.headerLabels addObject:self.topDeviceLabel];
+
+    self.topDevicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.topDevicePopup.identifier = @"wb.top.device";
+    self.topDevicePopup.target = self;
+    self.topDevicePopup.action = @selector(onDeviceChanged:);
+    self.topDevicePopup.font = t.small;
+    self.topDevicePopup.toolTip = RLPTr(@"输出设备");
+    if ([self.topDevicePopup.cell isKindOfClass:[NSPopUpButtonCell class]]) {
+        ((NSPopUpButtonCell *)self.topDevicePopup.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+    }
+    [self.topDevicePopup setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topDevicePopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSLayoutConstraint *topDevMinW = [self.topDevicePopup.widthAnchor constraintGreaterThanOrEqualToConstant:180];
+    topDevMinW.priority = NSLayoutPriorityDefaultHigh;
+    topDevMinW.active = YES;
+    NSLayoutConstraint *topDevMaxW = [self.topDevicePopup.widthAnchor constraintLessThanOrEqualToConstant:480];
+    topDevMaxW.priority = NSLayoutPriorityDefaultHigh;
+    topDevMaxW.active = YES;
+
+    self.topDeviceRefreshBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"刷新列表"), self, @selector(onRefreshDevicesClicked:));
+    self.topDeviceRefreshBtn.identifier = @"wb.top.device.refresh";
+    self.topDeviceRefreshBtn.keyEquivalent = @"";
+    self.topDeviceRefreshBtn.refusesFirstResponder = YES;
+    self.topDeviceRefreshBtn.contentTintColor = t.text;
+    [self.topDeviceRefreshBtn.widthAnchor constraintEqualToConstant:24].active = YES;
+    [self.topDeviceRefreshBtn.heightAnchor constraintEqualToConstant:24].active = YES;
+    [self.topDeviceRefreshBtn setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topDeviceRefreshBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSView *devSpacer = [[NSView alloc] init];
+    [devSpacer setContentHuggingPriority:50 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [devSpacer setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [devBar addArrangedSubview:self.topDeviceLabel];
+    [devBar addArrangedSubview:self.topDevicePopup];
+    [devBar addArrangedSubview:self.topDeviceRefreshBtn];
+    [devBar addArrangedSubview:devSpacer];
+    [inner addArrangedSubview:devBar];
+    [devBar.widthAnchor constraintEqualToAnchor:inner.widthAnchor constant:-32].active = YES;
+    [self populateDevicePopups];
+
+    __weak __typeof__(self) weakDevSelf = self;
+    [self.langUpdaters addObject:^{
+        __typeof__(self) s = weakDevSelf;
+        if (!s) return;
+        s.topDeviceLabel.stringValue = RLPTr(@"输出设备");
+        s.topDevicePopup.toolTip = RLPTr(@"输出设备");
+        s.topDeviceRefreshBtn.toolTip = RLPTr(@"刷新列表");
+    }];
+
     // 三摘要信号节点（源文件 / 声音处理 / 设备输出）
     NSStackView *sig = [[NSStackView alloc] init];
     sig.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -700,9 +778,12 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     self.sigDsp.stringValue = bp.length
         ? [NSString stringWithFormat:@"%@ · bit-perfect: %@", activeF, bp]
         : activeF;
-    NSString *dev = self.devicePopup.titleOfSelectedItem;
+    NSString *dev = self.topDevicePopup.titleOfSelectedItem.length
+        ? self.topDevicePopup.titleOfSelectedItem
+        : self.devicePopup.titleOfSelectedItem;
     NSString *backend = [self str:@"backend" def:@"coreaudio"];
     self.sigOut.stringValue = [NSString stringWithFormat:@"%@ · %@", dev.length ? dev : RLPTr(@"默认设备"), backend];
+    self.sigOut.toolTip = self.sigOut.stringValue;
 }
 
 #pragma mark - 三页签导航
@@ -1781,12 +1862,17 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     [rfRow.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
 
     self.devicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.devicePopup.identifier = @"wb.device";
     self.devicePopup.target = self;
     self.devicePopup.action = @selector(onDeviceChanged:);
     self.devicePopup.font = t.small;
+    if ([self.devicePopup.cell isKindOfClass:[NSPopUpButtonCell class]]) {
+        ((NSPopUpButtonCell *)self.devicePopup.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+    }
     [self.devicePopup setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [col addArrangedSubview:self.devicePopup];
     [self.devicePopup.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
+    [self populateDevicePopups];
 
     NSStackView *beRow = [[NSStackView alloc] init];
     beRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -2660,11 +2746,62 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     const NSInteger i = sender.selectedSegment;
     if (i >= 0 && i < (NSInteger)vals.count) [self postSettings:@{@"dsd": vals[i], @"dsdnative": @"0"}];
 }
+- (void)onRefreshDevicesClicked:(id)sender {
+    (void)sender;
+    [self reloadDevices];
+}
+
 - (void)onDeviceChanged:(NSPopUpButton *)sender {
+    if (!sender || sender.indexOfSelectedItem < 0) return;
     NSDictionary *d = sender.selectedItem.representedObject;
-    NSString *devId = [d isKindOfClass:[NSDictionary class]] ? (d[@"id"] ?: @"") : @"";
-    [self postSettings:@{@"device": devId}];
-    [self reloadRates];
+    NSString *devId = ([d isKindOfClass:[NSDictionary class]] && [d[@"id"] isKindOfClass:[NSString class]])
+        ? d[@"id"] : @"";
+    // 在途期间先保持顶部与输出规格卡两处下拉选择一致；真实 settings 与顶部设备摘要仅在 POST 成功后更新
+    const NSInteger idx = sender.indexOfSelectedItem;
+    for (NSPopUpButton *pop in [self devicePopups]) {
+        if (pop != sender && idx >= 0 && idx < (NSInteger)pop.numberOfItems) {
+            [pop selectItemAtIndex:idx];
+        }
+        pop.toolTip = pop.titleOfSelectedItem.length ? pop.titleOfSelectedItem : RLPTr(@"输出设备");
+    }
+
+    const NSUInteger writeSeq = ++self.deviceWriteSeq;
+    ++self.settingsSeq; // 使更早发出的 GET /api/settings 失效
+    self.statusMessage.stringValue = RLPTr(@"应用中…");
+    NSString *body = [NSString stringWithFormat:@"device=%@", RLPEnc(devId)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/settings" body:body
+        completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || writeSeq != self_.deviceWriteSeq) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSMutableDictionary *nextSettings = self_.settings ? [self_.settings mutableCopy] : [NSMutableDictionary dictionary];
+            nextSettings[@"device"] = devId;
+            self_.settings = nextSettings;
+            self_.statusMessage.stringValue = RLPTr(@"已生效");
+            NSString *transport = ([d isKindOfClass:[NSDictionary class]] && [d[@"transport"] isKindOfClass:[NSString class]])
+                ? d[@"transport"] : @"";
+            if ([transport isEqualToString:@"airplay"]) {
+                RLPToast(RLPTr(@"AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证"));
+            } else {
+                RLPToast(RLPTr(@"输出设备已选择，下次播放生效"));
+            }
+            [self_ syncOutputControls];
+            [self_ refreshTrackCard];
+            [self_ refreshChain];
+            [self_ reloadRates];
+            [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+        } else {
+            NSString *err = ([json isKindOfClass:[NSDictionary class]] &&
+                             [json[@"error"] isKindOfClass:[NSString class]] &&
+                             ((NSString *)json[@"error"]).length)
+                ? json[@"error"] : RLPTr(@"保存失败，已保留原值");
+            self_.statusMessage.stringValue = RLPTr(@"保存失败，已保留原值");
+            RLPToast(err);
+            [self_ syncAllControlsFromSettings];
+        }
+    }];
 }
 - (void)onBackendChanged:(NSPopUpButton *)sender {
     NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
@@ -3063,8 +3200,11 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
 - (void)applySettingsPayload:(NSDictionary *)kv forSeq:(NSUInteger)seq {
     if (seq > 0 && seq < self.settingsSeq) return; // 丢弃乱序到达的旧回包
     if (seq > self.settingsSeq) self.settingsSeq = seq;
+    NSString *oldDev = [self str:@"device" def:@""];
     self.settings = [kv isKindOfClass:[NSDictionary class]] ? kv : @{};
+    NSString *newDev = [self str:@"device" def:@""];
     [self syncAllControlsFromSettings];
+    if (![newDev isEqualToString:oldDev]) [self reloadRates];
 }
 
 - (void)applyStatusPayload:(NSDictionary *)st forSeq:(NSUInteger)seq {
@@ -3119,6 +3259,7 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     [self refreshChain];
     [self refreshAB];
     [self syncQuickEqControls];
+    [self refreshTrackCard];
     if (self.monAutoCheck) {
         self.monAutoCheck.state = RLPWorkbenchAutoAnlEnabled(self.settings) ? NSControlStateValueOn : NSControlStateValueOff;
     }
@@ -3253,23 +3394,108 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     }];
 }
 
+- (NSArray<NSPopUpButton *> *)devicePopups {
+    NSMutableArray<NSPopUpButton *> *list = [NSMutableArray arrayWithCapacity:2];
+    if (self.topDevicePopup) [list addObject:self.topDevicePopup];
+    if (self.devicePopup) [list addObject:self.devicePopup];
+    return list;
+}
+
+- (NSString *)emptyDeviceDisplayTitle {
+    return [NSString stringWithFormat:@"%@ / %@", RLPTr(@"（尚未发现设备）"), RLPTr(@"系统默认")];
+}
+
+- (void)populateDevicePopups {
+    NSArray<NSPopUpButton *> *popups = [self devicePopups];
+    if (!popups.count) return;
+    NSArray<NSDictionary *> *devs = [self.devices isKindOfClass:[NSArray class]] ? self.devices : @[];
+    for (NSPopUpButton *pop in popups) {
+        [pop removeAllItems];
+        pop.enabled = YES;
+        if (devs.count == 0) {
+            NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:[self emptyDeviceDisplayTitle] action:nil keyEquivalent:@""];
+            it.representedObject = @{@"id": @""};
+            [pop.menu addItem:it];
+        } else {
+            NSMenuItem *defIt = [[NSMenuItem alloc] initWithTitle:RLPTr(@"系统默认") action:nil keyEquivalent:@""];
+            defIt.representedObject = @{@"id": @""};
+            [pop.menu addItem:defIt];
+            for (NSDictionary *d in devs) {
+                if (![d isKindOfClass:[NSDictionary class]]) continue;
+                NSString *rawName = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @"";
+                NSString *name = rawName.length ? rawName : RLPTr(@"未知设备");
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:name action:nil keyEquivalent:@""];
+                it.representedObject = d;
+                [pop.menu addItem:it];
+            }
+        }
+    }
+    [self syncDeviceSelectionOnly];
+}
+
+- (void)syncDeviceSelectionOnly {
+    NSArray<NSPopUpButton *> *popups = [self devicePopups];
+    if (!popups.count) return;
+    NSArray<NSDictionary *> *devs = [self.devices isKindOfClass:[NSArray class]] ? self.devices : @[];
+    NSString *cur = [self str:@"device" def:@""];
+    for (NSPopUpButton *pop in popups) {
+        pop.enabled = YES;
+        for (NSInteger i = (NSInteger)pop.numberOfItems - 1; i >= 0; --i) {
+            if ([pop itemAtIndex:i].tag == 998) [pop removeItemAtIndex:i];
+        }
+        if (pop.numberOfItems == 0) continue;
+        NSInteger sel = 0;
+        if (devs.count > 0 && cur.length > 0) {
+            BOOL found = NO;
+            for (NSInteger i = 0; i < (NSInteger)pop.numberOfItems; ++i) {
+                id ro = [pop itemAtIndex:i].representedObject;
+                NSString *rid = ([ro isKindOfClass:[NSDictionary class]] && [ro[@"id"] isKindOfClass:[NSString class]])
+                    ? ro[@"id"] : @"";
+                if ([rid isEqualToString:cur]) {
+                    sel = i;
+                    found = YES;
+                    break;
+                }
+            }
+            if (!found) {
+                NSString *unavail = [NSString stringWithFormat:@"%@ · %@", cur, RLPTr(@"（不可用）")];
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:unavail action:nil keyEquivalent:@""];
+                it.representedObject = @{@"id": cur, @"unavailable": @YES};
+                it.tag = 998;
+                [pop.menu addItem:it];
+                sel = (NSInteger)pop.numberOfItems - 1;
+            }
+        }
+        if (sel >= 0 && sel < (NSInteger)pop.numberOfItems) [pop selectItemAtIndex:sel];
+        pop.toolTip = pop.titleOfSelectedItem.length ? pop.titleOfSelectedItem : RLPTr(@"输出设备");
+    }
+}
+
 - (void)reloadDevices {
     const NSUInteger seq = ++self.devicesSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/devices" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_ || seq != self_.devicesSeq) return;
-        self_.devices = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
-        [self_.devicePopup removeAllItems];
-        [self_.devicePopup addItemWithTitle:RLPTr(@"系统默认")];
-        [[self_.devicePopup lastItem] setRepresentedObject:@{}];
-        for (NSDictionary *d in self_.devices) {
-            [self_.devicePopup addItemWithTitle:[d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : RLPTr(@"未知设备")];
-            [[self_.devicePopup lastItem] setRepresentedObject:d];
-        }
-        [self_ syncOutputControls];
-        [self_ reloadRates];
+        if (!self_) return;
+        [self_ applyDevicesPayload:json forSeq:seq];
     }];
+}
+
+- (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq {
+    if (seq > 0 && seq < self.devicesSeq) return;
+    if (seq > self.devicesSeq) self.devicesSeq = seq;
+    const BOOL okFlag = [json isKindOfClass:[NSDictionary class]] &&
+        (json[@"ok"] == nil || [json[@"ok"] boolValue]);
+    if (okFlag && [json[@"devices"] isKindOfClass:[NSArray class]]) {
+        self.devices = json[@"devices"];
+    } else if (!self.devices) {
+        self.devices = @[];
+    }
+    [self populateDevicePopups];
+    [self syncOutputControls];
+    [self refreshTrackCard];
+    [self refreshChain];
+    [self reloadRates];
 }
 
 - (void)reloadRates {
@@ -3320,13 +3546,7 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
 }
 
 - (void)syncOutputControls {
-    NSString *cur = [self str:@"device" def:@""];
-    NSInteger sel = 0;
-    if (cur.length) {
-        for (NSInteger i = 0; i < (NSInteger)self.devices.count; ++i)
-            if ([self.devices[i][@"id"] isEqualToString:cur]) { sel = i + 1; break; }
-    }
-    if (sel < (NSInteger)self.devicePopup.numberOfItems) [self.devicePopup selectItemAtIndex:sel];
+    [self syncDeviceSelectionOnly];
     NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
     NSInteger bi = [vals indexOfObject:[self str:@"backend" def:@"coreaudio"]];
     [self.backendPopup selectItemAtIndex:(bi == NSNotFound ? 0 : bi)];
@@ -3460,12 +3680,7 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
             [self.ratePopup itemAtIndex:0].title = RLPTr(@"跟随源");
         }
     }
-    if (self.devicePopup.numberOfItems > 0) {
-        id ro = [self.devicePopup itemAtIndex:0].representedObject;
-        if (!ro || ([ro isKindOfClass:[NSString class]] && [(NSString *)ro length] == 0)) {
-            [self.devicePopup itemAtIndex:0].title = RLPTr(@"系统默认");
-        }
-    }
+    [self populateDevicePopups];
     if (self.eqExtLabel) {
         NSString *extEq = [self str:@"eq" def:@""];
         self.eqExtLabel.stringValue = (extEq.length && ![extEq isEqualToString:@"0"])
@@ -3512,6 +3727,13 @@ static BOOL RLPWorkbenchAutoAnlEnabled(NSDictionary * _Nullable settings) {
     for (NSTextField *l in self.headerLabels) l.textColor = (l.tag == 1) ? t.mut : t.text;
     self.headerTitle.textColor = t.hero;
     self.trackTitle.textColor = t.hero;
+    if (self.topDeviceBar) {
+        self.topDeviceBar.layer.backgroundColor = t.cardAlt.CGColor;
+        self.topDeviceBar.layer.borderColor = t.hairline.CGColor;
+    }
+    if (self.topDeviceRefreshBtn) {
+        self.topDeviceRefreshBtn.contentTintColor = t.text;
+    }
     if (self.trackCover) {
         self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;
         self.trackCover.contentTintColor = t.mut;

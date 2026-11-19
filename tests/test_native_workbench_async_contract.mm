@@ -10,6 +10,8 @@
 //   4. 音质监控总开关关闭后重开，同曲应可再次自动分析
 //   5. viewDidDisappear 后到达的旧 /api/status 不得触发新的 /api/health
 //   6. /api/profiles GET 失败（nil / ok:false）应保留旧列表与激活项
+//   9-11. 顶部输出设备切换器：900×600/1180×760 可见不越界、fake A/B/C 切 B 发 POST 并刷新摘要、
+//         失败回滚 A、空列表空态、devices 异步 seq 丢弃、英文文案完整、与 devicePopup 同步
 //
 // 纪律：真实 RLPWorkbenchViewController + swizzle +[RLPCoreClient shared] 指向可控异步 mock，
 //       不改写 production RLPCoreClient 实现、不启服务、不触碰 8899、不碰音频设备、不建可见窗口。
@@ -30,6 +32,16 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 }
 
 @interface RLPWorkbenchViewController (AsyncContractTestAccess)
+@property (nonatomic, strong) NSStackView *stack;
+@property (nonatomic, strong) NSStackView *topDeviceBar;
+@property (nonatomic, strong) NSTextField *topDeviceLabel;
+@property (nonatomic, strong) NSPopUpButton *topDevicePopup;
+@property (nonatomic, strong) NSButton *topDeviceRefreshBtn;
+@property (nonatomic, strong) NSPopUpButton *devicePopup;
+@property (nonatomic, strong) NSTextField *sigOut;
+@property (nonatomic, strong) NSTextField *statusMessage;
+@property (nonatomic, copy) NSArray<NSDictionary *> *devices;
+@property (nonatomic, assign) NSUInteger devicesSeq;
 @property (nonatomic, assign) BOOL peqBypassed;
 @property (nonatomic, copy) NSArray<NSString *> *eqPresetNames;
 @property (nonatomic, strong) NSPopUpButton *eqPresetPopup;
@@ -66,6 +78,11 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)applySettingsPayload:(NSDictionary *)kv forSeq:(NSUInteger)seq;
 - (void)reloadStatus;
 - (void)reloadProfiles;
+- (void)reloadDevices;
+- (void)reloadSettings;
+- (void)onDeviceChanged:(NSPopUpButton *)sender;
+- (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
+- (void)applyLanguage;
 - (void)maybeAutoAnalyzeFromStatus;
 @property (nonatomic, assign) NSUInteger statusSeq;
 @end
@@ -96,6 +113,15 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, assign) BOOL returnNilForProfilesGet;
 @property (nonatomic, copy, nullable) NSDictionary *profilesGetResponse;
 
+@property (nonatomic, copy) NSArray<NSDictionary *> *devicesGetList;
+@property (nonatomic, assign) BOOL holdDevicesGet;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *heldDevicesGets;
+@property (nonatomic, assign) BOOL returnNilForDevicesGet;
+
+@property (nonatomic, assign) BOOL failSettingsPost;
+@property (nonatomic, assign) BOOL returnNilForSettingsPost;
+@property (nonatomic, copy, nullable) NSString *settingsPostError;
+
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *settingsKV;
 @property (nonatomic, assign) NSInteger cancelCount;
 @property (nonatomic, strong) NSMutableArray<NSDictionary<NSString *, NSString *> *> *postLog;
@@ -110,6 +136,8 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         _heldHealthGets = [NSMutableArray array];
         _heldStatusGets = [NSMutableArray array];
         _heldProfilesGets = [NSMutableArray array];
+        _devicesGetList = @[];
+        _heldDevicesGets = [NSMutableArray array];
         _settingsKV = [NSMutableDictionary dictionary];
         _postLog = [NSMutableArray array];
     }
@@ -206,7 +234,14 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         return;
     }
     if ([p hasPrefix:@"/api/devices"]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ done(@{@"ok": @YES, @"devices": @[]}); });
+        if (self.holdDevicesGet) {
+            [self.heldDevicesGets addObject:[done copy]];
+            return;
+        }
+        NSDictionary *resp = self.returnNilForDevicesGet
+            ? nil
+            : @{@"ok": @YES, @"devices": self.devicesGetList ?: @[]};
+        dispatch_async(dispatch_get_main_queue(), ^{ done(resp); });
         return;
     }
     if ([p hasPrefix:@"/api/rates"]) {
@@ -247,6 +282,26 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(@{@"ok": @YES}); });
         return;
     }
+    if ([p isEqualToString:@"/api/settings"]) {
+        if (self.returnNilForSettingsPost) {
+            if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(nil); });
+            return;
+        }
+        if (self.failSettingsPost) {
+            NSDictionary *resp = @{@"ok": @NO, @"error": self.settingsPostError ?: @"device_busy"};
+            if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(resp); });
+            return;
+        }
+        for (NSString *pair in [b componentsSeparatedByString:@"&"]) {
+            NSRange eq = [pair rangeOfString:@"="];
+            if (eq.location == NSNotFound) continue;
+            NSString *k = [[pair substringToIndex:eq.location] stringByRemovingPercentEncoding] ?: @"";
+            NSString *v = [[pair substringFromIndex:eq.location + 1] stringByRemovingPercentEncoding] ?: @"";
+            if (k.length) self.settingsKV[k] = v;
+        }
+        if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(@{@"ok": @YES}); });
+        return;
+    }
     if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(@{@"ok": @YES}); });
 }
 @end
@@ -259,6 +314,14 @@ static void Pump(double seconds) {
     while ([until timeIntervalSinceNow] > 0)
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+}
+
+static BOOL HasCJKChars(NSString *s) {
+    for (NSUInteger i = 0; i < s.length; ++i) {
+        unichar c = [s characterAtIndex:i];
+        if (c >= 0x4E00 && c <= 0x9FFF) return YES;
+    }
+    return NO;
 }
 
 static RLPWorkbenchViewController *MakeOffscreenWorkbench(void) {
@@ -279,6 +342,8 @@ int main() {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
         id savedMonPref = [ud objectForKey:@"RLPWorkbenchMonitorEnabled"];
         [ud setBool:YES forKey:@"RLPWorkbenchMonitorEnabled"];
+        NSString *savedLang = [RLPLanguage() copy];
+        RLPSetLanguage(@"zh");
 
         g_spy = [RLPWorkbenchAsyncSpy new];
         Method shared = class_getClassMethod(RLPCoreClient.class, @selector(shared));
@@ -693,7 +758,284 @@ int main() {
             static NSWindow *sWbWin; sWbWin = wbWin; (void)sWbWin;
         }
 
+        // -----------------------------------------------------------------
+        // 9. 顶部输出设备切换器位置/尺寸/不越界（900x600 / 1180x760 / 680x600）及初始选中 A
+        // -----------------------------------------------------------------
+        {
+            NSArray<NSDictionary *> *abcDevices = @[
+                @{@"id": @"devA", @"name": @"A", @"default": @YES},
+                @{@"id": @"devB", @"name": @"B", @"default": @NO},
+                @{@"id": @"devC", @"name": @"C", @"default": @NO},
+            ];
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.holdDevicesGet = NO;
+            g_spy.returnNilForDevicesGet = NO;
+            g_spy.devicesGetList = abcDevices;
+            g_spy.settingsKV = [@{@"device": @"devA", @"backend": @"coreaudio"} mutableCopy];
+            [g_spy.postLog removeAllObjects];
+
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc reloadDevices];
+            [vc reloadSettings];
+            Pump(0.05);
+
+            // 位于顶部 wb.trackcard（在页签栏 wb.tabs 之上）
+            NSInteger trackIdx = NSNotFound, tabsIdx = NSNotFound;
+            NSView *trackCard = nil;
+            for (NSUInteger i = 0; i < vc.stack.arrangedSubviews.count; ++i) {
+                NSView *v = vc.stack.arrangedSubviews[i];
+                if ([v.identifier isEqualToString:@"wb.trackcard"]) { trackIdx = (NSInteger)i; trackCard = v; }
+                if ([v.identifier isEqualToString:@"wb.tabs"]) tabsIdx = (NSInteger)i;
+            }
+            Ck(vc.topDeviceBar != nil && vc.topDevicePopup != nil && vc.topDeviceLabel != nil && vc.devicePopup != nil &&
+               trackCard != nil && trackIdx != NSNotFound && tabsIdx != NSNotFound && trackIdx < tabsIdx &&
+               [vc.topDevicePopup isDescendantOf:trackCard] &&
+               !vc.topDeviceBar.isHidden && !vc.topDevicePopup.isHidden,
+               "9a: top output device switcher exists inside top hero card above tabs and is visible",
+               [NSString stringWithFormat:@"topPop=%@ card=%@ trackIdx=%ld tabsIdx=%ld",
+                vc.topDevicePopup, trackCard, (long)trackIdx, (long)tabsIdx]);
+
+            Ck([vc.topDevicePopup.titleOfSelectedItem isEqualToString:@"A"] &&
+               [vc.devicePopup.titleOfSelectedItem isEqualToString:@"A"] &&
+               [vc.sigOut.stringValue containsString:@"A"] &&
+               vc.topDevicePopup.enabled && vc.devicePopup.enabled,
+               "9b: fake devices A/B/C initially select A in both popups and top summary",
+               [NSString stringWithFormat:@"top=%@ rack=%@ sigOut=%@",
+                vc.topDevicePopup.titleOfSelectedItem, vc.devicePopup.titleOfSelectedItem, vc.sigOut.stringValue]);
+
+            // 检查 900x600 / 1180x760 / 680x600（900 窗减侧栏）可见且不越界
+            BOOL layoutOk = YES;
+            NSMutableString *layoutDetail = [NSMutableString string];
+            NSArray<NSValue *> *sizes = @[
+                [NSValue valueWithSize:NSMakeSize(1180, 760)],
+                [NSValue valueWithSize:NSMakeSize(900, 600)],
+                [NSValue valueWithSize:NSMakeSize(680, 600)],
+            ];
+            for (NSValue *szVal in sizes) {
+                NSSize sz = szVal.sizeValue;
+                vc.view.frame = NSMakeRect(0, 0, sz.width, sz.height);
+                [vc.view layoutSubtreeIfNeeded];
+                NSRect barInView = [vc.topDeviceBar convertRect:vc.topDeviceBar.bounds toView:vc.view];
+                NSRect labInBar = [vc.topDeviceLabel convertRect:vc.topDeviceLabel.bounds toView:vc.topDeviceBar];
+                NSRect popInBar = [vc.topDevicePopup convertRect:vc.topDevicePopup.bounds toView:vc.topDeviceBar];
+                NSRect refInBar = [vc.topDeviceRefreshBtn convertRect:vc.topDeviceRefreshBtn.bounds toView:vc.topDeviceBar];
+                NSRect popInView = [vc.topDevicePopup convertRect:vc.topDevicePopup.bounds toView:vc.view];
+                NSRect popInStack = [vc.topDevicePopup convertRect:vc.topDevicePopup.bounds toView:vc.stack];
+                const CGFloat distFromTop = vc.stack.isFlipped
+                    ? NSMaxY(popInStack)
+                    : (NSMaxY(vc.stack.bounds) - NSMinY(popInStack));
+                NSRect barInset = NSInsetRect(vc.topDeviceBar.bounds, -0.5, -0.5);
+                const BOOL okSz = (NSMinX(barInView) >= -0.5 && NSMaxX(barInView) <= sz.width + 0.5 &&
+                                   NSMinX(popInView) >= -0.5 && NSMaxX(popInView) <= sz.width + 0.5 &&
+                                   NSContainsRect(barInset, labInBar) &&
+                                   NSContainsRect(barInset, popInBar) &&
+                                   NSContainsRect(barInset, refInBar) &&
+                                   labInBar.size.width >= 20.0 && refInBar.size.width >= 20.0 &&
+                                   NSMaxX(labInBar) <= NSMinX(popInBar) + 0.5 &&
+                                   NSMaxX(popInBar) <= NSMinX(refInBar) + 0.5 &&
+                                   popInView.size.width >= 150.0 && popInView.size.height >= 18.0 &&
+                                   distFromTop > 0.0 && distFromTop <= sz.height);
+                if (!okSz) {
+                    layoutOk = NO;
+                    [layoutDetail appendFormat:@"[%.0fx%.0f bar=%@ lab=%@ pop=%@ ref=%@ distTop=%.1f] ",
+                     sz.width, sz.height, NSStringFromRect(barInView), NSStringFromRect(labInBar),
+                     NSStringFromRect(popInView), NSStringFromRect(refInBar), distFromTop];
+                }
+            }
+            Ck(layoutOk, "9c: top device switcher fits cleanly without clipping at 1180x760, 900x600, and 680x600", layoutDetail);
+        }
+
+        // -----------------------------------------------------------------
+        // 10. 选 B 发 POST 并刷新 UI 摘要为 B；POST 失败 toast 且回滚 A；两处下拉双向同步
+        // -----------------------------------------------------------------
+        {
+            NSArray<NSDictionary *> *abcDevices = @[
+                @{@"id": @"devA", @"name": @"A", @"default": @YES},
+                @{@"id": @"devB", @"name": @"B", @"default": @NO},
+                @{@"id": @"devC", @"name": @"C", @"default": @NO},
+            ];
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.holdDevicesGet = NO;
+            g_spy.returnNilForDevicesGet = NO;
+            g_spy.devicesGetList = abcDevices;
+            g_spy.settingsKV = [@{@"device": @"devA", @"backend": @"coreaudio"} mutableCopy];
+            [g_spy.postLog removeAllObjects];
+
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc reloadDevices];
+            [vc reloadSettings];
+            Pump(0.05);
+
+            // 10a: 选 B 发 POST /api/settings device=devB 且 UI 摘要刷新为 B
+            [vc.topDevicePopup selectItemWithTitle:@"B"];
+            [vc onDeviceChanged:vc.topDevicePopup];
+            Pump(0.05);
+
+            BOOL postedB = NO;
+            for (NSDictionary *p in g_spy.postLog) {
+                if ([p[@"path"] isEqualToString:@"/api/settings"] && [p[@"body"] isEqualToString:@"device=devB"]) {
+                    postedB = YES;
+                }
+            }
+            Ck(postedB &&
+               [vc.topDevicePopup.titleOfSelectedItem isEqualToString:@"B"] &&
+               [vc.devicePopup.titleOfSelectedItem isEqualToString:@"B"] &&
+               [vc.settings[@"device"] isEqualToString:@"devB"] &&
+               [vc.sigOut.stringValue containsString:@"B"],
+               "10a: selecting B posts device=devB, syncs both popups, and refreshes top summary to B",
+               [NSString stringWithFormat:@"postedB=%d top=%@ rack=%@ settingsDev=%@ sigOut=%@",
+                postedB, vc.topDevicePopup.titleOfSelectedItem, vc.devicePopup.titleOfSelectedItem,
+                vc.settings[@"device"], vc.sigOut.stringValue]);
+
+            // 10b: 切回 A 后模拟请求失败（ok:NO 与 nil）：应保留原值并回滚到 A（两处下拉与摘要均为 A）
+            [vc.topDevicePopup selectItemWithTitle:@"A"];
+            [vc onDeviceChanged:vc.topDevicePopup];
+            Pump(0.05);
+
+            [g_spy.postLog removeAllObjects];
+            g_spy.failSettingsPost = YES;
+            g_spy.settingsPostError = @"device_switch_failed";
+            [vc.topDevicePopup selectItemWithTitle:@"B"];
+            [vc onDeviceChanged:vc.topDevicePopup];
+            Pump(0.05);
+
+            BOOL postedFailB = NO;
+            for (NSDictionary *p in g_spy.postLog) {
+                if ([p[@"path"] isEqualToString:@"/api/settings"] && [p[@"body"] isEqualToString:@"device=devB"]) postedFailB = YES;
+            }
+            Ck(postedFailB &&
+               [vc.topDevicePopup.titleOfSelectedItem isEqualToString:@"A"] &&
+               [vc.devicePopup.titleOfSelectedItem isEqualToString:@"A"] &&
+               [vc.settings[@"device"] isEqualToString:@"devA"] &&
+               [vc.sigOut.stringValue containsString:@"A"] &&
+               [vc.statusMessage.stringValue isEqualToString:RLPTr(@"保存失败，已保留原值")],
+               "10b: failed POST /api/settings (ok:NO) rolls back both popups and summary to A",
+               [NSString stringWithFormat:@"posted=%d top=%@ rack=%@ settingsDev=%@ sigOut=%@ msg=%@",
+                postedFailB, vc.topDevicePopup.titleOfSelectedItem, vc.devicePopup.titleOfSelectedItem,
+                vc.settings[@"device"], vc.sigOut.stringValue, vc.statusMessage.stringValue]);
+
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = YES;
+            [vc.topDevicePopup selectItemWithTitle:@"C"];
+            [vc onDeviceChanged:vc.topDevicePopup];
+            Pump(0.05);
+            Ck([vc.topDevicePopup.titleOfSelectedItem isEqualToString:@"A"] &&
+               [vc.devicePopup.titleOfSelectedItem isEqualToString:@"A"] &&
+               [vc.settings[@"device"] isEqualToString:@"devA"] &&
+               [vc.sigOut.stringValue containsString:@"A"] &&
+               [vc.statusMessage.stringValue isEqualToString:RLPTr(@"保存失败，已保留原值")],
+               "10b2: nil POST /api/settings response rolls back both popups and summary to A",
+               [NSString stringWithFormat:@"top=%@ rack=%@ settingsDev=%@ sigOut=%@",
+                vc.topDevicePopup.titleOfSelectedItem, vc.devicePopup.titleOfSelectedItem,
+                vc.settings[@"device"], vc.sigOut.stringValue]);
+            g_spy.returnNilForSettingsPost = NO;
+
+            // 10c: 从输出规格卡 devicePopup 选 C，顶部 topDevicePopup 与摘要同步变为 C
+            g_spy.failSettingsPost = NO;
+            [vc.devicePopup selectItemWithTitle:@"C"];
+            [vc onDeviceChanged:vc.devicePopup];
+            Pump(0.05);
+            Ck([vc.topDevicePopup.titleOfSelectedItem isEqualToString:@"C"] &&
+               [vc.devicePopup.titleOfSelectedItem isEqualToString:@"C"] &&
+               [vc.sigOut.stringValue containsString:@"C"],
+               "10c: changing rack devicePopup to C syncs topDevicePopup and summary to C",
+               [NSString stringWithFormat:@"top=%@ rack=%@ sigOut=%@",
+                vc.topDevicePopup.titleOfSelectedItem, vc.devicePopup.titleOfSelectedItem, vc.sigOut.stringValue]);
+        }
+
+        // -----------------------------------------------------------------
+        // 11. 空设备列表空态 + devices 异步 seq 丢弃旧结果 + 英文文案完整
+        // -----------------------------------------------------------------
+        {
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.holdDevicesGet = NO;
+            g_spy.returnNilForDevicesGet = NO;
+            g_spy.devicesGetList = @[];
+            g_spy.settingsKV = [@{@"device": @"", @"backend": @"coreaudio"} mutableCopy];
+
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc reloadDevices];
+            [vc reloadSettings];
+            Pump(0.05);
+
+            NSString *emptyTitle = vc.topDevicePopup.titleOfSelectedItem ?: @"";
+            Ck(vc.topDevicePopup.enabled && vc.devicePopup.enabled &&
+               vc.topDevicePopup.numberOfItems == 1 && vc.devicePopup.numberOfItems == 1 &&
+               [emptyTitle containsString:@"未发现设备"] && [emptyTitle containsString:@"系统默认"] &&
+               [vc.devicePopup.titleOfSelectedItem isEqualToString:emptyTitle] &&
+               [vc.sigOut.stringValue containsString:@"未发现设备"],
+               "11a: empty device list shows non-disabled empty state (not blank) in both popups and summary",
+               [NSString stringWithFormat:@"enabled=%d/%d items=%ld title=%@ sigOut=%@",
+                vc.topDevicePopup.enabled, vc.devicePopup.enabled,
+                (long)vc.topDevicePopup.numberOfItems, emptyTitle, vc.sigOut.stringValue]);
+
+            // 11b: 英文文案完整（空态 + 有设备默认项 + 顶部标签）
+            RLPSetLanguage(@"en");
+            [vc applyLanguage];
+            NSString *enEmpty = vc.topDevicePopup.titleOfSelectedItem ?: @"";
+            Ck([vc.topDeviceLabel.stringValue isEqualToString:@"Output Device"] &&
+               !HasCJKChars(vc.topDeviceLabel.stringValue) &&
+               !HasCJKChars(enEmpty) && !HasCJKChars(vc.sigOut.stringValue) &&
+               [enEmpty containsString:@"System default"],
+               "11b: English copy is complete with no leftover Chinese in empty state",
+               [NSString stringWithFormat:@"label=%@ empty=%@ sigOut=%@",
+                vc.topDeviceLabel.stringValue, enEmpty, vc.sigOut.stringValue]);
+
+            // 有设备时英文“系统默认”项也应为英文
+            g_spy.devicesGetList = @[
+                @{@"id": @"devA", @"name": @"A"},
+                @{@"id": @"devB", @"name": @"B"},
+            ];
+            [vc reloadDevices];
+            Pump(0.05);
+            NSString *enDefItem = [vc.topDevicePopup itemAtIndex:0].title ?: @"";
+            Ck([enDefItem isEqualToString:@"System default"] &&
+               [vc.devicePopup itemAtIndex:0].title &&
+               [[vc.devicePopup itemAtIndex:0].title isEqualToString:@"System default"] &&
+               !HasCJKChars(vc.sigOut.stringValue),
+               "11c: English System default item and summary have complete English copy",
+               [NSString stringWithFormat:@"def0=%@ sigOut=%@", enDefItem, vc.sigOut.stringValue]);
+            RLPSetLanguage(@"zh");
+            [vc applyLanguage];
+
+            // 11d: devices 异步回包按 seq 丢弃旧结果
+            g_spy.holdDevicesGet = YES;
+            [g_spy.heldDevicesGets removeAllObjects];
+            [vc reloadDevices]; // req1 (older)
+            Ck(g_spy.heldDevicesGets.count == 1, "11d-precondition: older devices GET held", @"");
+            RLPJSONCompletion staleDevicesGet = g_spy.heldDevicesGets.firstObject;
+            [g_spy.heldDevicesGets removeAllObjects];
+            g_spy.holdDevicesGet = NO;
+
+            g_spy.devicesGetList = @[
+                @{@"id": @"devB", @"name": @"B"},
+                @{@"id": @"devC", @"name": @"C"},
+            ];
+            [vc reloadDevices]; // req2 (newer)
+            Pump(0.05);
+
+            // 旧回包携带陈旧设备 StaleDAC 迟到
+            if (staleDevicesGet) {
+                staleDevicesGet(@{@"ok": @YES, @"devices": @[@{@"id": @"stale", @"name": @"StaleDAC"}]});
+            }
+            Pump(0.05);
+            BOOL hasStale = NO;
+            for (NSMenuItem *it in vc.topDevicePopup.itemArray) {
+                if ([it.title isEqualToString:@"StaleDAC"]) hasStale = YES;
+            }
+            Ck(!hasStale && vc.devices.count == 2 &&
+               [vc.topDevicePopup itemWithTitle:@"B"] != nil &&
+               [vc.topDevicePopup itemWithTitle:@"C"] != nil,
+               "11d: stale /api/devices response is discarded by seq",
+               [NSString stringWithFormat:@"hasStale=%d count=%lu items=%@",
+                hasStale, (unsigned long)vc.devices.count, vc.topDevicePopup.itemTitles]);
+        }
+
         method_setImplementation(shared, origShared);
+        RLPSetLanguage(savedLang);
         if (savedMonPref) [ud setObject:savedMonPref forKey:@"RLPWorkbenchMonitorEnabled"];
         else [ud removeObjectForKey:@"RLPWorkbenchMonitorEnabled"];
 
