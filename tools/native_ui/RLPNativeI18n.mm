@@ -138,6 +138,8 @@ NSDictionary *RLPNativeI18nTable(void) {
             @"下一首:": @"Next Track: ",
             @"不是 ZIP": @"Not a ZIP file",
             @"两段式升频": @"2-Stage Upsampling",
+            @"两段式升频偏好：实际是否走两段级联由采样率比与 plan_resampler() 实时决定": @"Two-stage upsampling preference: whether a two-stage cascade is actually used is determined live by the sample-rate ratio and plan_resampler().",
+            @"标称原型抽头预算（0 = 跟随预设；若预设指定每输入抽头地板 tapsPerInput，实际总抽头按每相 T × L 展开）": @"Nominal prototype-tap budget (0 = follow preset; if the preset sets a per-input tap floor tapsPerInput, actual total taps expand as tapsPerPhase × L).",
             @"严格独占（抢 Hog Mode）": @"Strict Exclusive (Hog Mode)",
             @"个（目标 ≥5，未做臆造）": @" (target >= 5, no fabrications)",
             @"亮度指标": @"Brightness Indicator",
