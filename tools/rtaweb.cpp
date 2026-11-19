@@ -515,6 +515,14 @@ struct PlayerState {
     // why 文案里有没有「重采样」三个字猜方向，于是降采样被标成升频。
     // 这里与 outRate 同源同时机写入（起播时一次），不增加轮询开销。
     uint32_t inRate = 0;
+    // 本次播放的实际重采样规划抽头摘要（与 /api/signal 同源，来自 summarize_resampler_plan）
+    bool     resampleTwoStage = false;
+    int      resampleNominalTaps = 0;
+    int      resampleTapsPerInput = 0;
+    int      resampleTapsPerPhase = 0;
+    int      resampleStage1Taps = 0;
+    int      resampleStage2Taps = 0;
+    uint64_t resampleActualTaps = 0;
     // ---- ReplayGain / Album Gain 状态 ----
     std::string rgMode = "off";
     double      rgAppliedDb = 0.0;
@@ -3341,7 +3349,7 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
                 << ",\"latencyMs\":" << dc.latencyMs
                 << ",\"latencySource\":\"" << jesc(dc.latencySource) << "\""
                 << ",\"resample\":" << (isConvertedRate ? "true" : "false")
-                << ",\"twoStage\":false,\"taps\":0"
+                << ",\"twoStage\":false,\"taps\":0,\"nominalTaps\":0,\"tapsPerPhase\":0,\"tapsPerInput\":0,\"stage1Taps\":0,\"stage2Taps\":0,\"actualTaps\":0"
                 << ",\"filter\":\"" << (isConvertedRate ? "DsdRateConverter" : "DirectSDM") << "\""
                 << ",\"phaseCode\":\"" << phaseCode << "\",\"phase\":\"" << phaseDesc << "\""
                 << ",\"gpuAvailable\":false,\"shaper\":\"none\",\"loudness\":false"
@@ -3369,6 +3377,13 @@ static bool play_one_direct(const std::string& file, const PlayParams& p) {
             ps.signal = sig.str();
             ps.bpState = bpState;
             ps.bpWhy = bpWhy;
+            ps.resampleTwoStage = false;
+            ps.resampleNominalTaps = 0;
+            ps.resampleTapsPerInput = 0;
+            ps.resampleTapsPerPhase = 0;
+            ps.resampleStage1Taps = 0;
+            ps.resampleStage2Taps = 0;
+            ps.resampleActualTaps = 0;
             if (isConvertedRate) {
                 ps.info = "DSD 速率转换：DSD 源 " + std::to_string(srcRateOrig) + " Hz → " +
                           std::to_string(actualRate) + " Hz → DoP " + std::to_string(carrier) + " Hz";
@@ -4135,7 +4150,7 @@ static std::string preset_apply_json(const std::string& path) {
     for (const auto& n : s.notes) notes.push_back(n);
     if (s.minTapsPerInput > 0) {
         notes.push_back("minTapsPerInput=" + std::to_string(s.minTapsPerInput) +
-                        " 由 poly-sinc-tight-lp 预设自带（手动 taps/mintapsperinput 覆盖已清 0，避免被当成总抽头预算）");
+                        " 与 poly-sinc-tight-lp 预设对齐（手动 taps/mintapsperinput 覆盖已清 0，避免把单相地板当成标称总抽头预算）");
     }
     if (!s.clearEqIr) {
         notes.push_back("已保留用户 EQ、IR 校正、PEQ 与声道增益");
@@ -5207,17 +5222,21 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
         if (!fname.empty()) {
             const auto* fp = rta::dsp::find_preset(fname, in.rate >= 88200);
             if (fp) {
-                cfg.taps = fp->taps; cfg.transition = fp->transition; cfg.attenDb = fp->attenDb;
-                cfg.filterWindow = fp->window; cfg.filterPhase = fp->phase;
-                cfg.twoStage = fp->twoStage;
-                cfg.apodizing = fp->apodizing;
-                cfg.apodF1 = fp->apodF1;
-                cfg.apodF2 = fp->apodF2;
-                // 2026-10-25（音质线）：每相位抽头地板 —— 新预设（*-tight）靠它把「每相位抽头数 T」与
-                // 插值因子 L 解耦；否则 44.1→384k（L=1280）时 4095 抽头的预设只剩 4 抽头/相位
-                // （20 kHz 掉 5 dB、THD+N 只剩 -29 dBFS）。既有预设 tapsPerInput=0，逐位不变。
-                cfg.minTapsPerInput = fp->tapsPerInput;
-                if (fp->twoStage && fp->stage2Taps > 0) cfg.stage2Taps = fp->stage2Taps;
+                // 通过 apply_preset() 统一解析阻带衰减天花板与 apod_quality_taps 等，
+                // 避免手工拷贝导致 apod-20k 等预设退化成 120 dB / 短抽头。
+                rta::dsp::ResamplerConfig rcfg;
+                rta::dsp::apply_preset(rcfg, *fp);
+                cfg.taps = rcfg.totalTaps;
+                cfg.transition = rcfg.transition;
+                cfg.attenDb = rcfg.attenDb;
+                cfg.filterWindow = rcfg.window;
+                cfg.filterPhase = rcfg.phase;
+                cfg.twoStage = rcfg.twoStage;
+                cfg.apodizing = rcfg.apodizing;
+                cfg.apodF1 = rcfg.apodF1;
+                cfg.apodF2 = rcfg.apodF2;
+                cfg.minTapsPerInput = rcfg.minTapsPerInput;
+                if (rcfg.twoStage && rcfg.stage2Taps > 0) cfg.stage2Taps = rcfg.stage2Taps;
             }
         }
 
@@ -5442,6 +5461,34 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             const rta::dsp::DsdConversion dsdConv = rta::dsp::parse_conversion(p.dsdConv);
             const std::string dsdConvName = rta::dsp::conversion_name(dsdConv);
             const double dsdPassbandHz = rta::dsp::conversion_passband(dsdConv);
+            // 与实际执行管线完全同源地运行 plan_resampler() 汇总（不再用 outRate >= in.rate * 8 启发式猜测，
+            // 也不再用静态 cfg.taps 冒充实际总抽头）。
+            rta::dsp::ResampleSignalSummary sigSum;
+            sigSum.nominalTaps = cfg.taps;
+            sigSum.tapsPerInput = cfg.minTapsPerInput;
+            sigSum.twoStage = cfg.twoStage;
+            {
+                rta::dsp::ResamplerConfig rsigCfg;
+                rsigCfg.inRate = (uint32_t)in.rate;
+                rsigCfg.outRate = outRate;
+                rsigCfg.channels = outCh;
+                rsigCfg.totalTaps = cfg.taps;
+                rsigCfg.attenDb = cfg.attenDb;
+                rsigCfg.transition = cfg.transition;
+                rsigCfg.window = cfg.filterWindow;
+                rsigCfg.phase = cfg.filterPhase;
+                rsigCfg.twoStage = cfg.twoStage;
+                rsigCfg.stage2Taps = cfg.stage2Taps;
+                rsigCfg.apodizing = cfg.apodizing;
+                rsigCfg.apodF1 = cfg.apodF1;
+                rsigCfg.apodF2 = cfg.apodF2;
+                rsigCfg.minTapsPerInput = cfg.minTapsPerInput;
+                try {
+                    sigSum = rta::dsp::summarize_resampler_plan(rsigCfg);
+                } catch (...) {
+                    // 若超过预算，后续 Pipeline 构造也会受控抛错并记入 RQ.err，不在这里崩溃。
+                }
+            }
             std::ostringstream sig;
             sig << "{\"src\":\"" << jesc(file) << "\""
                 << ",\"codec\":\"" << jesc(mi.codec.empty() ? "wav" : mi.codec) << "\""
@@ -5485,8 +5532,14 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
                 // ④无 EQ / IR 卷积 ⑤非 DoP(DSD 载波必然重采样) ⑥位深未降(实际输出 ≥ 源位深)。
                 // 注意：DirectSDM 一比特直通是另一条更严格的路，单独标 bitPerfect=direct。
                 << ",\"resample\":" << (outRate != in.rate ? "true" : "false")
-                << ",\"twoStage\":" << ((cfg.twoStage && outRate >= in.rate * 8) ? "true" : "false")
-                << ",\"taps\":" << cfg.taps
+                << ",\"twoStage\":" << (sigSum.twoStage ? "true" : "false")
+                << ",\"taps\":" << sigSum.actualTotalTaps
+                << ",\"nominalTaps\":" << sigSum.nominalTaps
+                << ",\"tapsPerPhase\":" << sigSum.tapsPerPhase
+                << ",\"tapsPerInput\":" << sigSum.tapsPerInput
+                << ",\"stage1Taps\":" << sigSum.stage1TapsPerPhase
+                << ",\"stage2Taps\":" << sigSum.stage2TapsPerPhase
+                << ",\"actualTaps\":" << sigSum.actualTotalTaps
                 << ",\"filter\":\"" << jesc(fname.empty() ? std::string("Kaiser sinc") : fname) << "\""
                 << ",\"phaseCode\":\"" << (cfg.filterPhase == rta::dsp::PhaseKind::Minimum ? "minimum"
                                             : (cfg.filterPhase == rta::dsp::PhaseKind::Intermediate ? "intermediate" : "linear")) << "\""
@@ -5566,6 +5619,13 @@ static bool play_one_impl(const std::string& file, const PlayParams& pIn, rta::a
             meta_on_play(file);   // 播放触发元数据补全(设置可关;inFlight 去重,后台线程)
             std::lock_guard<std::mutex> lk(ps.mtx);
             ps.signal = sig.str();
+            ps.resampleTwoStage = sigSum.twoStage;
+            ps.resampleNominalTaps = sigSum.nominalTaps;
+            ps.resampleTapsPerInput = sigSum.tapsPerInput;
+            ps.resampleTapsPerPhase = sigSum.tapsPerPhase;
+            ps.resampleStage1Taps = sigSum.stage1TapsPerPhase;
+            ps.resampleStage2Taps = sigSum.stage2TapsPerPhase;
+            ps.resampleActualTaps = sigSum.actualTotalTaps;
             // 2026-10-24（用户 261024-04 #8）：GPU 标志**每曲复位**。
             // 旧代码只有 DirectSDM 分支复位过 ps.gpu，普通路径一路沿用上一曲的值 ——
             // 这就是"bit-perfect 直通时右下角 GPU 图标还亮着"的直接根因。
@@ -14650,12 +14710,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"phase\":\"" << ph << "\""
               << ",\"phaseName\":\"" << phCn << "\""
               << ",\"taps\":" << fp.taps
+              << ",\"nominalTaps\":" << fp.taps
               << ",\"twoStage\":" << (fp.twoStage ? "true" : "false")
               << ",\"forNx\":" << (fp.forNx ? "true" : "false")
               << ",\"attenDb\":" << fp.attenDb
               << ",\"transition\":" << fp.transition
               << ",\"apodizing\":" << (fp.apodizing ? "true" : "false")
               << ",\"tapsPerInput\":" << fp.tapsPerInput
+              << ",\"tapsSemantic\":\"" << (fp.tapsPerInput > 0 ? "perInput" : (fp.twoStage ? "twoStageNominal" : "nominalBudget")) << "\""
               << ",\"family\":\"" << jesc(rta::dsp::filter_family_id(fam)) << "\""
               << ",\"familyLabel\":\"" << jesc(rta::dsp::filter_family_full_label(fp.name)) << "\"";
             if (resolvedName && *resolvedName) {
@@ -15571,6 +15633,14 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"inRate\":" << (castMode ? (castTransition ? 0u : castSt.sourceRate) : ps.inRate)
           << ",\"resampled\":" << (castMode ? ((!castTransition && castSt.resampled) ? "true" : "false")
                                              : ((ps.inRate > 0 && rateStat > 0 && (uint32_t)rateStat != ps.inRate) ? "true" : "false"))
+          << ",\"twoStage\":" << ((!castMode && ps.resampleTwoStage) ? "true" : "false")
+          << ",\"taps\":" << (castMode ? 0ULL : (unsigned long long)ps.resampleActualTaps)
+          << ",\"nominalTaps\":" << (castMode ? 0 : ps.resampleNominalTaps)
+          << ",\"tapsPerPhase\":" << (castMode ? 0 : ps.resampleTapsPerPhase)
+          << ",\"tapsPerInput\":" << (castMode ? 0 : ps.resampleTapsPerInput)
+          << ",\"stage1Taps\":" << (castMode ? 0 : ps.resampleStage1Taps)
+          << ",\"stage2Taps\":" << (castMode ? 0 : ps.resampleStage2Taps)
+          << ",\"actualTaps\":" << (castMode ? 0ULL : (unsigned long long)ps.resampleActualTaps)
           << ",\"upsampleApplied\":" << ((castMode && !castTransition && castSt.upsampleApplied) ? "true" : "false")
           << ",\"upsampleForced\":" << ((castMode && !castTransition && castSt.upsampleForced) ? "true" : "false")
           << ",\"servedRate\":" << (castMode ? (castTransition ? 0u : castSt.servedRate) : 0u)

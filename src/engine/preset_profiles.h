@@ -20,14 +20,14 @@
 //       rate=follow（跟随源，不重采样）· volume=0 dB · shaper=none · 无 EQ/IR/等响度/每声道增益/ISP 预衰减
 //       源是 PCM ⟹ dsd=0；源是 DSD 且设备能承载 ⟹ dsd=<源位率>，同速率 ⟹ directSdm=1（1-bit 直通）
 //   pcm（PCM 升频）：
-//       rate = 设备当前后端支持的最高档（**不超过 384000**）· filter=poly-sinc-tight-lp · tapsPerInput=512
+//       rate = 设备当前后端支持的最高档（**不超过 384000**）· filter=poly-sinc-tight-lp · tapsPerInput=1600
 //       shaper=auto · dsd=0
-//       为什么必须 minTapsPerInput=512：高倍率下抽头总预算被摊到每个相位后只剩几个抽头，
-//       20 kHz 处会掉 5 dB（见 docs/PCM回放质量-实测与改进.md §4.1）—— 这是本档的关键，
-//       不能靠"预设自带 taps"隐式满足。
+//       为什么必须 minTapsPerInput=1600：与 poly-sinc-tight-lp 预设一致（保命下限 >= 512）；
+//       高倍率下抽头总预算被摊到每个相位后只剩几个抽头，20 kHz 处会掉 5 dB
+//       （见 docs/PCM回放质量-实测与改进.md §4.1）—— 不能靠模糊“标称 taps”隐式满足。
 //   dsd（DSD 升频）：
 //       dsd = 设备原生支持的最高 DSD 档（没有原生则退 DoP 的最高档）· modfamily=ec · modorder=7
-//       filter=poly-sinc-tight-lp · tapsPerInput=512 · rate=follow · shaper=none（DoP 强制无抖动）
+//       filter=poly-sinc-tight-lp · tapsPerInput=1600 · rate=follow · shaper=none（DoP 强制无抖动）
 //       源 DSD 与目标同速率 ⟹ directSdm=1
 //   pcm2dsd（PCM → DSD，2026-10-26 第 4 档）：
 //       **mac 口径：只走 DoP**。macOS 没有 ASIO 原生 DSD 驱动通路，rtaweb 的 c.dsdNative
@@ -35,7 +35,7 @@
 //       「设备原生支持 DSD / 1-bit 直送」这类虚构通路（2026-10-26 A-5 事故的教训：
 //       虚构公共 API + 测虚构语义 = 假通过）。notes 只写「走 DoP，载波 X Hz」。
 //       dsd = DoP 能承载的最高档 · modfamily=ec · modorder=7
-//       filter=poly-sinc-tight-lp · tapsPerInput=512 · rate=follow · shaper=none · directSdm=0
+//       filter=poly-sinc-tight-lp · tapsPerInput=1600 · rate=follow · shaper=none · directSdm=0
 //       无 DoP 能力 ⟹ 明确降级为 PCM 升频并在 notes 里说明原因（与 dsd 档同口径）。
 //
 // 为什么 shaper 在 dsd 档写 none：DoP 路径在 rtaweb 里是 `cfg.shaper = Shaper::None`
@@ -169,7 +169,7 @@ struct PresetSettings {
     std::string modFamily;               // "" = 不改（默认 dsd）；dsd 档写 "ec"
     int modOrder = 0;                    // 0 = 不改；dsd 档写 7
     std::string filter;                  // "" = 用默认 Kaiser；升频档写 poly-sinc-tight-lp
-    int minTapsPerInput = 0;             // 0 = 用预设自带；升频档写 512
+    int minTapsPerInput = 0;             // 0 = 用预设自带；升频档与 poly-sinc-tight-lp 对齐写 1600
     std::string shaper = "none";         // "none" | "auto" | 具体型号
     double volumeDb = 0.0;
     int directSdm = 0;                   // 1 = 源 DSD 与目标同速率逐位直通
@@ -297,7 +297,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
     // ---------------- ② PCM 升频 ----------------
     if (prof == PresetProfile::Pcm) {
         s.filter = "poly-sinc-tight-lp";
-        s.minTapsPerInput = 512;      // 关键：高倍率下保住每相位的抽头数（20 kHz 不掉 5 dB）
+        s.minTapsPerInput = 1600;     // 关键：高倍率下保住每相位的抽头数（与 poly-sinc-tight-lp 自带 tapsPerInput=1600 对齐）
         s.shaper = "auto";
         s.dsd = 0;
         s.directSdm = 0;
@@ -341,7 +341,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
     //   ③ 上游无能力时降级 PCM；mac 同口径，但必须说明「mac 没有原生 DSD 通路」这一前提。
     if (prof == PresetProfile::PcmToDsd) {
         s.filter = "poly-sinc-tight-lp";
-        s.minTapsPerInput = 512;
+        s.minTapsPerInput = 1600;
         s.shaper = "none";            // 抖动交给调制器之后的 1-bit 量化（与 DSD 档一致）
         s.rate = "src";               // DoP 忽略 rate：载波率由 dsd 档决定，不是由 rate 决定
         s.directSdm = 0;              // PCM 源没有"直通"可言
@@ -395,7 +395,7 @@ inline PresetSettings plan_preset(PresetProfile prof, const DeviceCaps& caps, co
 
     // ---------------- ③ DSD 升频 ----------------
     s.filter = "poly-sinc-tight-lp";
-    s.minTapsPerInput = 512;
+    s.minTapsPerInput = 1600;
     s.shaper = "none";                // DoP 路径强制无抖动（抖动交给 1-bit 量化）
     s.rate = "src";                   // 原生 DSD 要求保持源率；DoP 忽略 rate（载波由 dsd 档决定）
     if (capLevel == 0) {

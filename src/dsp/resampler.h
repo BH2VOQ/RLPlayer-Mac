@@ -205,26 +205,33 @@ inline ResamplerPlan plan_resampler(const ResamplerConfig& requested) {
     p.M = int(cfg.inRate / g);
     if (p.L == 1 && p.M == 1) return p;
     const bool rational = p.M != 1 && uint64_t(cfg.outRate) >= uint64_t(cfg.inRate) * 2;
-    int f = 1;
-    if ((cfg.twoStage || (cfg.allowAutomaticCascade && rational)) && ((p.M == 1 && p.L >= 8) || rational))
-        for (int candidate : {4, 3, 2})
-            if (p.L % candidate == 0 && p.L / candidate >= (rational ? 1 : 2)) { f = candidate; break; }
-    if (f > 1) {
-        const uint64_t mid = uint64_t(cfg.inRate) * f;
+    auto pick_cascade_factor = [&]() -> int {
+        if ((p.M == 1 && p.L >= 8) || rational) {
+            for (int candidate : {4, 3, 2}) {
+                if (p.L % candidate == 0 && p.L / candidate >= (rational ? 1 : 2))
+                    return candidate;
+            }
+        }
+        return 1;
+    };
+    auto plan_two_stage = [&](int factor) {
+        const uint64_t mid = uint64_t(cfg.inRate) * factor;
         if (mid > UINT32_MAX) throw std::length_error("Cascade intermediate sample rate overflow");
-        const int t1 = cfg.minTapsPerInput > 0 ? cfg.minTapsPerInput : std::max(4, cfg.totalTaps / p.L);
+        // Stage 1 只做 factor 倍插值，应按 factor（而非总 p.L）分摊 totalTaps 预算，
+        // 否则 *-2s（尤其最小/混合相位）在 8x/16x 高倍率下 Stage 1 抽头会腰斩/四分之一斩。
+        const int t1 = cfg.minTapsPerInput > 0 ? cfg.minTapsPerInput : std::max(4, cfg.totalTaps / factor);
         ResamplerConfig a = cfg, b = cfg;
         a.twoStage = b.twoStage = false;
         a.allowAutomaticCascade = b.allowAutomaticCascade = false;
         a.applyTapFloor = b.applyTapFloor = true;
         a.outRate = uint32_t(mid);
-        a.totalTaps = resampler_tap_product(t1, f);
+        a.totalTaps = resampler_tap_product(t1, factor);
         b.inRate = uint32_t(mid);
         b.minTapsPerInput = cfg.stage2Taps;
         b.transition = .30;
         b.apodizing = false;
         b.apodF1 = b.apodF2 = 0.0;
-        const int l2 = p.L / f;
+        const int l2 = p.L / factor;
         if (rational) {
             b.window = WindowKind::Kaiser;
             b.attenDb = std::max(286.0, cfg.attenDb + 6.0);
@@ -238,15 +245,61 @@ inline ResamplerPlan plan_resampler(const ResamplerConfig& requested) {
         p.stages[0] = plan_resampler_stage(a);
         p.stages[1] = plan_resampler_stage(b);
         p.stageCount = 2;
+    };
+    const int f = (cfg.twoStage || (cfg.allowAutomaticCascade && rational)) ? pick_cascade_factor() : 1;
+    if (f > 1) {
+        plan_two_stage(f);
     } else {
-        p.stages[0] = plan_resampler_stage(cfg);
-        p.stageCount = 1;
+        try {
+            p.stages[0] = plan_resampler_stage(cfg);
+            p.stageCount = 1;
+        } catch (const std::runtime_error&) {
+            // 单级原型抽头超预算（如 poly-sinc-tight-lp @ 44.1k->DSD128_48k）时，
+            // 若倍率可分解则自动升为保真两段式级联；不可分解或级联仍超预算则如实抛受控错误。
+            const int autoF = pick_cascade_factor();
+            if (autoF <= 1) throw;
+            plan_two_stage(autoF);
+        }
     }
     p.coefficientCount = 0;
     for (size_t i = 0; i < p.stageCount; ++i)
         p.coefficientCount += p.stages[i].coefficientCount;
     p.cachePayloadBytes = p.coefficientCount * sizeof(double);
     return p;
+}
+
+// 统一的信号链/UI 重采样口径摘要：消除 UI/status 各自用启发式公式推算 twoStage 与 taps 的分歧
+struct ResampleSignalSummary {
+    bool     resampled         = false;
+    bool     twoStage          = false;
+    int      nominalTaps       = 0;  // 静态预设/配置标称预算 (fp.taps / cfg.totalTaps)
+    int      tapsPerInput      = 0;  // 每输入样本内核长度要求 (0 = 未指定)
+    int      tapsPerPhase      = 0;  // 实际每相抽头（两段式 = s1 + ceil(s2 / f1)）
+    int      stage1TapsPerPhase = 0;
+    int      stage2TapsPerPhase = 0;
+    uint64_t actualTotalTaps   = 0;  // 实际生效原型总系数数 (plan.coefficientCount)
+};
+
+inline ResampleSignalSummary summarize_resampler_plan(const ResamplerConfig& cfg) {
+    ResampleSignalSummary s;
+    s.nominalTaps = cfg.totalTaps;
+    s.tapsPerInput = cfg.minTapsPerInput;
+    const ResamplerPlan pl = plan_resampler(cfg);
+    if (pl.stageCount == 0) return s;
+    s.resampled = true;
+    s.twoStage = (pl.stageCount == 2);
+    s.stage1TapsPerPhase = pl.stages[0].T;
+    s.stage2TapsPerPhase = (pl.stageCount >= 2) ? pl.stages[1].T : 0;
+    if (pl.stageCount == 2) {
+        const int64_t f1 = std::max(1, pl.stages[0].L);
+        const int64_t eff = int64_t(s.stage1TapsPerPhase) +
+                            (int64_t(s.stage2TapsPerPhase) + f1 - 1) / f1;
+        s.tapsPerPhase = (eff > INT_MAX) ? INT_MAX : int(eff);
+    } else {
+        s.tapsPerPhase = s.stage1TapsPerPhase;
+    }
+    s.actualTotalTaps = pl.coefficientCount;
+    return s;
 }
 
 class PolyphaseResampler {

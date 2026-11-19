@@ -1691,14 +1691,7 @@ private:
                 }
                 const std::string effectiveFilter = fp ? std::string(fp->name) : std::string();
                 if (fp) {
-                    rcfg.totalTaps = fp->taps;
-                    rcfg.transition = fp->transition;
-                    rcfg.attenDb = fp->attenDb;
-                    rcfg.window = fp->window;
-                    rcfg.phase = fp->phase;
-                    rcfg.twoStage = fp->twoStage;
-                    rcfg.minTapsPerInput = fp->tapsPerInput;
-                    if (fp->twoStage && fp->stage2Taps > 0) rcfg.stage2Taps = fp->stage2Taps;
+                    rta::dsp::apply_preset(rcfg, *fp);
                 }
 
                 rta::dsp::PolyphaseResampler resampler(rcfg);

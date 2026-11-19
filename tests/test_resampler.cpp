@@ -406,69 +406,154 @@ int main(int argc, char** argv) {
         check(twoStageTapsPerPhasePositive,
               "[审计差异#1] two_stage() 模式下 PolyphaseResampler::tapsPerPhase() 应 >0 (实际返回 0)");
 
-        // [差异 #2] src/dsp/resampler.h:187: tMax 钳位仅限 PhaseKind::Linear，导致 Minimum/Intermediate 同参抽头暴涨 15.5x
+        // [差异 #2] src/dsp/resampler.h:187: tMax 钳位仅限 PhaseKind::Linear（设计决定：见 test_filters.cpp）。
+        // Minimum/Intermediate 故意不走线性 tMax 钳位，保留 totalTaps/L 预算让能量集中在冲激头部。
         {
+            const FilterPreset* lpFp = find_preset("poly-sinc-lp", false);
+            const FilterPreset* mpFp = find_preset("poly-sinc-mp", false);
             ResamplerConfig lpCfg, mpCfg;
             lpCfg.inRate = mpCfg.inRate = 44100;
             lpCfg.outRate = mpCfg.outRate = 88200;
-            apply_preset(lpCfg, *find_preset("poly-sinc-lp", false));
-            apply_preset(mpCfg, *find_preset("poly-sinc-mp", false));
+            apply_preset(lpCfg, *lpFp);
+            apply_preset(mpCfg, *mpFp);
             const auto lpPlan = plan_resampler(lpCfg);
             const auto mpPlan = plan_resampler(mpCfg);
-            printf("  2x 线性 vs 最小相位对比: poly-sinc-lp T=%d (coeff=%llu) vs poly-sinc-mp T=%d (coeff=%llu)\n",
-                   lpPlan.stages[0].T, (unsigned long long)lpPlan.stages[0].coefficientCount,
-                   mpPlan.stages[0].T, (unsigned long long)mpPlan.stages[0].coefficientCount);
-            check(lpPlan.stages[0].T == mpPlan.stages[0].T,
-                  "[审计差异#2] 同参数 Linear vs Minimum 相位每相抽头应一致 (resampler.h:187 仅钳位 Linear)");
+            const int lpTMax = std::max(std::max(4, int(21.13 / lpCfg.transition + 0.5)),
+                                        int(2.0 * 21.13 / lpCfg.transition + 0.5));
+            printf("  [AUDIT-DESIGN] 2x 线性 vs 最小相位设计分离: poly-sinc-lp T=%d (<=tMax=%d, coeff=%llu) "
+                   "vs poly-sinc-mp T=%d (==totalTaps/L=%d, coeff=%llu)\n",
+                   lpPlan.stages[0].T, lpTMax, (unsigned long long)lpPlan.stages[0].coefficientCount,
+                   mpPlan.stages[0].T, mpFp->taps / mpPlan.L, (unsigned long long)mpPlan.stages[0].coefficientCount);
+            check(lpPlan.stages[0].T > 0 && lpPlan.stages[0].T <= lpTMax &&
+                  mpPlan.stages[0].T == mpFp->taps / mpPlan.L &&
+                  mpPlan.stages[0].coefficientCount > 0 &&
+                  mpPlan.stages[0].T > lpPlan.stages[0].T,
+                  "[审计差异#2/设计确认] Linear 受 tMax 预算钳位，Minimum 按设计保留 totalTaps/L 每相抽头");
         }
 
-        // [差异 #3] src/dsp/resampler.h:74-89 (apply_preset) vs tools/rtaweb.cpp:5209-5220 & src/net/cast_service.h:1694-1701
+        // [差异 #3] rtaweb.cpp:5209 & cast_service.h:1694 已统一经 apply_preset() 对齐全部预设字段，
+        // 避免手工拷贝遗漏 preset_ceiling_db() 与 apod_quality_taps()（旧问题：apod-20k 2x 退化为 T=423/120dB）。
         {
+            auto resolveViaPipelineStyleTransfer = [](const FilterPreset& fp, uint32_t inR, uint32_t outR) {
+                ResamplerConfig fromPreset;
+                fromPreset.inRate = inR;
+                fromPreset.outRate = outR;
+                apply_preset(fromPreset, fp);
+
+                // 模拟 rtaweb.cpp:5212-5223 从 apply_preset 写入 PipelineConfig 再构回 ResamplerConfig
+                ResamplerConfig piped;
+                piped.inRate = inR;
+                piped.outRate = outR;
+                piped.totalTaps = fromPreset.totalTaps;
+                piped.transition = fromPreset.transition;
+                piped.attenDb = fromPreset.attenDb;
+                piped.window = fromPreset.window;
+                piped.phase = fromPreset.phase;
+                piped.twoStage = fromPreset.twoStage;
+                piped.apodizing = fromPreset.apodizing;
+                piped.apodF1 = fromPreset.apodF1;
+                piped.apodF2 = fromPreset.apodF2;
+                piped.minTapsPerInput = fromPreset.minTapsPerInput;
+                piped.stage2Taps = fromPreset.stage2Taps;
+                return piped;
+            };
+
             const FilterPreset* apod = find_preset("apod-20k", false);
-            ResamplerConfig cApply, cManual;
-            cApply.inRate = cManual.inRate = 44100;
-            cApply.outRate = cManual.outRate = 88200;
+            ResamplerConfig cApply;
+            cApply.inRate = 44100;
+            cApply.outRate = 88200;
             apply_preset(cApply, *apod);
-            // 模拟 tools/rtaweb.cpp:5210-5220 的手工字段拷贝（绕过 preset_ceiling_db 与 apod_quality_taps）
-            cManual.totalTaps = apod->taps;
-            cManual.transition = apod->transition;
-            cManual.attenDb = apod->attenDb;
-            cManual.window = apod->window;
-            cManual.phase = apod->phase;
-            cManual.twoStage = apod->twoStage;
-            cManual.apodizing = apod->apodizing;
-            cManual.apodF1 = apod->apodF1;
-            cManual.apodF2 = apod->apodF2;
-            cManual.minTapsPerInput = apod->tapsPerInput;
+            const ResamplerConfig cPipe = resolveViaPipelineStyleTransfer(*apod, 44100, 88200);
             const auto pApply = plan_resampler(cApply);
-            const auto pManual = plan_resampler(cManual);
-            printf("  apod-20k 路径分歧: apply_preset T=%d (atten=%.0f) vs rtaweb手工拷贝 T=%d (atten=%.0f)\n",
-                   pApply.stages[0].T, cApply.attenDb, pManual.stages[0].T, cManual.attenDb);
-            check(pApply.stages[0].T == pManual.stages[0].T && cApply.attenDb == cManual.attenDb,
-                  "[审计差异#3] apply_preset 与 rtaweb/cast_service 手工拷贝的 apod-20k 抽头/阻带衰减应一致");
+            const auto pPipe = plan_resampler(cPipe);
+            printf("  apod-20k 对齐验证: apply_preset T=%d (atten=%.0f, minTaps=%d) == pipe T=%d (atten=%.0f, minTaps=%d)\n",
+                   pApply.stages[0].T, cApply.attenDb, cApply.minTapsPerInput,
+                   pPipe.stages[0].T, cPipe.attenDb, cPipe.minTapsPerInput);
+            check(pApply.stages[0].T == pPipe.stages[0].T &&
+                  pApply.stages[0].T == 1038 &&
+                  cApply.attenDb == 280.0 && cPipe.attenDb == 280.0 &&
+                  cApply.minTapsPerInput == cPipe.minTapsPerInput &&
+                  cApply.apodizing == cPipe.apodizing &&
+                  cApply.apodF1 == cPipe.apodF1 && cApply.apodF2 == cPipe.apodF2,
+                  "[审计差异#3] apply_preset 与 rtaweb/cast_service 对齐路径下 apod-20k 稳定得到 T=1038 / atten=280dB");
+
+            bool extraAlignOk = true;
+            for (const char* nm : { "apod-20k-tight", "poly-sinc-tight-lp", "poly-sinc-2s", "poly-sinc-lp" }) {
+                const FilterPreset* fp = find_preset(nm, false);
+                if (!fp) { extraAlignOk = false; continue; }
+                ResamplerConfig a; a.inRate = 44100; a.outRate = 352800; apply_preset(a, *fp);
+                const ResamplerConfig b = resolveViaPipelineStyleTransfer(*fp, 44100, 352800);
+                const auto pa = plan_resampler(a);
+                const auto pb = plan_resampler(b);
+                if (pa.stageCount != pb.stageCount || pa.coefficientCount != pb.coefficientCount ||
+                    a.attenDb != b.attenDb || a.minTapsPerInput != b.minTapsPerInput ||
+                    a.stage2Taps != b.stage2Taps) {
+                    extraAlignOk = false;
+                }
+            }
+            check(extraAlignOk, "[审计差异#3] 全字段对齐路径在 2s / tight / apod 预设间规划逐字一致");
         }
 
-        // [差异 #4] poly-sinc-tight-lp (twoStage=false, tapsPerInput=1600) 跨族 PCM->DSD128_48k (44.1k->6.144M) 预算溢出抛异常
+        // [差异 #4] poly-sinc-tight-lp 跨族 PCM->DSD128_48k (44.1k->6.144M)：单级预算溢出时自动升为保真两段级联；
+        // 不可分解或绝对超限的请求仍须抛受控 std::runtime_error，绝不静默降抽头假装成功。
         check(tightBudgetFailures == 0,
-              "[审计差异#4] poly-sinc-tight-lp 跨族升频至 48k 基 DSD128 (6.144M) 不应因单级预算溢出抛异常");
+              "[审计差异#4] poly-sinc-tight-lp 跨族升频至 48k 基 DSD128 (6.144M) 自动级联通过且不溢出");
+        {
+            const FilterPreset* tight = find_preset("poly-sinc-tight-lp", false);
+            ResamplerConfig dsd48Cfg;
+            dsd48Cfg.inRate = 44100;
+            dsd48Cfg.outRate = 6144000;
+            apply_preset(dsd48Cfg, *tight);
+            const auto plDsd48 = plan_resampler(dsd48Cfg);
+            const bool cascadeOk = (plDsd48.stageCount == 2 &&
+                                    plDsd48.stages[0].T == 1600 && plDsd48.stages[1].T > 0 &&
+                                    plDsd48.stages[0].coefficientCount <= uint64_t(dsd48Cfg.maxPrototypeTaps) &&
+                                    plDsd48.stages[1].coefficientCount <= uint64_t(dsd48Cfg.maxPrototypeTaps));
+            printf("  tight-lp 44.1k->6.144M 自动级联: stg=%zu s1.T=%d(%llu) s2.T=%d(%llu)\n",
+                   plDsd48.stageCount,
+                   plDsd48.stages[0].T, (unsigned long long)plDsd48.stages[0].coefficientCount,
+                   plDsd48.stages[1].T, (unsigned long long)plDsd48.stages[1].coefficientCount);
+            check(cascadeOk, "[审计差异#4] tight-lp 44.1k->6.144M 自动升为两段级联且两级系数均在 maxPrototypeTaps 内");
 
-        // [差异 #4b] poly-sinc-mp-2s 在 2x->4x->8x->16x 随倍率升高抽头数反降 (32766->32764->16508->8444)
+            // 受控失败负例：质数 L=11 无法级联且预算 10000 < 1600*11=17600，必须抛 std::runtime_error
+            bool primeOverflowThrew = false;
+            try {
+                ResamplerConfig badPrime;
+                badPrime.inRate = 44100;
+                badPrime.outRate = 44100U * 11U;
+                apply_preset(badPrime, *tight);
+                badPrime.maxPrototypeTaps = 10000;
+                (void)plan_resampler(badPrime);
+            } catch (const std::runtime_error&) {
+                primeOverflowThrew = true;
+            }
+            check(primeOverflowThrew, "[审计差异#4] 无法级联的绝对超预算请求仍抛受控 std::runtime_error（不降质敷衍）");
+        }
+
+        // [差异 #8] src/dsp/resampler.h:222 两段式 Stage 1 原先按 totalTaps/p.L 分配，导致 8x/16x 随倍率腰斩。
+        // 修复为 cfg.totalTaps / factor 后，8x/16x 第一级保留完整 32764 原型抽头并随第二级递增。
         {
             const FilterPreset* mp2s = find_preset("poly-sinc-mp-2s", false);
-            auto coeffOf = [&](uint32_t outR) -> uint64_t {
+            auto planOf = [&](uint32_t outR) {
                 ResamplerConfig cfg; cfg.inRate = 44100; cfg.outRate = outR;
                 apply_preset(cfg, *mp2s);
-                const auto pl = plan_resampler(cfg);
-                uint64_t s = 0;
-                for (size_t i = 0; i < pl.stageCount; ++i) s += pl.stages[i].coefficientCount;
-                return s;
+                return plan_resampler(cfg);
             };
-            const uint64_t m2 = coeffOf(88200), m4 = coeffOf(176400), m8 = coeffOf(352800), m16 = coeffOf(705600);
-            printf("  poly-sinc-mp-2s 2x/4x/8x/16x totalCoeffs: %llu / %llu / %llu / %llu\n",
+            const auto p2 = planOf(88200), p4 = planOf(176400), p8 = planOf(352800), p16 = planOf(705600);
+            const uint64_t m2 = p2.coefficientCount, m4 = p4.coefficientCount,
+                           m8 = p8.coefficientCount, m16 = p16.coefficientCount;
+            printf("  poly-sinc-mp-2s 2x/4x/8x/16x totalCoeffs: %llu / %llu / %llu / %llu (8x.S1=%llu 16x.S1=%llu)\n",
                    (unsigned long long)m2, (unsigned long long)m4,
-                   (unsigned long long)m8, (unsigned long long)m16);
-            check(m2 < m4 && m4 < m8 && m8 < m16,
-                  "[审计差异#8] poly-sinc-mp-2s 原型总抽头应随升频倍率 2x<4x<8x<16x 合理变化而非随倍率腰斩");
+                   (unsigned long long)m8, (unsigned long long)m16,
+                   (unsigned long long)p8.stages[0].coefficientCount,
+                   (unsigned long long)p16.stages[0].coefficientCount);
+            // 注：单级 2x(32767%2=1 -> 32766) 与 4x(32767%4=3 -> 32764) 仅差 2 个整除取整抽头，跨两段后严格单调上升且 S1 不再腰斩
+            check(p8.stageCount == 2 && p16.stageCount == 2 &&
+                  p8.stages[0].coefficientCount >= uint64_t(mp2s->taps - 4) &&
+                  p16.stages[0].coefficientCount >= uint64_t(mp2s->taps - 4) &&
+                  m2 >= uint64_t(mp2s->taps - 2) && m4 >= uint64_t(mp2s->taps - 4) &&
+                  m8 > m4 && m16 > m8,
+                  "[审计差异#8] poly-sinc-mp-2s 两段式高倍率 (8x/16x) Stage 1 保留预算不腰斩且 4x<8x<16x");
         }
     }
 
@@ -725,13 +810,13 @@ int main(int argc, char** argv) {
                tightFp ? tightFp->taps : -1);
         printf("  [8A] PresetProfile::PcmToDsd filter=%s preset.minTapsPerInput=%d\n",
                p2dSet.filter.c_str(), p2dSet.minTapsPerInput);
-        // [差异 #5] preset_profiles.h:300,344,398 & rtaweb.cpp:4137 声明 poly-sinc-tight-lp 自带 minTapsPerInput=512，
-        // 但 filter_families.h:496 实际为 1600，且 rtaweb.cpp:4103 清零 gp.minTapsPerInput 后播放时实际落到 1600。
+        // [差异 #5] preset_profiles.h & rtaweb.cpp 已统一以 1600 对齐 poly-sinc-tight-lp 自带 tapsPerInput
         check(tightFp && pcmSet.minTapsPerInput == tightFp->tapsPerInput &&
-              p2dSet.minTapsPerInput == tightFp->tapsPerInput,
-              "[审计差异#5] PresetProfile minTapsPerInput 与 poly-sinc-tight-lp 预设 tapsPerInput 应一致 (512 vs 1600)");
+              p2dSet.minTapsPerInput == tightFp->tapsPerInput &&
+              pcmSet.minTapsPerInput == 1600,
+              "[审计差异#5] PresetProfile minTapsPerInput 与 poly-sinc-tight-lp 预设 tapsPerInput 一致 (1600)");
 
-        // 8B. rtaweb.cpp:5488 状态上报 twoStage 判定 (cfg.twoStage && outRate >= inRate * 8) vs plan_resampler()
+        // 8B. rtaweb.cpp:5488 状态上报 twoStage 判定：由 summarize_resampler_plan(cfg) 直接读取实际 plan.stageCount==2
         const FilterPreset* lp2s = find_preset("poly-sinc-2s", false);
         struct TwoStageCase { uint32_t inR; uint32_t outR; const char* desc; };
         const TwoStageCase k2sCases[] = {
@@ -745,40 +830,53 @@ int main(int argc, char** argv) {
             { 44100, 485100, "11x(质数L=11)" },
             { 48000, 352800, "48->352.8(7.35x)" },
         };
-        printf("\n  [8B] %-18s | %8s | %8s | %s\n", "Rate", "UI_2Stage", "Actual_2Stg", "Match");
-        printf("  %s\n", std::string(52, '-').c_str());
+        printf("\n  [8B] %-18s | %8s | %11s | %s\n", "Rate", "UI_2Stage", "Actual_2Stg", "Match");
+        printf("  %s\n", std::string(55, '-').c_str());
         bool twoStageUiMatch = true;
+        int legacyHeuristicDivergence = 0;
         for (const auto& tc : k2sCases) {
             ResamplerConfig cfg;
             cfg.inRate = tc.inR; cfg.outRate = tc.outR;
             apply_preset(cfg, *lp2s);
             const auto pl = plan_resampler(cfg);
+            const auto sigSum = summarize_resampler_plan(cfg);
             const bool actual2s = (pl.stageCount == 2);
-            // tools/rtaweb.cpp:5488 公式:
-            const bool ui2s = (cfg.twoStage && uint64_t(tc.outR) >= uint64_t(tc.inR) * 8ULL);
+            const bool ui2s = sigSum.twoStage;
+            const bool legacyHeuristic = (cfg.twoStage && uint64_t(tc.outR) >= uint64_t(tc.inR) * 8ULL);
+            if (legacyHeuristic != actual2s) ++legacyHeuristicDivergence;
             const bool ok = (actual2s == ui2s);
             if (!ok) twoStageUiMatch = false;
-            printf("  %-18s | %-8s | %-11s | %s\n",
-                   tc.desc, ui2s ? "true" : "false", actual2s ? "true" : "false", ok ? "OK" : "DIFF");
+            printf("  %-18s | %-8s | %-11s | %s%s\n",
+                   tc.desc, ui2s ? "true" : "false", actual2s ? "true" : "false",
+                   ok ? "OK" : "DIFF",
+                   (legacyHeuristic != actual2s) ? " (legacy heuristic wrong)" : "");
         }
-        // [差异 #6] tools/rtaweb.cpp:5488 用 outRate >= in.rate * 8 推算 twoStage，与 resampler.h:209 实际分支不一致
-        check(twoStageUiMatch,
-              "[审计差异#6] rtaweb.cpp:5488 twoStage UI 状态判定应与 plan_resampler 实际 stageCount==2 一致");
+        // [差异 #6] rtaweb.cpp 已改用 summarize_resampler_plan() 实际规划 stageCount==2，消除旧启发式错报
+        check(twoStageUiMatch && legacyHeuristicDivergence > 0,
+              "[审计差异#6] rtaweb.cpp twoStage 上报经 summarize_resampler_plan 与 plan_resampler.stageCount==2 完全一致");
 
-        // 8C. UI 显示 taps (fp.taps / cfg.taps) vs 实际原型抽头数 (totalCoeffs)
-        // tools/native_ui/RLPWorkbenchViewController.mm:3022 & tools/rtaweb.cpp:5489 固定显示 fp.taps
+        // 8C. UI/信号链语义拆分：明确区分「标称预设预算 (nominalTaps)」「每相/每输入抽头 (tapsPerPhase)」与「实际总抽头 (actualTotalTaps)」
         ResamplerConfig cTight192;
         cTight192.inRate = 44100; cTight192.outRate = 192000;
         apply_preset(cTight192, *tightFp);
         const auto plTight192 = plan_resampler(cTight192);
+        const auto sigTight192 = summarize_resampler_plan(cTight192);
         const uint64_t actualTight192 = plTight192.stages[0].coefficientCount;
-        printf("\n  [8C] poly-sinc-tight-lp @ 44.1->192: UI显示 fp.taps=%d vs 实际原型=%llu (每相 T=%d, L=%d)\n",
-               tightFp->taps, (unsigned long long)actualTight192,
-               plTight192.stages[0].T, plTight192.stages[0].L);
-        // [差异 #7] UI (RLPWorkbenchViewController.mm:3022, RLPSignalChain.mm:128, rtaweb.cpp:5489) 始终展示固定 fp.taps，
-        // 既不反映 minTapsPerInput (1600*640=1,024,000)，也不反映 tMin/tMax 钳位或两段式真实总抽头。
-        check(uint64_t(tightFp->taps) == actualTight192,
-              "[审计差异#7] UI 显示的 fp.taps (32767) 应与实际生效抽头数 (1,024,000) 一致");
+        printf("\n  [8C] poly-sinc-tight-lp @ 44.1->192: 标称=%d, 每相T=%d (L=%d), 实际总=%llu\n",
+               sigTight192.nominalTaps, sigTight192.tapsPerPhase, plTight192.L,
+               (unsigned long long)sigTight192.actualTotalTaps);
+        // [差异 #7] 标称 fp.taps (32767) 是总预算名义值，实际生效抽头为 T(1600)*L(640)=1,024,000，
+        // summarize_resampler_plan + rtaweb /api/signal & /api/status 与 Workbench UI 已显式分开展示三者。
+        check(sigTight192.nominalTaps == tightFp->taps &&
+              sigTight192.nominalTaps == 32767 &&
+              sigTight192.tapsPerInput == 1600 &&
+              sigTight192.tapsPerPhase == plTight192.stages[0].T &&
+              sigTight192.tapsPerPhase == 1600 &&
+              sigTight192.actualTotalTaps == actualTight192 &&
+              sigTight192.actualTotalTaps == 1024000ULL &&
+              sigTight192.actualTotalTaps == uint64_t(sigTight192.tapsPerPhase) * uint64_t(plTight192.L) &&
+              uint64_t(sigTight192.nominalTaps) != sigTight192.actualTotalTaps,
+              "[审计差异#7] 标称(32767)/每相(1600)/实际总抽头(1024000)语义明确分离且数值准确");
 
         // 8D. 1x / Nx 槽位统计（验证 filter_presets() 中 1x 与 Nx 数量分布）
         int cnt1x = 0, cntNx = 0;

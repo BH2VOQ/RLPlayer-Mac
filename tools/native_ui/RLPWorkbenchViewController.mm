@@ -1992,6 +1992,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     self.twoStageCheck = [NSButton checkboxWithTitle:RLPTr(@"两段式升频") target:self action:@selector(onTwoStageChanged:)];
     self.twoStageCheck.identifier = @"wb.twostage";
     self.twoStageCheck.font = t.small;
+    self.twoStageCheck.toolTip = RLPTr(@"两段式升频偏好：实际是否走两段级联由采样率比与 plan_resampler() 实时决定");
     [self.twoStageCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [col addArrangedSubview:self.twoStageCheck];
     [self.twoStageCheck.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
@@ -2054,6 +2055,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     self.tapsPopup.target = self;
     self.tapsPopup.action = @selector(onTapsChanged:);
     self.tapsPopup.font = t.small;
+    self.tapsPopup.toolTip = RLPTr(@"标称原型抽头预算（0 = 跟随预设；若预设指定每输入抽头地板 tapsPerInput，实际总抽头按每相 T × L 展开）");
     [self.tapsPopup addItemsWithTitles:@[RLPTr(@"跟随预设 (0)"), @"4095", @"32767", @"262143", @"1048575"]];
 
     self.attenPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -3070,7 +3072,14 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         [[self.filterAll menu] addItem:header];
         for (NSDictionary *it in g[@"items"]) {
             NSString *n = it[@"name"];
-            NSString *label = [NSString stringWithFormat:@"%@  ·  %@  ·  %@ taps", n, it[@"phaseName"] ?: @"", it[@"taps"] ?: @0];
+            NSInteger tpi = [it[@"tapsPerInput"] respondsToSelector:@selector(integerValue)] ? [it[@"tapsPerInput"] integerValue] : 0;
+            BOOL is2s = [it[@"twoStage"] respondsToSelector:@selector(boolValue)] && [it[@"twoStage"] boolValue];
+            id nomTaps = it[@"nominalTaps"] ?: (it[@"taps"] ?: @0);
+            NSString *tapDesc = tpi > 0
+                ? [NSString stringWithFormat:@"%ld/输入 · 标称 %@ taps", (long)tpi, nomTaps]
+                : [NSString stringWithFormat:@"标称 %@ taps", nomTaps];
+            NSString *stageTag = is2s ? @" · 两段式" : @"";
+            NSString *label = [NSString stringWithFormat:@"%@  ·  %@%@  ·  %@", n, it[@"phaseName"] ?: @"", stageTag, tapDesc];
             [self.filterAll addItemWithTitle:label];
             [[self.filterAll lastItem] setRepresentedObject:@{@"name": n, @"nx": @(RLPWorkbenchFilterUsesNx(it))}];
             if (perGroup < 2 && quick < 6 && !self.filterQuery.length) {
@@ -3590,8 +3599,15 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
             NSString *n = it[@"name"];
             if (![n isKindOfClass:[NSString class]] || !n.length) continue;
             [fVals addObject:n];
-            [fTitles addObject:[NSString stringWithFormat:@"%@ · %@ · %@ taps · %@", n,
-                                it[@"phaseName"] ?: @"", it[@"taps"] ?: @0,
+            NSInteger tpi = [it[@"tapsPerInput"] respondsToSelector:@selector(integerValue)] ? [it[@"tapsPerInput"] integerValue] : 0;
+            BOOL is2s = [it[@"twoStage"] respondsToSelector:@selector(boolValue)] && [it[@"twoStage"] boolValue];
+            id nomTaps = it[@"nominalTaps"] ?: (it[@"taps"] ?: @0);
+            NSString *tapDesc = tpi > 0
+                ? [NSString stringWithFormat:@"%ld/输入 · 标称 %@ taps", (long)tpi, nomTaps]
+                : [NSString stringWithFormat:@"标称 %@ taps", nomTaps];
+            NSString *stageTag = is2s ? @" · 两段式" : @"";
+            [fTitles addObject:[NSString stringWithFormat:@"%@ · %@%@ · %@ · %@", n,
+                                it[@"phaseName"] ?: @"", stageTag, tapDesc,
                                 RLPWorkbenchFilterUsesNx(it) ? @"filterNx" : @"filter"]];
         }
         NSPopUpButton *filtPop = [self popoverPopupWithValues:fVals titles:fTitles action:@selector(onNodeFilter:)];
@@ -4116,6 +4132,40 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     const NSInteger dsdRate = RLPParseDsdRate(s[@"dsd"]);
     const BOOL dsd = dsdRate > 0;
     NSString *activeFilter = RLPWorkbenchActivePlaybackFilter(s, st, RLPTr(@"默认"));
+    NSDictionary *activeMeta = nil;
+    for (NSDictionary *it in self.filters) {
+        if ([it[@"name"] isKindOfClass:[NSString class]] && [it[@"name"] isEqualToString:activeFilter]) {
+            activeMeta = it;
+            break;
+        }
+    }
+    const unsigned long long stActualTaps = [st[@"actualTaps"] respondsToSelector:@selector(unsignedLongLongValue)]
+        ? [st[@"actualTaps"] unsignedLongLongValue]
+        : ([st[@"taps"] respondsToSelector:@selector(unsignedLongLongValue)] ? [st[@"taps"] unsignedLongLongValue] : 0ULL);
+    const NSInteger stPerPhase = [st[@"tapsPerPhase"] respondsToSelector:@selector(integerValue)] ? [st[@"tapsPerPhase"] integerValue] : 0;
+    const NSInteger stNominalTaps = [st[@"nominalTaps"] respondsToSelector:@selector(integerValue)] ? [st[@"nominalTaps"] integerValue] : 0;
+    const BOOL hasStTwoStage = [st[@"twoStage"] respondsToSelector:@selector(boolValue)];
+    const BOOL stTwoStage = hasStTwoStage && [st[@"twoStage"] boolValue];
+    NSString *resampleVal = [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], activeFilter];
+    NSString *resampleTip = nil;
+    if (stActualTaps > 0) {
+        NSString *stageStr = hasStTwoStage ? (stTwoStage ? @" · 两段式" : @" · 单段") : @"";
+        resampleVal = [NSString stringWithFormat:@"%@%@ · 标称 %ld / 每相 %ld / 实际 %llu taps",
+                       resampleVal, stageStr, (long)stNominalTaps, (long)stPerPhase, stActualTaps];
+        resampleTip = [NSString stringWithFormat:@"标称预算 %ld · 每相 %ld · 实际原型总抽头 %llu%@",
+                       (long)stNominalTaps, (long)stPerPhase, stActualTaps, stageStr];
+    } else if (activeMeta) {
+        id metaNom = activeMeta[@"nominalTaps"] ?: (activeMeta[@"taps"] ?: @0);
+        const NSInteger metaTpi = [activeMeta[@"tapsPerInput"] respondsToSelector:@selector(integerValue)] ? [activeMeta[@"tapsPerInput"] integerValue] : 0;
+        const BOOL meta2s = [activeMeta[@"twoStage"] respondsToSelector:@selector(boolValue)] && [activeMeta[@"twoStage"] boolValue];
+        NSString *stageStr = meta2s ? @" · 两段式" : @"";
+        resampleVal = metaTpi > 0
+            ? [NSString stringWithFormat:@"%@%@ · 标称 %@ / %ld每输入", resampleVal, stageStr, metaNom, (long)metaTpi]
+            : [NSString stringWithFormat:@"%@%@ · 标称 %@ taps", resampleVal, stageStr, metaNom];
+        resampleTip = metaTpi > 0
+            ? [NSString stringWithFormat:@"预设标称 %@ · 每输入地板 %ld（实际总抽头按每相 T×L 展开）", metaNom, (long)metaTpi]
+            : [NSString stringWithFormat:@"预设标称预算 %@（实际抽头随目标采样率规划）", metaNom];
+    }
     NSString *extEq = [self str:@"eq" def:@""];
     const BOOL hasExtEq = extEq.length && ![extEq isEqualToString:@"0"];
     NSString *eqText = hasExtEq
@@ -4123,7 +4173,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         : (self.peqBypassed ? RLPTr(@"旁路") : RLPTr(@"开"));
     NSDictionary *vals = @{
         @"src": fs ? [NSString stringWithFormat:@"%@ Hz / %@ bit", fs, bits] : (dsd ? @"DSD" : @"—"),
-        @"resample": [NSString stringWithFormat:@"%@ · %@", [self str:@"rate" def:@"follow"], activeFilter],
+        @"resample": resampleVal,
         @"eq": eqText,
         @"ir": [self str:@"ir" def:@"0"],
         @"shaper": dsd ? @"none (DoP)" : [self str:@"shaper" def:@"auto"],
@@ -4148,7 +4198,9 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         node.layer.borderColor = applies ? t.line.CGColor : t.line2.CGColor;
         node.alphaValue = applies ? 1.0 : 0.55;
         NSButton *hit = self.chainHits[key];
-        if (hit) { hit.enabled = applies; hit.toolTip = applies ? RLPTr(@"点击看当前值") : why; }
+        NSString *okTip = ([key isEqualToString:@"resample"] && resampleTip.length) ? resampleTip : RLPTr(@"点击看当前值");
+        if (hit) { hit.enabled = applies; hit.toolTip = applies ? okTip : why; }
+        self.chainValues[key].toolTip = applies ? okTip : why;
         for (NSView *sub in node.subviews) {
             if ([sub.identifier isEqualToString:[NSString stringWithFormat:@"wb.why.%@", key]])
                 ((NSTextField *)sub).stringValue = why ?: @"";
