@@ -26,11 +26,13 @@
 @interface RLPKnowledgeView (NPDetailsTest)
 - (void)renderMetaFixture:(NSDictionary *)fixture;
 - (void)loadDrawerContext:(NSDictionary *)context;
+- (void)scrollToTop;
 - (CGFloat)renderedContentHeight;
 @end
 @interface NSObject (RLPRailMomentumTest)
 - (void)beginMomentumWithVelocity:(CGFloat)v;
 - (void)momentumTick:(id)sender;
+- (void)stopMomentum;
 - (void)onCommitPreciseVolume:(id)sender;
 - (void)onToggleVolumeMute:(id)sender;
 @end
@@ -136,6 +138,33 @@ static RLPDataCompletion pendingCover;
 @end
 static RLPRequestSpy *spy;static id fakeShared(id c,SEL s){return spy;}
 static int fail;
+
+@interface RLPTestFlippedDocView : NSView
+@end
+@implementation RLPTestFlippedDocView
+- (BOOL)isFlipped { return YES; }
+@end
+
+/// 外层页面 NSScrollView 间谍：任何泄漏出抽屉/侧栏的滚轮都会命到这里并同步推动 bounds.origin，
+/// 用来实证“指针在抽屉内时只滚 bodyScroll，不带动外层页面”。
+@interface RLPTestOuterScrollView : NSScrollView
+@property (nonatomic, assign) NSInteger wheelHits;
+@end
+@implementation RLPTestOuterScrollView
+- (void)scrollWheel:(NSEvent *)event {
+    self.wheelHits += 1;
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat beforeY = clip ? clip.bounds.origin.y : 0.0;
+    [super scrollWheel:event];
+    if (clip && doc && fabs(clip.bounds.origin.y - beforeY) < 0.01 && fabs(event.scrollingDeltaY) > 0.01) {
+        const CGFloat maxY = MAX(0.0, doc.frame.size.height - clip.bounds.size.height);
+        const CGFloat nextY = MAX(0.0, MIN(maxY, beforeY - event.scrollingDeltaY));
+        [clip scrollToPoint:NSMakePoint(0.0, nextY)];
+        [self reflectScrolledClipView:clip];
+    }
+}
+@end
 /// CGColor 与 NSColor 逐分量比较（含 alpha）：hover 判据必须量**实际视觉值**，不能只断言有跟踪区。
 /// 递归统计 NSScrollView（「单层滚动」判据：不新增嵌套滚动容器）。
 static NSInteger CountScrollViews(NSView *root) {
@@ -859,7 +888,7 @@ int main(){@autoreleasepool{
      // 恢复成真实值（这是生产行为），所以拇指判据前再补一次大内容高。
      [wrap setValue:@1200 forKey:@"contentHeight"];
      [wrap setValue:@150 forKey:@"contentOffset"];
-     ck(fabs(c0.frame.origin.y-(y0-150))<1.0,
+     ck(fabs(c0.frame.origin.y-(y0+150))<1.0,
         [[NSString stringWithFormat:@"滚动 150 后卡片上移 150（got %.1f）",c0.frame.origin.y-y0] UTF8String]);
      ck(fabs(title.frame.origin.y-titleYBefore)<0.01,"栏头 y 不随 chipwrap 滚动改变");
      // 拇指：右侧沟槽、与卡片右缘 ≥13、内容未溢出时为空
@@ -1713,6 +1742,314 @@ int main(){@autoreleasepool{
     ck(inBounds && ctlInBounds && clearsBar,
        [[NSString stringWithFormat:@"A4(%.0fx%.0f) 抽屉不越界且不遮挡底栏控制条", sz.width, sz.height] UTF8String]);
     [np closeDataDrawer];
+   }
+
+   // ---- A5: RLPKnowledgeView 两段长度 fixture + 顶部对齐 + wheel 方向/隔离/触底可见 + 常显滚动条 ----
+   {
+    NSEvent *(^makeWheel)(CGFloat) = ^NSEvent *(CGFloat dy) {
+        CGEventRef cg = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 1, (int32_t)llround(dy));
+        NSEvent *ev = cg ? [NSEvent eventWithCGEvent:cg] : nil;
+        if (cg) CFRelease(cg);
+        return ev;
+    };
+    NSEvent *evProbe = makeWheel(-120.0);
+    ck(evProbe != nil && evProbe.type == NSEventTypeScrollWheel, "A5 构造真实 NSEvent 滚轮事件成功");
+
+    NSWindow *kvWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 700, 760)
+                                                  styleMask:NSWindowStyleMaskBorderless
+                                                    backing:NSBackingStoreBuffered
+                                                      defer:NO];
+    RLPTestOuterScrollView *outerScroll = [[RLPTestOuterScrollView alloc] initWithFrame:NSMakeRect(0, 0, 700, 760)];
+    outerScroll.hasVerticalScroller = YES;
+    RLPTestFlippedDocView *outerDoc = [[RLPTestFlippedDocView alloc] initWithFrame:NSMakeRect(0, 0, 700, 1600)];
+    outerScroll.documentView = outerDoc;
+    kvWin.contentView = outerScroll;
+
+    RLPKnowledgeView *kv2 = [[RLPKnowledgeView alloc] initWithFrame:NSMakeRect(120, 40, 420, 560)];
+    [outerDoc addSubview:kv2];
+    [outerScroll.contentView scrollToPoint:NSZeroPoint];
+    [outerScroll reflectScrolledClipView:outerScroll.contentView];
+    [kvWin.contentView layoutSubtreeIfNeeded];
+    const NSPoint outerOrigin0 = outerScroll.contentView.bounds.origin;
+
+    NSDictionary *shortFix = @{
+        @"title": @"Short Piece",
+        @"artist": @"Soloist A",
+        @"year": @2021
+    };
+    NSDictionary *longFix = @{
+        @"title": @"Goldberg Variations, BWV 988: Aria & 30 Variations (Complete Edition)",
+        @"artist": @"Glenn Gould",
+        @"album": @"Bach: The Goldberg Variations (1981 Digital Recording)",
+        @"albumArtist": @"Glenn Gould (Piano)",
+        @"year": @1982,
+        @"date": @"1982-09-01",
+        @"genre": @"Classical / Keyboard / Baroque",
+        @"label": @"Sony Classical / CBS Masterworks",
+        @"catalog": @"IM 37779",
+        @"duration": @"51:15",
+        @"codec": @"flac",
+        @"sampleRate": @96000,
+        @"bits": @24,
+        @"channels": @2,
+        @"credits": @{
+            @"composer": @"Johann Sebastian Bach",
+            @"performer": @"Glenn Gould (Steinway D Concert Grand CD 318)",
+            @"producer": @"Samuel H. Carter",
+            @"recording": @"30th Street Studio, New York City (April–May 1981)"
+        },
+        @"mastering": @"24-bit/96kHz High-Resolution Archival Remaster from Sony PCM-1600 Masters",
+        @"fields": @{
+            @"创作背景": @"1741 年出版于纽伦堡，献给凯泽林伯爵（Hermann Karl von Keyserlingk）用于缓解失眠，题献与传播成为巴洛克键盘文献的里程碑。",
+            @"结构分析": @"每三首变奏以一对一卡农收束，从同度卡农递增至九度卡农，并以集大成的《集锦曲》（Quodlibet）回到原始咏叹调。",
+            @"演绎特点": @"1981 版在速度比例与对位透明度上采用整体统一脉冲，比 1955 年初版更显克制、深沉且富建筑感。",
+            @"乐器细节": @"全程使用编号 CD 318 号施坦威 D 型三角钢琴，并保留工作室拾音近距离声场与轻声哼唱细节。"
+        },
+        @"sections": @[
+            @{
+                @"heading": @"声部与时间张力",
+                @"paragraphs": @[
+                    @{ @"text": @"在 1981 年录音中，古尔德将慢速变奏拉出极具冥想感的句法空间，使各声部线状独立又在和声纵向上严丝合缝。" },
+                    @{ @"text": @"工程团队采用当年少见的索尼 PCM 数字母带与模拟备用磁带同步记录，保留了极宽的瞬态对比与极低底噪。" }
+                ]
+            },
+            @{
+                @"heading": @"版本与收藏价值",
+                @"paragraphs": @[
+                    @{ @"text": @"从黑胶首版 IM 37779 到后续 DSD/PCM 重制版，多版压片在声场宽度与高频延伸上均有详细文献比对。" }
+                ]
+            }
+        ],
+        @"sources": @[ @"MusicBrainz", @"Discogs", @"Wikipedia", @"Sony Archival Notes" ],
+        @"citations": @[
+            @{ @"id": @"1", @"source": @"Discogs", @"title": @"CBS Masterworks IM 37779", @"url": @"https://www.discogs.com/release/123" },
+            @{ @"id": @"2", @"source": @"MusicBrainz", @"title": @"Goldberg Variations BWV 988", @"url": @"https://musicbrainz.org/release/456" }
+        ],
+        @"confidence": @"0.98",
+        @"cached_at": @"2026-11-19 10:00:00",
+        @"notes_extra": @"Complete 32-movement continuous architectural cycle with archival studio session logs and edition notes."
+    };
+
+    [kv2 renderMetaFixture:shortFix];
+    [kv2 layoutSubtreeIfNeeded];
+    NSScrollView *scroll2 = (NSScrollView *)find(kv2, @"npDrawerScroll");
+    NSClipView *clip2 = scroll2.contentView;
+    NSView *doc2 = scroll2.documentView;
+    NSView *hdr2 = find(kv2, @"npdhead");
+    NSView *sec2 = find(kv2, @"npDrawerSections");
+    NSView *firstShort = sec2.subviews.firstObject;
+    const CGFloat shortDocH = doc2 ? doc2.frame.size.height : 0.0;
+    printf("A5(short): scroll=%s clip=%s bounds=%s doc=%s secHost=%s firstCard=%s\n",
+           NSStringFromRect(scroll2.frame).UTF8String,
+           NSStringFromRect(clip2.frame).UTF8String,
+           NSStringFromRect(clip2.bounds).UTF8String,
+           NSStringFromRect(doc2.frame).UTF8String,
+           NSStringFromRect(sec2.frame).UTF8String,
+           firstShort ? NSStringFromRect(firstShort.frame).UTF8String : "nil");
+
+    [kv2 renderMetaFixture:longFix];
+    [kv2 layoutSubtreeIfNeeded];
+    NSView *firstLong = sec2.subviews.firstObject;
+    NSView *lastLong = sec2.subviews.lastObject;
+    const CGFloat longDocH = doc2 ? doc2.frame.size.height : 0.0;
+    const CGFloat longClipH = clip2 ? clip2.bounds.size.height : 0.0;
+    const CGFloat longMaxY = MAX(0.0, longDocH - longClipH);
+    printf("A5(long): scroll=%s clip=%s bounds=%s doc=%s secHost=%s firstCard=%s lastCard=%s cards=%lu maxY=%.1f\n",
+           NSStringFromRect(scroll2.frame).UTF8String,
+           NSStringFromRect(clip2.frame).UTF8String,
+           NSStringFromRect(clip2.bounds).UTF8String,
+           NSStringFromRect(doc2.frame).UTF8String,
+           NSStringFromRect(sec2.frame).UTF8String,
+           firstLong ? NSStringFromRect(firstLong.frame).UTF8String : "nil",
+           lastLong ? NSStringFromRect(lastLong.frame).UTF8String : "nil",
+           (unsigned long)sec2.subviews.count, longMaxY);
+
+    ck(sec2.subviews.count >= 4 && longDocH > shortDocH + 80.0 && longDocH > longClipH + 80.0
+       && longDocH >= NSMaxY(sec2.frame) + 10.0,
+       "A5 长 fixture 含 >=4 卡且 docH > clipH、docH 覆盖全部卡片及底边距");
+    ck(clip2 && fabs(clip2.bounds.origin.y) < 0.5 && fabs(clip2.bounds.origin.x) < 0.5,
+       [[NSString stringWithFormat:@"A5 初始 clip.bounds.origin 在顶部 (0,0)（got %@）",
+         clip2 ? NSStringFromPoint(clip2.bounds.origin) : @"nil"] UTF8String]);
+    if (firstLong && hdr2) {
+        const NSRect firstInKV = [kv2 convertRect:firstLong.bounds fromView:firstLong];
+        const CGFloat gapFromHdr = NSMinY(firstInKV) - NSMaxY(hdr2.frame);
+        ck(gapFromHdr >= 8.0 && gapFromHdr <= 18.0,
+           [[NSString stringWithFormat:@"A5 首卡紧贴 header 下方约 12pt 无大空白（gap=%.1f）", gapFromHdr] UTF8String]);
+    } else {
+        ck(false, "A5 首卡与 header 存在");
+    }
+    if (scroll2.verticalScroller) {
+        const NSRect scInKV = [kv2 convertRect:scroll2.verticalScroller.bounds fromView:scroll2.verticalScroller];
+        ck(scroll2.hasVerticalScroller && !scroll2.autohidesScrollers
+           && scroll2.scrollerStyle == NSScrollerStyleLegacy
+           && !scroll2.verticalScroller.hidden && NSContainsRect(kv2.bounds, scInKV),
+           "A5 抽屉滚动条常显且位于抽屉内部");
+    } else {
+        ck(false, "A5 verticalScroller 存在");
+    }
+
+    // 边界上滚不崩溃且不外泄，随后向下/向上滚轮验证方向、外层零位移
+    if (firstLong) [firstLong scrollWheel:makeWheel(80.0)];
+    ck(outerScroll.wheelHits == 0 && NSEqualPoints(outerScroll.contentView.bounds.origin, outerOrigin0)
+       && fabs(clip2.bounds.origin.y) < 0.5,
+       "A5 顶部上滚边界不重入崩溃、外层 NSScrollView 不动");
+
+    if (firstLong) [firstLong scrollWheel:makeWheel(-140.0)];
+    const CGFloat yDown1 = clip2.bounds.origin.y;
+    if (hdr2) [hdr2 scrollWheel:makeWheel(-100.0)];
+    const CGFloat yDown2 = clip2.bounds.origin.y;
+    if (firstLong) [firstLong scrollWheel:makeWheel(120.0)];
+    const CGFloat yUp = clip2.bounds.origin.y;
+    ck(yDown1 > 20.0 && yDown2 > yDown1 + 10.0 && yUp < yDown2 - 10.0 && yUp >= 0.0,
+       [[NSString stringWithFormat:@"A5 滚轮方向正确（down1=%.1f down2=%.1f up=%.1f maxY=%.1f）",
+         yDown1, yDown2, yUp, longMaxY] UTF8String]);
+    ck(outerScroll.wheelHits == 0 && NSEqualPoints(outerScroll.contentView.bounds.origin, outerOrigin0),
+       [[NSString stringWithFormat:@"A5 抽屉内滚轮不带动外层 NSScrollView（hits=%ld outerOrigin=%@）",
+         (long)outerScroll.wheelHits, NSStringFromPoint(outerScroll.contentView.bounds.origin)] UTF8String]);
+
+    // 滚到最底 maxY：最后一张卡完整落在 clip 可见区内
+    [clip2 scrollToPoint:NSMakePoint(0.0, longMaxY)];
+    [scroll2 reflectScrolledClipView:clip2];
+    if (lastLong && doc2) {
+        const NSRect lastInDoc = [doc2 convertRect:lastLong.bounds fromView:lastLong];
+        const NSRect visClip = clip2.bounds;
+        const BOOL lastInClip = (NSMinY(lastInDoc) >= NSMinY(visClip) - 0.5)
+                             && (NSMaxY(lastInDoc) <= NSMaxY(visClip) + 0.5);
+        printf("A5(bottom): clip.bounds=%s lastInDoc=%s visible=%d\n",
+               NSStringFromRect(visClip).UTF8String, NSStringFromRect(lastInDoc).UTF8String, lastInClip);
+        ck(lastInClip, "A5 滚到 maxY 处最后一张卡完整位于 clip 可见范围内");
+    } else {
+        ck(false, "A5 最后一张卡存在");
+    }
+
+    // 切短内容再切回长内容：重置回顶部而不是停在底部
+    [kv2 renderMetaFixture:shortFix];
+    [kv2 layoutSubtreeIfNeeded];
+    ck(fabs(clip2.bounds.origin.y) < 0.5, "A5 新内容装载复位到顶部而非继承底部偏移");
+
+    [kvWin orderOut:nil];
+    static NSWindow *sDrawerScrollWindow; sDrawerScrollWindow = kvWin; (void)sDrawerScrollWindow;
+   }
+
+   // ---- A6: 右侧栏「详细」溢出滚动方向/底卡可达性 + 抽屉宿主/遮罩阻断外泄 ----
+   {
+    NSEvent *(^makeWheelA6)(CGFloat) = ^NSEvent *(CGFloat dy) {
+        CGEventRef cg = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 1, (int32_t)llround(dy));
+        NSEvent *ev = cg ? [NSEvent eventWithCGEvent:cg] : nil;
+        if (cg) CFRelease(cg);
+        return ev;
+    };
+
+    // Part 1: np 在 A1b 详细档下于 900x600 验证侧栏 npChipWrap 溢出滚动方向与底部卡片可见
+    [win setContentSize:NSMakeSize(900.0, 600.0)];
+    NSSegmentedControl *segA6 = (NSSegmentedControl *)[np valueForKey:@"railDensity"];
+    segA6.selectedSegment = 1;
+    [np onRailDensity:segA6];
+    [win.contentView layoutSubtreeIfNeeded];
+    NSView *wrapA6 = find(nv, @"npChipWrap");
+    NSArray<NSView *> *cardsA6 = (NSArray<NSView *> *)[np valueForKey:@"railCards"];
+    NSView *firstRail = nil, *lastRail = nil;
+    for (NSView *c in cardsA6) {
+        if (!c.hidden) {
+            if (!firstRail) firstRail = c;
+            lastRail = c;
+        }
+    }
+    const CGFloat wrapH6 = wrapA6 ? wrapA6.bounds.size.height : 0.0;
+    const CGFloat railContentH6 = wrapA6 ? [[wrapA6 valueForKey:@"contentHeight"] doubleValue] : 0.0;
+    printf("A6(rail detail 900x600): wrapH=%.1f contentH=%.1f c0=%s cLast=%s\n",
+           wrapH6, railContentH6,
+           firstRail ? NSStringFromRect(firstRail.frame).UTF8String : "nil",
+           lastRail ? NSStringFromRect(lastRail.frame).UTF8String : "nil");
+    ck(wrapA6 && firstRail && lastRail && railContentH6 > wrapH6 + 40.0,
+       "A6 详细档侧栏卡片总高度超过视口形成可滚动溢出");
+    if (wrapA6 && firstRail && lastRail) {
+        ck(fabs(NSMaxY(firstRail.frame) - wrapH6) < 1.0,
+           [[NSString stringWithFormat:@"A6 初始首卡顶部贴紧侧栏视口顶无大空白（NSMaxY=%.1f wrapH=%.1f）",
+             NSMaxY(firstRail.frame), wrapH6] UTF8String]);
+        const CGFloat c0y0 = firstRail.frame.origin.y;
+        const CGFloat lastY0 = NSMinY(lastRail.frame);
+        [firstRail scrollWheel:makeWheelA6(-120.0)];
+        [wrapA6 stopMomentum];
+        const CGFloat offDown = [[wrapA6 valueForKey:@"contentOffset"] doubleValue];
+        const CGFloat c0y1 = firstRail.frame.origin.y;
+        const CGFloat lastY1 = NSMinY(lastRail.frame);
+        ck(offDown > 50.0 && c0y1 > c0y0 + 50.0 && lastY1 > lastY0 + 50.0,
+           [[NSString stringWithFormat:@"A6 详细档向下滚轮卡片整体上移露出下方（off=%.1f dc0=%.1f dLast=%.1f）",
+             offDown, c0y1 - c0y0, lastY1 - lastY0] UTF8String]);
+        const CGFloat maxRailOff = MAX(0.0, railContentH6 - wrapH6);
+        [wrapA6 setValue:@(maxRailOff) forKey:@"contentOffset"];
+        const BOOL bottomCardInView = (NSMinY(lastRail.frame) >= -0.5) && (NSMinY(lastRail.frame) < wrapH6);
+        ck(bottomCardInView,
+           [[NSString stringWithFormat:@"A6 详细档滚到底后末卡底部进入可见区间 [0,%.0f]（frame=%@）",
+             wrapH6, NSStringFromRect(lastRail.frame)] UTF8String]);
+        segA6.selectedSegment = 0;
+        [np onRailDensity:segA6];
+        ck(fabs([[wrapA6 valueForKey:@"contentOffset"] doubleValue]) < 0.5,
+           "A6 切换简略/详细档位后侧栏滚动复位到顶部");
+    }
+
+    // Part 2: npHostVC 挂在外层 RLPTestOuterScrollView 内，验证 npDrawer / npDrawerBg 滚轮隔离
+    RLPNowPlayingViewController *npHost = [RLPNowPlayingViewController new];
+    npHost.view.frame = NSMakeRect(0, 0, 1180, 760);
+    [npHost setValue:@NO forKeyPath:@"railPanel.hidden"];
+    [npHost setValue:@"/offline/a6-host.flac" forKey:@"currentPath"];
+    [npHost setValue:metaFixture forKey:@"trackMetadata"];
+    [npHost setValue:[[np valueForKey:@"railStates"] mutableCopy] forKey:@"railStates"];
+    [npHost setValue:[[np valueForKey:@"railTargets"] mutableCopy] forKey:@"railTargets"];
+    [npHost renderRailMetadata];
+    [npHost layoutWebPlayback];
+
+    NSWindow *hostWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 760)
+                                                    styleMask:NSWindowStyleMaskBorderless
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:NO];
+    RLPTestOuterScrollView *pageOuter = [[RLPTestOuterScrollView alloc] initWithFrame:NSMakeRect(0, 0, 1180, 760)];
+    pageOuter.hasVerticalScroller = YES;
+    RLPTestFlippedDocView *pageDoc = [[RLPTestFlippedDocView alloc] initWithFrame:NSMakeRect(0, 0, 1180, 1400)];
+    pageOuter.documentView = pageDoc;
+    hostWin.contentView = pageOuter;
+    [pageDoc addSubview:npHost.view];
+    [pageOuter.contentView scrollToPoint:NSZeroPoint];
+    [pageOuter reflectScrolledClipView:pageOuter.contentView];
+    [hostWin.contentView layoutSubtreeIfNeeded];
+    const NSPoint pageOrigin0 = pageOuter.contentView.bounds.origin;
+
+    NSArray<NSView *> *chipsH = (NSArray<NSView *> *)[npHost valueForKey:@"railCards"];
+    if (chipsH.count > 0) [(id)npHost performSelector:@selector(onRailCard:) withObject:chipsH[0]];
+    else [npHost openDataDrawer];
+    [hostWin.contentView layoutSubtreeIfNeeded];
+
+    NSView *drHView = find(npHost.view, @"npDrawer");
+    NSView *bgHView = find(npHost.view, @"npDrawerBg");
+    NSScrollView *drHScroll = (NSScrollView *)find(npHost.view, @"npDrawerScroll");
+    NSView *wrapHView = find(npHost.view, @"npChipWrap");
+    ck(drHView && !drHView.hidden && drHScroll && fabs(drHScroll.contentView.bounds.origin.y) < 0.5,
+       "A6 宿主首次打开抽屉滚动停在顶部");
+    [drHView scrollWheel:makeWheelA6(-140.0)];
+    const CGFloat drAfterY = drHScroll ? drHScroll.contentView.bounds.origin.y : 0.0;
+    [bgHView scrollWheel:makeWheelA6(-120.0)];
+    ck(drAfterY > 20.0
+       && fabs([[wrapHView valueForKey:@"contentOffset"] doubleValue]) < 0.01
+       && pageOuter.wheelHits == 0
+       && NSEqualPoints(pageOuter.contentView.bounds.origin, pageOrigin0),
+       [[NSString stringWithFormat:@"A6 抽屉及遮罩滚轮仅滚动抽屉(y=%.1f)，不动侧栏(off=%.1f)与外层页面(hits=%ld)",
+         drAfterY, [[wrapHView valueForKey:@"contentOffset"] doubleValue], (long)pageOuter.wheelHits] UTF8String]);
+    if (drHScroll && drHScroll.verticalScroller) {
+        const NSRect vsInDrawer = [drHView convertRect:drHScroll.verticalScroller.bounds fromView:drHScroll.verticalScroller];
+        ck(!drHScroll.verticalScroller.hidden && NSContainsRect(drHView.bounds, vsInDrawer),
+           "A6 npDrawer 滚动条常显且不超出抽屉边界");
+    }
+    [npHost closeDataDrawer];
+    if (chipsH.count > 0) [(id)npHost performSelector:@selector(onRailCard:) withObject:chipsH[0]];
+    else [npHost openDataDrawer];
+    [hostWin.contentView layoutSubtreeIfNeeded];
+    ck(drHScroll && fabs(drHScroll.contentView.bounds.origin.y) < 0.5,
+       "A6 关闭再重开抽屉后滚动重置回顶部（不留上次滚动偏移）");
+
+    [npHost closeDataDrawer];
+    [hostWin orderOut:nil];
+    static NSWindow *sHostScrollWindow; sHostScrollWindow = hostWin; (void)sHostScrollWindow;
    }
   }
 

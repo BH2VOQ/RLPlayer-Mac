@@ -93,6 +93,7 @@ static NSDictionary * _Nullable RLPNPMatchingRawJSON(RLPPlaybackStatus * _Nullab
 - (void)renderMetaFixture:(NSDictionary *)fixture;
 - (void)loadDrawerContext:(NSDictionary *)context;
 - (void)updateDrawerContext:(NSDictionary *)context;
+- (void)scrollToTop;
 - (void)setCloseHandler:(void (^)(void))handler;
 - (void)setSelectKindHandler:(void (^)(NSString *kind))handler;
 - (void)setRefreshKindHandler:(void (^)(NSString *kind))handler;
@@ -1871,6 +1872,24 @@ static const CGFloat kRailDetailLineHeight = 1.35;
     (void)event;
     if (self.onClick) self.onClick();
 }
+- (void)scrollWheel:(NSEvent *)event {
+    // 遮罩可见期间吞掉滚轮，避免穿透滚到下方的 npRail / lyricScroll / 外层页面
+    (void)event;
+}
+@end
+
+/// `#npDrawer` 容器视图：拦截一切落在抽屉边距/圆角/内部的滚轮，只交由内部 RLPKnowledgeView 滚动。
+@interface RLPDrawerHostView : NSView
+@end
+@implementation RLPDrawerHostView
+- (void)scrollWheel:(NSEvent *)event {
+    for (NSView *sub in self.subviews) {
+        if ([sub isKindOfClass:[RLPKnowledgeView class]]) {
+            [sub scrollWheel:event];
+            return;
+        }
+    }
+}
 @end
 
 #pragma mark - `.npchipwrap` 自绘滚动容器（不新增 NSScrollView）
@@ -1904,7 +1923,10 @@ static CGFloat RLPRailMomentumStep(CGFloat velocity, CGFloat *outVelocity) {
 @implementation RLPRailWrapView
 - (BOOL)isFlipped { return NO; }
 - (void)scrollWheel:(NSEvent *)event {
-    const CGFloat dy = event.scrollingDeltaY;
+    CGFloat dy = event.scrollingDeltaY;
+    if (!event.hasPreciseScrollingDeltas && fabs(dy) > 0.001) {
+        dy *= 12.0;   // 离散鼠标滚轮（按行计数）转成点位，避免过慢
+    }
     // 触摸板/系统惯性阶段由 AppKit 继续发 wheel 事件：按普通位移处理，不叠加自绘惯性。
     if (event.momentumPhase != NSEventPhaseNone) {
         [self stopMomentum];
@@ -2701,7 +2723,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     __weak __typeof__(self) wsDrawer=self;
     self.dataBackdrop.onClick=^{ __typeof__(self) s=wsDrawer; if(s)[s closeDataDrawer]; };
     [self.webCanvas addSubview:self.dataBackdrop];
-    self.dataDrawer=[[NSView alloc] initWithFrame:NSZeroRect];
+    self.dataDrawer=[[RLPDrawerHostView alloc] initWithFrame:NSZeroRect];
     self.dataDrawer.identifier=@"npDrawer";
     self.dataDrawer.wantsLayer=YES;
     self.dataDrawer.layer.cornerRadius=18;
@@ -3159,6 +3181,13 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
                                              MAX(0.0, wrapTop - wrapBottom));
         self.railChipWrap.hidden = (self.railEmptyLabel && !self.railEmptyLabel.hidden);
         [self railLayoutChips];
+        if ([self.railChipWrap isKindOfClass:[RLPRailWrapView class]]) {
+            RLPRailWrapView *rw = (RLPRailWrapView *)self.railChipWrap;
+            const CGFloat maxOff = MAX(0.0, rw.contentHeight - rw.bounds.size.height);
+            if (rw.contentOffset > maxOff + 0.5) {
+                rw.contentOffset = maxOff;
+            }
+        }
         (void)ry;
     }
     if (self.railHintBtn && !self.railHintBtn.hidden) {
@@ -3186,6 +3215,9 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 /// `box-shadow:0 28px 80px rgba(0,0,0,.42)`；`#npDrawerBg` 是 rgba(0,0,0,.30) 遮罩，点遮罩关闭。
 - (void)openDataDrawer {
     [self layoutWebPlayback];            // 先按当前页面尺寸算出抽屉 frame
+    if ([self.knowledge respondsToSelector:@selector(scrollToTop)]) {
+        [self.knowledge scrollToTop];
+    }
     self.dataDrawerOpen=YES;
     self.dataBackdrop.hidden=NO;
     self.dataDrawer.hidden=NO;
@@ -3235,7 +3267,9 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
         ++shown;
     }
     rw.contentHeight = contentH;
-    CGFloat top = H - rw.contentOffset;
+    // 非翻转坐标（y=0 在底、y=H 在顶）：向下滚动增大 contentOffset，卡片必须从 H + offset
+    // 起排以向上移动露出下方卡片；先前 H - offset 让所有卡片和滚动条一起向下滑并留出顶部大空白。
+    CGFloat top = H + rw.contentOffset;
     NSUInteger laid = 0;
     for (RLPRailChipView *c in cards) {
         if (c.hidden) { c.frame = NSZeroRect; continue; }
@@ -3847,6 +3881,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         // web localStorage('rta-np-raildetail') 的等价持久化；恢复在 init。
         [[NSUserDefaults standardUserDefaults] setBool:detail forKey:@"RLPNPRailDetail"];
         for (RLPRailChipView *c in self.railCards) c.detailMode = detail;
+        if ([self.railChipWrap isKindOfClass:[RLPRailWrapView class]]) {
+            RLPRailWrapView *rw = (RLPRailWrapView *)self.railChipWrap;
+            [rw stopMomentum];
+            rw.contentOffset = 0.0;
+        }
     }
     // 纯展示档位：只重算预览 + 重排，**绝不重建 railStates / 重发 summary**
     // （web npRailDetailSet：只把 tabSig 作废，NP_DATA.cache 引用都不动）。
@@ -3873,6 +3912,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self.railStates removeAllObjects];
     [self.railTargets removeAllObjects];
     [self.railSummaryInflight removeAllObjects];
+    if ([self.railChipWrap isKindOfClass:[RLPRailWrapView class]]) {
+        RLPRailWrapView *rw = (RLPRailWrapView *)self.railChipWrap;
+        [rw stopMomentum];
+        rw.contentOffset = 0.0;
+    }
 }
 
 /// web npDataCan 的**取数闸门**：meta.summaryEnabled 且（可用/已缓存/可离线缓存/有 key）。
@@ -4568,7 +4612,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self.knowledge loadWorkName:name composer:composer];
         [self.knowledgePopover close];
         if (!self.dataDrawerOpen) [self openDataDrawer];
-        else [self syncOpenDrawerIfNeeded];
+        else {
+            [self syncOpenDrawerIfNeeded];
+            if ([self.knowledge respondsToSelector:@selector(scrollToTop)]) [self.knowledge scrollToTop];
+        }
         return;
     }
     if (!name.length) {
@@ -4613,6 +4660,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         [self openDataDrawer];
     } else {
         [self syncOpenDrawerIfNeeded];
+        if ([self.knowledge respondsToSelector:@selector(scrollToTop)]) {
+            [self.knowledge scrollToTop];
+        }
     }
 }
 
