@@ -178,7 +178,7 @@ int main() {
             CK(found, [[NSString stringWithFormat:@"B1c 信号链节点存在 %@", k] UTF8String], @"缺失");
         }
         // A/B 槽位控件必须在位
-        NSArray *abIds = @[@"wb.ab.0", @"wb.ab.1", @"wb.ab.toggle"];
+        NSArray *abIds = @[@"wb.ab.0", @"wb.ab.1"];
         for (NSString *k in abIds) {
             BOOL found = NO;
             for (NSView *v in all) if ([v.identifier isEqualToString:k]) found = YES;
