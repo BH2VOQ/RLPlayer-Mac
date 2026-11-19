@@ -1640,6 +1640,18 @@ int main(){@autoreleasepool{
     ck(dr && !dr.hidden && ratio > 0.60 && secTitles.count >= 4 && secCards.count >= 2 && docH > clipH,
        [[NSString stringWithFormat:@"A2(%.0fx%.0f) 抽屉内容占比=%.0f%% >60%% 且含 %lu 个分区可滚动",
          sz.width, sz.height, ratio * 100.0, (unsigned long)secTitles.count] UTF8String]);
+    // A2-scroll: 内容必须真的可滚动（旧码 docH>clipH 也可能因为 scroll 未接管 wheel 而失效）
+    if (drScroll && docH > clipH + 1.0) {
+        const CGFloat maxY = docH - clipH;
+        [drScroll.contentView scrollToPoint:NSMakePoint(0, maxY)];
+        [drScroll reflectScrolledClipView:drScroll.contentView];
+        const CGFloat bottomY = drScroll.contentView.bounds.origin.y;
+        [drScroll.contentView scrollToPoint:NSMakePoint(0, 0)];
+        [drScroll reflectScrolledClipView:drScroll.contentView];
+        ck(bottomY > 0.5 && bottomY <= maxY + 1.0,
+           [[NSString stringWithFormat:@"A2(%.0fx%.0f) 抽屉可从顶部滚到底部（origin=%.1f/%.1f）",
+             sz.width, sz.height, bottomY, maxY] UTF8String]);
+    }
 
     const NSRect drR = dr ? [nv convertRect:dr.bounds fromView:dr] : NSZeroRect;
     const NSRect ctlR = ctl ? [nv convertRect:ctl.bounds fromView:ctl] : NSZeroRect;

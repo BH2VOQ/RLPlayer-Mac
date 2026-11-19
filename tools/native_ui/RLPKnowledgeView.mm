@@ -251,6 +251,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
 @property (nonatomic, assign) BOOL isLoadingSummary;
 @property (nonatomic, copy) NSString *plainExportText;
 @property (nonatomic, assign) CGFloat docTotalHeight;
+@property (nonatomic, assign) BOOL resetDrawerScrollToTop;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *renderedSections;
 @property (nonatomic, assign) BOOL isDrawerAttached;
 
@@ -346,7 +347,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
     self.bodyScroll.identifier = @"npDrawerScroll";
     self.bodyScroll.hasVerticalScroller = YES;
     self.bodyScroll.hasHorizontalScroller = NO;
-    self.bodyScroll.autohidesScrollers = YES;
+    self.bodyScroll.autohidesScrollers = NO;
     self.bodyScroll.drawsBackground = NO;
     self.bodyScroll.borderType = NSNoBorder;
     [self addSubview:self.bodyScroll];
@@ -454,6 +455,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
 
 - (void)renderMetaFixture:(NSDictionary *)fixture {
     [self cancelLoading];
+    self.resetDrawerScrollToTop = YES;
     self.workMode = NO;
     self.drawerContext = nil;
     self.summaryPayload = nil;
@@ -487,6 +489,7 @@ static CGFloat RLPKVMeasureTextHeight(NSString *text, NSFont *font, CGFloat widt
 - (void)loadDrawerContext:(NSDictionary *)context {
     self.drawerContext = [context isKindOfClass:[NSDictionary class]] ? [context copy] : nil;
     self.isDrawerAttached = YES;
+    self.resetDrawerScrollToTop = YES;   // 新内容从顶部开始，避免沿用上一曲的底部偏移
     self.fixturePayload = nil;
     if (context) {
         NSString *ak = RLPKVStr(context[@"activeKind"]);
@@ -1661,6 +1664,19 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
     [self relayoutAll];
 }
 
+- (void)scrollWheel:(NSEvent *)event {
+    // 抽屉的空白区域也属于知识面板；滚轮落在 scroll 视口时显式转交 NSScrollView，
+    // 避免 NSScrollView 因父视图/遮罩命中测试拿不到 wheel 而表现为“滚动失效”。
+    if (self.bodyScroll && !self.bodyScroll.hidden) {
+        NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+        if (NSPointInRect(p, self.bodyScroll.frame)) {
+            [self.bodyScroll scrollWheel:event];
+            return;
+        }
+    }
+    [super scrollWheel:event];
+}
+
 - (void)relayoutAll {
     const CGFloat W = self.bounds.size.width;
     const CGFloat H = self.bounds.size.height;
@@ -1875,7 +1891,22 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
     }
 
     self.docTotalHeight = dy;
-    self.docView.frame = NSMakeRect(0, 0, docW, MAX(scrollH, dy + 10.0));
+    const CGFloat docH = MAX(scrollH, dy + 10.0);
+    self.docView.frame = NSMakeRect(0, 0, docW, docH);
+    NSClipView *clip = self.bodyScroll.contentView;
+    const CGFloat maxY = MAX(0.0, docH - clip.bounds.size.height);
+    NSPoint origin = clip.bounds.origin;
+    if (self.resetDrawerScrollToTop) {
+        origin.y = 0.0;
+        self.resetDrawerScrollToTop = NO;
+    } else if (origin.y > maxY) {
+        origin.y = maxY;
+    }
+    if (origin.y < 0.0) origin.y = 0.0;
+    if (fabs(origin.y - clip.bounds.origin.y) > 0.5) {
+        [clip scrollToPoint:origin];
+        [self.bodyScroll reflectScrolledClipView:clip];
+    }
 }
 
 #pragma mark - 生命周期与主题语言
