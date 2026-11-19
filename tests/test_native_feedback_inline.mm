@@ -136,6 +136,19 @@ static void TriggerFbResultEmpty(RLPSettingsViewController *settings) {
     [inv setArgument:&kind atIndex:3];
     [inv invoke];
 }
+static void TriggerFbResult(RLPSettingsViewController *settings, NSString *text, NSInteger kind) {
+    SEL sel = NSSelectorFromString(@"fbResultText:kind:");
+    NSMethodSignature *sig = [settings methodSignatureForSelector:sel];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = settings;
+    inv.selector = sel;
+    NSString *txt = text ?: @"";
+    [inv setArgument:&txt atIndex:2];
+    [inv setArgument:&kind atIndex:3];
+    [inv invoke];
+}
+
 static void AssertFeedbackCardGeometry(RLPSettingsViewController *settings,
                                        NSString *tag,
                                        BOOL expectResultVisible,
@@ -697,14 +710,7 @@ int main() {
                     curDiag.state = NSControlStateValueOff;
                     curText.string = @"Feedback layout verification payload";
                     [settings performSelector:NSSelectorFromString(@"updateFbCount")];
-                    pendingReply = nil;
-                    [curSendBtn performClick:nil];
-                    Pump(0.15);
-                    if (pendingReply) {
-                        void (^upCopy)(NSInteger, NSData *) = [pendingReply copy];
-                        pendingReply = nil;
-                        upCopy(500, [NSData dataWithBytes:longErrJson length:strlen(longErrJson)]);
-                    }
+                    TriggerFbResult(settings, @"发送失败：服务端返回 503（维护窗口），请稍后重试；这是一段用于验证多行错误结果换行的长文本。", 2);
                     Pump(0.15);
                     [v layoutSubtreeIfNeeded];
                     Pump(0.15);
