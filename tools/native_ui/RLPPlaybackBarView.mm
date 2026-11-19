@@ -431,24 +431,28 @@ static NSString *RLPBarSeekErrorText(NSDictionary *json) {
 - (void)setup {
     RLPTheme *t = [RLPTheme current];
     self.wantsLayer = YES;
-    self.layer.backgroundColor = t.barBg.CGColor;
+    self.layer.cornerRadius = 16;
+    self.layer.borderWidth = 1;
+    self.layer.borderColor = t.line.CGColor;
+    self.layer.masksToBounds = NO;
+    // 有玻璃层时底色仅作极淡 tint（light <= 0.35），避免在未显式触发 applyTheme 前呈实心白条。
+    self.layer.backgroundColor = [t.barBg colorWithAlphaComponent:(t.isLight ? 0.25 : 0.34)].CGColor;
 
-    // ---- 磨砂玻璃层（第14项：Apple Music 式悬浮胶囊条）----
+    // ---- 磨砂玻璃层（Apple Music 式半透明悬浮胶囊条）----
     //
-    // 材质选型：`.hudWindow`。理由是参考图（用户给的 Apple Music 截图）里，条内的模糊是
-    // **强模糊 + 轻微提亮**，底下封面被糊成一片色晕而不是可辨认的图；`.sidebar` 偏冷、
-    // `.underWindowBackground` 偏透且几乎不提亮，两者都与参考图观感不符。
-    // blendingMode 用 `.withinWindow`：内容就在同一窗口里（专辑网格/页面），
-    // 用 `.behindWindow` 会把桌面也透进来，与参考图不符。
-    // state 用 `.active`：跟随窗口激活态自动切换会被动变灰，参考图里失焦也不发死灰。
+    // 材质选型：`.underWindowBackground`。`.hudWindow` 在浅色主题下偏实心白，
+    // 会遮断后方页面内容；`.underWindowBackground` + `.withinWindow` 保留通透磨砂，
+    // 让页面网格/列表从播放条后方柔和透出，同时配合轻薄 tint 保证深浅双主题文字清晰可读。
+    // state 用 `.active`：失焦时仍保持一致材质，不发死灰。
     //
     // 关键：这一层必须**在最底下**（`positioned:NSWindowBelow relativeTo:nil`），
-    // 否则它会盖住文字与按钮。
+    // 否则它会盖住封面、文字与按钮。
     NSVisualEffectView *glass = [[NSVisualEffectView alloc] initWithFrame:self.bounds];
     glass.identifier = @"pb.glass";
-    glass.material = NSVisualEffectMaterialHUDWindow;
+    glass.material = NSVisualEffectMaterialUnderWindowBackground;
     glass.blendingMode = NSVisualEffectBlendingModeWithinWindow;
     glass.state = NSVisualEffectStateActive;
+    glass.appearance = [NSAppearance appearanceNamed:(t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua)];
     glass.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     // 圆角与播放条一致：NSVisualEffectView 自己按 layer 圆角裁剪
     glass.wantsLayer = YES;
@@ -1206,12 +1210,23 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
 
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
-    // 有玻璃层时，底下的纯色改为**极淡的蒙版**（保证可读性，见文件末尾说明）；
+    // 有玻璃层时，底下的纯色改为极淡的半透明蒙版（light 0.25 <= 0.35 / dark 0.34），
+    // 既让后面滚动的内容透出磨砂质感，又维持深浅双主题的前景可读性；
     // 没有玻璃层（旧路径/测试构造）时保持原纯色，行为不退化。
     self.layer.backgroundColor = (self.glassEffect
-        ? [t.barBg colorWithAlphaComponent:t.isLight ? 0.35 : 0.30]
+        ? [t.barBg colorWithAlphaComponent:(t.isLight ? 0.25 : 0.34)]
         : t.barBg).CGColor;
-    if (self.glassEffect) self.glassEffect.layer.cornerRadius = self.layer.cornerRadius;
+    if (self.glassEffect) {
+        if (self.subviews.firstObject != self.glassEffect) {
+            [self addSubview:self.glassEffect positioned:NSWindowBelow relativeTo:nil];
+        }
+        self.glassEffect.material = NSVisualEffectMaterialUnderWindowBackground;
+        self.glassEffect.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+        self.glassEffect.state = NSVisualEffectStateActive;
+        self.glassEffect.appearance = [NSAppearance appearanceNamed:(t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua)];
+        self.glassEffect.layer.cornerRadius = (self.layer.cornerRadius > 0.0) ? self.layer.cornerRadius : 16.0;
+        self.glassEffect.layer.masksToBounds = YES;
+    }
     self.titleLabel.textColor = t.text;
     self.subLabel.textColor = t.mut;
     self.posLabel.textColor = t.mut;
@@ -1232,6 +1247,7 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
     [self refreshLyricButton];
     self.chainBtn.contentTintColor = t.mut;
     self.volIconView.contentTintColor = t.mut;
+    self.volMuteBtn.contentTintColor = t.mut;
     [self refreshModeButtons];
     [self refreshBadges];
     self.volume.needsDisplay=YES; self.progress.needsDisplay=YES;

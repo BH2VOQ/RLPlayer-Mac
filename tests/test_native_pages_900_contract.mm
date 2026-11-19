@@ -21,6 +21,7 @@
 #import "RLPSettingsLayout.h"
 #import "RLPTheme.h"
 #import "RLPSupport.h"
+#import "RLPPlaybackBarView.h"
 
 #include <cmath>
 #include <cstdio>
@@ -379,17 +380,33 @@ static void VerifyStationControls(const char *stage, RLPMainWindowController *wc
 
 static void VerifyPageP1AndP2(const char *stage, RLPMainWindowController *wc, NSString *key, CGFloat expectedWinW, CGFloat expectedWinH) {
     NSViewController *pageVC = wc.currentContent;
+    NSView *mainHost = [wc valueForKey:@"mainHost"];
+    NSView *topbar = [wc valueForKey:@"topbar"];
     NSView *pageHost = [wc valueForKey:@"pageHost"];
+    RLPPlaybackBarView *bar = wc.playbackBar;
     const NSSize winSz = wc.window.frame.size;
 
     Ck(std::fabs(winSz.width - expectedWinW) <= 1.0 && std::fabs(winSz.height - expectedWinH) <= 1.0,
        [[NSString stringWithFormat:@"%s [%@] 窗口尺寸保持 %.0fx%.0f", stage, key, expectedWinW, expectedWinH] UTF8String],
        [NSString stringWithFormat:@"win=%.1fx%.1f", winSz.width, winSz.height]);
 
-    Ck(pageVC != nil && pageVC.view != nil && pageHost != nil,
-       [[NSString stringWithFormat:@"%s [%@] pageVC 与 pageHost 存在", stage, key] UTF8String],
+    Ck(pageVC != nil && pageVC.view != nil && pageHost != nil && mainHost != nil && topbar != nil && bar != nil,
+       [[NSString stringWithFormat:@"%s [%@] pageVC 与 pageHost/mainHost/bar 存在", stage, key] UTF8String],
        @"nil");
-    if (!pageVC || !pageVC.view || !pageHost) return;
+    if (!pageVC || !pageVC.view || !pageHost || !mainHost || !topbar || !bar) return;
+
+    const NSRect pageInMain = [pageHost convertRect:pageHost.bounds toView:mainHost];
+    const NSRect topInMain = [topbar convertRect:topbar.bounds toView:mainHost];
+    const NSRect barInMain = [bar convertRect:bar.bounds toView:mainHost];
+    const BOOL hostExtendedToBottom =
+        std::fabs(NSMinY(pageInMain) - NSMinY(mainHost.bounds)) <= 1.0 &&
+        std::fabs(NSMaxY(pageInMain) - NSMinY(topInMain)) <= 1.0 &&
+        NSIntersectsRect(pageInMain, barInMain);
+    Ck(hostExtendedToBottom,
+       [[NSString stringWithFormat:@"P1-ext %s [%@] pageHost 延伸至 mainHost 底部 (top=topbar.bottom)", stage, key] UTF8String],
+       [NSString stringWithFormat:@"page=%@ main=%@ top=%@ bar=%@",
+        NSStringFromRect(pageInMain), NSStringFromRect(mainHost.bounds),
+        NSStringFromRect(topInMain), NSStringFromRect(barInMain)]);
 
     const CGFloat hostW = pageHost.bounds.size.width;
     const CGFloat hostH = pageHost.bounds.size.height;
@@ -409,6 +426,9 @@ static void VerifyPageP1AndP2(const char *stage, RLPMainWindowController *wc, NS
     CollectScrollViews(pageVC.view, scrolls);
     CGFloat maxOverflow = 0.0;
     NSMutableArray<NSString *> *badScrolls = [NSMutableArray array];
+    NSMutableArray<NSString *> *badInsets = [NSMutableArray array];
+    const CGFloat barClearTop = NSMaxY(barInMain) + 14.0;
+    const BOOL checkInsetStrict = (stage != NULL && ![@(stage) hasPrefix:@"P4-pane"]);
     for (NSScrollView *sv in scrolls) {
         if (IsHiddenInHierarchy(sv, pageVC.view)) continue;
         if (!sv.contentView || !sv.documentView) continue;
@@ -420,15 +440,33 @@ static void VerifyPageP1AndP2(const char *stage, RLPMainWindowController *wc, NS
             [badScrolls addObject:[NSString stringWithFormat:@"%@(doc=%.1f clip=%.1f)",
                                    NSStringFromClass(sv.documentView.class), docW, clipW]];
         }
+        if (checkInsetStrict && sv.enclosingScrollView == nil &&
+            NSHeight(sv.bounds) >= 120.0 && !(sv.hasHorizontalScroller && !sv.hasVerticalScroller)) {
+            const NSRect svInHost = [sv convertRect:sv.bounds toView:pageHost];
+            const CGFloat svMinY = NSMinY(svInHost);
+            if (svMinY < barClearTop - 0.5) {
+                const CGFloat needBottom = barClearTop - svMinY;
+                if (sv.contentInsets.bottom < needBottom - 1.0) {
+                    [badInsets addObject:[NSString stringWithFormat:@"%@(minY=%.1f bottom=%.1f<%.1f)",
+                                          NSStringFromClass(sv.documentView.class),
+                                          svMinY, sv.contentInsets.bottom, needBottom]];
+                }
+            }
+        }
     }
-    std::printf("  [page %-12s %s] host=%.1f page=%.1f frameMaxX=%.1f scrolls=%lu maxDocOverflow=%.1f\n",
-                key.UTF8String, stage, hostW, pageW, NSMaxX(pf),
+    std::printf("  [page %-12s %s] host=%.1fx%.1f page=%.1f frameMaxX=%.1f scrolls=%lu maxDocOverflow=%.1f\n",
+                key.UTF8String, stage, hostW, hostH, pageW, NSMaxX(pf),
                 (unsigned long)scrolls.count, maxOverflow);
 
     if (scrolls.count > 0) {
         Ck(badScrolls.count == 0,
            [[NSString stringWithFormat:@"P2 %s [%@] NSScrollView doc.width <= clip.width +1", stage, key] UTF8String],
            [badScrolls componentsJoinedByString:@"; "]);
+        if (checkInsetStrict) {
+            Ck(badInsets.count == 0,
+               [[NSString stringWithFormat:@"P2-inset %s [%@] 顶层 NSScrollView 底部预留内边距避让悬浮条", stage, key] UTF8String],
+               [badInsets componentsJoinedByString:@"; "]);
+        }
     }
 }
 
@@ -630,6 +668,63 @@ int main() {
         [wc.window.contentView layoutSubtreeIfNeeded];
         VerifyPageP1AndP2("P5-reenter900", wc, @"albums", 900.0, 600.0);
         VerifyAlbumsP3("P5-reenter900", wc);
+
+        // ---- P6: 900x600 / 1180x760 × light / dark 悬浮播放条半透明磨砂与专辑滚过区契约 ----
+        for (NSDictionary *cfg in @[
+            @{ @"name": @"P6-light@900",  @"w": @900,  @"h": @600, @"theme": @"light" },
+            @{ @"name": @"P6-dark@900",   @"w": @900,  @"h": @600, @"theme": @"dark" },
+            @{ @"name": @"P6-light@1180", @"w": @1180, @"h": @760, @"theme": @"light" },
+            @{ @"name": @"P6-dark@1180",  @"w": @1180, @"h": @760, @"theme": @"dark" },
+        ]) {
+            [RLPTheme setThemeName:cfg[@"theme"]];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
+            ResizeWindow(wc, [cfg[@"w"] doubleValue], [cfg[@"h"] doubleValue]);
+            NSView *mainHost = [wc valueForKey:@"mainHost"];
+            NSView *pageHost = [wc valueForKey:@"pageHost"];
+            RLPPlaybackBarView *bar = wc.playbackBar;
+            NSVisualEffectView *glass = (NSVisualEffectView *)FindStationViewById(bar, @"pb.glass");
+            const NSRect pageInMain = [pageHost convertRect:pageHost.bounds toView:mainHost];
+            const NSRect barInMain = [bar convertRect:bar.bounds toView:mainHost];
+            const CGFloat bgAlpha = bar.layer.backgroundColor ? CGColorGetAlpha(bar.layer.backgroundColor) : 0.0;
+            const BOOL themeLight = [RLPTheme current].isLight;
+            RLPAlbumsViewController *albumsVC = [wc.currentContent isKindOfClass:[RLPAlbumsViewController class]]
+                ? (RLPAlbumsViewController *)wc.currentContent : nil;
+            NSCollectionView *col = albumsVC ? (NSCollectionView *)[albumsVC valueForKey:@"collection"] : nil;
+            NSScrollView *colScroll = col ? col.enclosingScrollView : nil;
+
+            const BOOL barOk =
+                [glass isKindOfClass:[NSVisualEffectView class]] &&
+                bar.subviews.firstObject == glass &&
+                glass.material != NSVisualEffectMaterialHUDWindow &&
+                (glass.material == NSVisualEffectMaterialUnderWindowBackground ||
+                 glass.material == NSVisualEffectMaterialSidebar) &&
+                std::fabs(NSMinY(barInMain) - 14.0) <= 1.0 &&
+                std::fabs(NSHeight(barInMain) - 66.0) <= 1.0 &&
+                std::fabs(NSMidX(barInMain) - NSMidX(mainHost.bounds)) <= 1.5 &&
+                NSMaxX(barInMain) <= NSMaxX(mainHost.bounds) + 0.5 &&
+                (themeLight ? (bgAlpha <= 0.35 + 1e-3 && bgAlpha < 0.6) : (bgAlpha < 0.6)) &&
+                std::fabs(NSMinY(pageInMain) - NSMinY(mainHost.bounds)) <= 1.0 &&
+                colScroll != nil && colScroll.contentInsets.bottom >= 93.0;
+
+            std::printf("  [%s] page=%s bar=%s mat=%ld alpha=%.2f albumBottomInset=%.1f\n",
+                        [cfg[@"name"] UTF8String],
+                        NSStringFromRect(pageInMain).UTF8String,
+                        NSStringFromRect(barInMain).UTF8String,
+                        [glass isKindOfClass:[NSVisualEffectView class]] ? (long)glass.material : -1L,
+                        bgAlpha,
+                        colScroll ? colScroll.contentInsets.bottom : -1.0);
+
+            Ck(barOk,
+               [[NSString stringWithFormat:@"%s 半透明玻璃播放条 + pageHost 延底 + 专辑滚动底部留白",
+                 [cfg[@"name"] UTF8String]] UTF8String],
+               [NSString stringWithFormat:@"page=%@ bar=%@ mat=%ld alpha=%.2f inset=%.1f",
+                NSStringFromRect(pageInMain), NSStringFromRect(barInMain),
+                [glass isKindOfClass:[NSVisualEffectView class]] ? (long)glass.material : -1L,
+                bgAlpha, colScroll ? colScroll.contentInsets.bottom : -1.0]);
+        }
+        [RLPTheme setThemeName:@"light"];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
+        Pump(0.1);
 
         [wc.window orderOut:nil];
         [wc stopAllActivity];
