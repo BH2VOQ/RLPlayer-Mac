@@ -8727,11 +8727,15 @@ struct DiagChannelCheck {
 };
 
 static rta::update::UpdateChannel diag_current_update_channel() {
-    std::string dir;
-    if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
-        if (*env) {
-            dir = env;
-            while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+    // update.conf 与 mac_update 一样位于 config_dir（不是 state dir）；
+    // state dir 只作为极端回退，避免诊断页报的通道与实际检查通道不一致。
+    std::string dir = rta::platform::config_dir_utf8();
+    if (dir.empty()) {
+        if (const char* env = std::getenv("RLPLAYER_STATE_DIR")) {
+            if (*env) {
+                dir = env;
+                while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+            }
         }
     }
     if (dir.empty()) dir = runtime_state_dir();
