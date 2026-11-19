@@ -18,6 +18,8 @@
 #include "dsp/resampler.h"
 #include <cstdio>
 #include <cstdint>
+#include <climits>
+#include <numeric>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -544,6 +546,306 @@ int main() {
             printf("  [抽头地板] poly-sinc-short-lp @44.1k->384k: T=%d, 20 kHz = %.4f dB\n", T, d20);
             check(T >= 211, "既有短预设在高 L 下启用抽头地板 (T >= 211)");
             check(d20 > -0.1, "既有短预设在 384k 下 20 kHz 不再塌陷 (> -0.1 dB)", std::to_string(d20) + " dB");
+        }
+    }
+
+    // =================================================================
+    // 10. 全滤波器 × 全升频倍率(1x/2x/4x/8x/16x)与设计参数抽头数审计
+    // =================================================================
+    printf("\n=== 10. 全滤波器与升频参数抽头数审计表（共 %zu 个预设）===\n", filter_presets().size());
+    {
+        auto effective_plan_T = [](const ResamplerPlan& pl) -> int {
+            if (pl.stageCount == 0) return 0;
+            if (pl.stageCount == 1) return pl.stages[0].T;
+            const int64_t t1 = pl.stages[0].T;
+            const int64_t t2 = pl.stages[1].T;
+            const int64_t f1 = std::max(1, pl.stages[0].L);
+            const int64_t eff = t1 + (t2 + f1 - 1) / f1;
+            return (eff > INT_MAX) ? INT_MAX : int(eff);
+        };
+
+        auto format_stage_cell = [&](const ResamplerPlan& pl, char* buf, size_t sz) {
+            if (pl.stageCount == 2) {
+                std::snprintf(buf, sz, "%d+%d(%llu)",
+                              pl.stages[0].T, pl.stages[1].T,
+                              (unsigned long long)pl.coefficientCount);
+            } else {
+                std::snprintf(buf, sz, "%d(%llu)",
+                              pl.stages[0].T,
+                              (unsigned long long)pl.coefficientCount);
+            }
+        };
+
+        printf("  %-26s %-3s %-3s %-2s %-7s %-11s %-9s %-14s %-14s %-18s %-18s %-18s %s\n",
+               "name", "pth", "ph", "2s", "cutoff", "qual(raw/ef)", "1x_taps",
+               "2x(T/tot)", "4x(T/tot)", "8x(T/tot)", "16x(T/tot)", "384k(T/tot)", "ui_vs_dsp");
+
+        bool all1xValid = true;
+        bool allPlansValid = true;
+        bool allTwoStageNonZero = true;
+        bool allDesignRelValid = true;
+        bool allLiveValid = true;
+        size_t uiMismatchCount = 0;
+        size_t tMaxClampedCount = 0;
+        size_t tapsPerInputCount = 0;
+        size_t twoStageCount = 0;
+
+        for (const auto& fp : filter_presets()) {
+            const double cutoff = 0.5 * (1.0 - fp.transition);
+            const double effAtten = std::max(fp.attenDb, preset_ceiling_db(fp.window));
+
+            // 1x prototype via make_filter + 1x passthrough via PolyphaseResampler
+            int t1x = 0;
+            auto h1x = make_filter(fp.name, fp.forNx, &t1x);
+            bool coeffsFinite = !h1x.empty() && t1x == fp.taps && t1x > 0 && (int)h1x.size() == fp.taps;
+            for (double v : h1x) {
+                if (!std::isfinite(v)) { coeffsFinite = false; break; }
+            }
+            if (!coeffsFinite) all1xValid = false;
+
+            ResamplerConfig c1x;
+            c1x.inRate = 44100; c1x.outRate = 44100; c1x.channels = 1;
+            apply_preset(c1x, fp);
+            const auto p1x = plan_resampler(c1x);
+            PolyphaseResampler r1x(c1x);
+            if (p1x.stageCount != 0 || p1x.coefficientCount != 0 || !r1x.passthrough() ||
+                r1x.tapsPerPhase() != 0 || r1x.coefficient_count() != 0) {
+                allPlansValid = false;
+            }
+
+            const uint32_t outRates[5] = { 88200u, 176400u, 352800u, 705600u, 384000u };
+            ResamplerPlan plans[5];
+            int effT[5] = {};
+            for (int ri = 0; ri < 5; ++ri) {
+                ResamplerConfig cfg;
+                cfg.inRate = 44100; cfg.outRate = outRates[ri]; cfg.channels = 1;
+                apply_preset(cfg, fp);
+                plans[ri] = plan_resampler(cfg);
+                const auto& pl = plans[ri];
+
+                uint64_t sumStage = 0;
+                for (size_t s = 0; s < pl.stageCount; ++s) {
+                    sumStage += pl.stages[s].coefficientCount;
+                    if (pl.stages[s].T < 4 || pl.stages[s].L < 2 ||
+                        pl.stages[s].coefficientCount != uint64_t(pl.stages[s].T) * uint64_t(pl.stages[s].L)) {
+                        allPlansValid = false;
+                    }
+                }
+                if (pl.stageCount == 0 || pl.coefficientCount == 0 ||
+                    pl.coefficientCount != sumStage ||
+                    pl.cachePayloadBytes != pl.coefficientCount * sizeof(double)) {
+                    allPlansValid = false;
+                }
+                effT[ri] = effective_plan_T(pl);
+                if (effT[ri] <= 0) allPlansValid = false;
+
+                // Old-red preservation for two-stage presets (ri=2,3,4 => 8x, 16x, 384k)
+                if (fp.twoStage && ri >= 2) {
+                    if (pl.stageCount != 2 || pl.stages[0].L != 4 || pl.stages[1].T < fp.stage2Taps) {
+                        allDesignRelValid = false;
+                    }
+                }
+
+                // Live PolyphaseResampler verification:
+                // - All 79 presets at 16x (705600)
+                // - All two-stage presets at all 5 rates
+                // - All Linear or <= 65535 presets at all 4 integer rates (2x/4x/8x/16x)
+                const bool runLive = (ri == 3) || fp.twoStage ||
+                    (ri < 4 && (fp.phase == PhaseKind::Linear || fp.taps <= 65535));
+                if (runLive) {
+                    PolyphaseResampler rs(cfg);
+                    if (rs.tapsPerPhase() <= 0 || rs.tapsPerPhase() != effT[ri] ||
+                        rs.coefficient_count() != pl.coefficientCount ||
+                        rs.coefficient_count() == 0 ||
+                        rs.tapsPerPhase() < (int)std::ceil(rs.tailInputSamples())) {
+                        allLiveValid = false;
+                    }
+                    if (rs.two_stage()) {
+                        if (rs.tapsPerPhase() <= 0 || rs.stage1_taps_per_phase() <= 0 ||
+                            rs.stage2_taps_per_phase() <= 0 ||
+                            rs.tapsPerPhase() != rs.stage1_taps_per_phase() +
+                                (rs.stage2_taps_per_phase() + rs.stage1_factor() - 1) / rs.stage1_factor()) {
+                            allTwoStageNonZero = false;
+                        }
+                    }
+                }
+            }
+
+            // Check 48k base integer upsampling (96k/192k/384k/768k) plan consistency
+            for (uint32_t out48 : { 96000u, 192000u, 384000u, 768000u }) {
+                ResamplerConfig c48;
+                c48.inRate = 48000; c48.outRate = out48; c48.channels = 1;
+                apply_preset(c48, fp);
+                const auto p48 = plan_resampler(c48);
+                if (p48.stageCount == 0 || p48.coefficientCount == 0 || effective_plan_T(p48) <= 0) {
+                    allPlansValid = false;
+                }
+            }
+
+            // Check design relationships across 2x -> 4x -> 8x -> 16x
+            if (fp.tapsPerInput > 0) {
+                ++tapsPerInputCount;
+                const int expT = fp.apodizing
+                    ? apod_quality_taps(fp.apodF1, fp.apodF2, fp.window == WindowKind::Gaussian, effAtten, fp.tapsPerInput)
+                    : fp.tapsPerInput;
+                for (int ri = 0; ri < 4; ++ri) {
+                    if (plans[ri].stages[0].T != expT) allDesignRelValid = false;
+                }
+                if (!fp.twoStage) {
+                    if (plans[1].coefficientCount != plans[0].coefficientCount * 2 ||
+                        plans[2].coefficientCount != plans[0].coefficientCount * 4 ||
+                        plans[3].coefficientCount != plans[0].coefficientCount * 8) {
+                        allDesignRelValid = false;
+                    }
+                }
+            } else if (!fp.twoStage && !fp.apodizing) {
+                for (int ri = 0; ri < 3; ++ri) {
+                    if (effT[ri] < effT[ri + 1]) allDesignRelValid = false;
+                }
+                if (fp.phase == PhaseKind::Linear) {
+                    const int tMin = std::max(4, int(21.13 / fp.transition + 0.5));
+                    const int tMax = std::max(tMin, int(2.0 * 21.13 / fp.transition + 0.5));
+                    for (int ri = 0; ri < 4; ++ri) {
+                        if (effT[ri] < tMin || effT[ri] > tMax) allDesignRelValid = false;
+                    }
+                    for (int ri = 0; ri < 3; ++ri) {
+                        if (plans[ri].coefficientCount > plans[ri + 1].coefficientCount) allDesignRelValid = false;
+                    }
+                }
+            }
+
+            // Classify UI nominal fp.taps vs DSP PolyphaseResampler discrepancy
+            std::string note = "ok";
+            if (fp.tapsPerInput > 0) {
+                note = "tapsPerInput(T=" + std::to_string(effT[0]) + ")";
+                ++uiMismatchCount;
+            } else if (fp.twoStage) {
+                ++twoStageCount;
+                note = "2s_cascade";
+                if (plans[0].coefficientCount != (uint64_t)fp.taps) ++uiMismatchCount;
+            } else if (fp.apodizing) {
+                note = "apod_quality(T=" + std::to_string(effT[0]) + ")";
+                ++uiMismatchCount;
+            } else if (fp.phase == PhaseKind::Linear) {
+                const int tMax = std::max(4, int(2.0 * 21.13 / fp.transition + 0.5));
+                if (fp.taps / 2 > tMax) {
+                    ++tMaxClampedCount;
+                    ++uiMismatchCount;
+                    note = "tMax_cap(" + std::to_string(tMax) + ")";
+                }
+            }
+
+            char c2x[32], c4x[32], c8x[32], c16x[32], c384[32], qbuf[24];
+            format_stage_cell(plans[0], c2x, sizeof(c2x));
+            format_stage_cell(plans[1], c4x, sizeof(c4x));
+            format_stage_cell(plans[2], c8x, sizeof(c8x));
+            format_stage_cell(plans[3], c16x, sizeof(c16x));
+            format_stage_cell(plans[4], c384, sizeof(c384));
+            std::snprintf(qbuf, sizeof(qbuf), "%.0f/%.0f", fp.attenDb, effAtten);
+            printf("  %-26s %-3s %-3s %-2s %-7.4f %-11s %-9d %-14s %-14s %-18s %-18s %-18s %s\n",
+                   fp.name, fp.forNx ? "Nx" : "1x", phase_name(fp.phase), fp.twoStage ? "2s" : "1s",
+                   cutoff, qbuf, t1x, c2x, c4x, c8x, c16x, c384, note.c_str());
+        }
+
+        printf("  统计: 预设=%zu, tapsPerInput=%zu, 2s=%zu, tMax截断=%zu, UI标称与Nx实际抽头差异=%zu\n",
+               filter_presets().size(), tapsPerInputCount, twoStageCount, tMaxClampedCount, uiMismatchCount);
+
+        check(all1xValid, "全79个预设 1x make_filter 抽头数有限且 > 0 (精确等于 fp.taps)");
+        check(allPlansValid, "全79个预设在 1x/2x/4x/8x/16x/384k 与 48k系 倍率下 plan_resampler 抽头有限且 > 0");
+        check(allTwoStageNonZero, "旧红修复：全部 11 个 *-2s 两段式预设在 8x/16x/384k 下 tapsPerPhase() > 0 且 >= ceil(tail)");
+        check(allDesignRelValid, "全部预设满足抽头设计关系 (tapsPerInput恒定 / Linear单调+tMax / 2s分段结构)");
+        check(allLiveValid, "实实例化 PolyphaseResampler 抽头数与 plan_resampler 完全一致且 > 0");
+
+        // 参数扫描 1: 升频质量(attenDb)对抽头数的影响
+        {
+            const double qs[] = { 90.0, 120.0, 180.0, 240.0, 280.0, 340.0 };
+            int prevApodT = 0, prevStage2T = 0;
+            bool qMonotonic = true;
+            for (double q : qs) {
+                const int ta = apod_quality_taps(18400.0 / 22050.0, 21800.0 / 22050.0, false, q, 0);
+                if (ta <= 0 || ta < prevApodT) qMonotonic = false;
+                prevApodT = ta;
+
+                ResamplerConfig ds;
+                ds.inRate = 192000; ds.outRate = 44100; ds.channels = 1;
+                ds.totalTaps = 32767; ds.transition = 0.04; ds.attenDb = q; ds.autoTaps = true;
+                const auto pds = plan_resampler(ds);
+                const int nominalT = solve_taps_per_phase(ds.window, ds.transition, false, 0.0, 0.0, ds.totalTaps, 0, 44100.0);
+                if (pds.stageCount == 0 || pds.stages[0].T <= nominalT ||
+                    pds.stages[0].config.attenDb < q) {
+                    qMonotonic = false;
+                }
+
+                ResamplerConfig r2s;
+                r2s.inRate = 44100; r2s.outRate = 384000; r2s.channels = 1;
+                r2s.totalTaps = 32767; r2s.transition = 0.04; r2s.attenDb = q; r2s.twoStage = true;
+                const auto pr2s = plan_resampler(r2s);
+                if (pr2s.stageCount != 2 || pr2s.stages[1].T <= 0 || pr2s.stages[1].T < prevStage2T) qMonotonic = false;
+                prevStage2T = pr2s.stages[1].T;
+            }
+            check(qMonotonic, "质量参数(attenDb=90..340) 对应 apod / 2s二段抽头单调非降且 autoTaps 降采样附加抗混叠余量 > 0");
+        }
+
+        // 参数扫描 2: cutoff / transition 对抽头数的影响
+        {
+            const double trs[] = { 0.25, 0.10, 0.04, 0.015 };
+            int prevAutoT = 0, prevFloorT = 0;
+            bool trMonotonic = true;
+            for (double tr : trs) {
+                ResamplerConfig ca;
+                ca.inRate = 44100; ca.outRate = 705600; ca.channels = 1;
+                ca.totalTaps = 4095; ca.transition = tr; ca.attenDb = 200.0; ca.autoTaps = true;
+                const auto pa = plan_resampler(ca);
+                if (pa.stageCount == 0 || pa.stages[0].T <= prevAutoT) trMonotonic = false;
+                prevAutoT = pa.stages[0].T;
+
+                ResamplerConfig cf = ca;
+                cf.autoTaps = false; cf.applyTapFloor = true;
+                const auto pf = plan_resampler(cf);
+                if (pf.stageCount == 0 || pf.stages[0].T <= prevFloorT) trMonotonic = false;
+                prevFloorT = pf.stages[0].T;
+            }
+            check(trMonotonic, "过渡带收窄(cutoff 0.375->0.4925) 使 autoTaps 与 tapFloor 抽头数严格单调递增");
+        }
+
+        // 参数扫描 3: phase (Linear / Minimum / Intermediate) 对抽头数的影响
+        {
+            const int tMaxExpected = int(2.0 * 21.13 / 0.04 + 0.5); // 1057
+            bool phaseValid = true;
+            for (PhaseKind ph : { PhaseKind::Linear, PhaseKind::Minimum, PhaseKind::Intermediate }) {
+                for (uint32_t outR : { 88200u, 176400u, 352800u, 705600u }) {
+                    ResamplerConfig cp;
+                    cp.inRate = 44100; cp.outRate = outR; cp.channels = 1;
+                    cp.totalTaps = 32767; cp.transition = 0.04; cp.attenDb = 180.0; cp.phase = ph;
+                    const auto pp = plan_resampler(cp);
+                    const int L = int(outR / 44100u);
+                    if (pp.stageCount != 1 || pp.stages[0].T <= 0 || pp.coefficientCount == 0) phaseValid = false;
+                    if (ph == PhaseKind::Linear && pp.stages[0].T != tMaxExpected) phaseValid = false;
+                    if (ph != PhaseKind::Linear && pp.stages[0].T != 32767 / L) phaseValid = false;
+                }
+            }
+            check(phaseValid, "相位参数(Linear/Minimum/Intermediate) 抽头规划全部 > 0 且符合 tMax/预算规则");
+        }
+
+        // 旧红回归 4: ResamplePurpose::Dsd + apod-20k 在 16x 下 Stage 2 必须清除 apodizing
+        {
+            const FilterPreset* ap = find_preset("apod-20k", false);
+            check(ap != nullptr, "apod-20k 预设存在");
+            if (ap) {
+                ResamplerConfig dc;
+                dc.inRate = 44100; dc.outRate = 705600; dc.channels = 1;
+                apply_preset(dc, *ap);
+                apply_resample_purpose(dc, ResamplePurpose::Dsd);
+                const auto dp = plan_resampler(dc);
+                PolyphaseResampler drs(dc);
+                check(dp.stageCount == 2 && !dp.stages[1].config.apodizing &&
+                      dp.stages[1].config.apodF1 == 0.0 && dp.stages[1].config.apodF2 == 0.0,
+                      "旧红修复：DSD 两段式 + apod 预设在 Stage 2 不继承输入域 apodizing");
+                check(drs.two_stage() && drs.tapsPerPhase() > 0 &&
+                      drs.tapsPerPhase() == effective_plan_T(dp) &&
+                      drs.coefficient_count() == dp.coefficientCount,
+                      "DSD 两段式 + apod 预设 tapsPerPhase() 与 coefficient_count() 一致且 > 0");
+            }
         }
     }
 

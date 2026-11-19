@@ -222,11 +222,11 @@ inline ResamplerPlan plan_resampler(const ResamplerConfig& requested) {
         b.inRate = uint32_t(mid);
         b.minTapsPerInput = cfg.stage2Taps;
         b.transition = .30;
+        b.apodizing = false;
+        b.apodF1 = b.apodF2 = 0.0;
         const int l2 = p.L / f;
         if (rational) {
             b.window = WindowKind::Kaiser;
-            b.apodizing = false;
-            b.apodF1 = b.apodF2 = 0.0;
             b.attenDb = std::max(286.0, cfg.attenDb + 6.0);
             const double width = .5 * b.transition / double(std::max(l2, p.M));
             const int prototype = kaiser_taps_for(b.attenDb, width);
@@ -242,6 +242,10 @@ inline ResamplerPlan plan_resampler(const ResamplerConfig& requested) {
         p.stages[0] = plan_resampler_stage(cfg);
         p.stageCount = 1;
     }
+    p.coefficientCount = 0;
+    for (size_t i = 0; i < p.stageCount; ++i)
+        p.coefficientCount += p.stages[i].coefficientCount;
+    p.cachePayloadBytes = p.coefficientCount * sizeof(double);
     return p;
 }
 
@@ -258,6 +262,11 @@ public:
         if (plan.stageCount == 2) {
             stage1_ = std::make_unique<PolyphaseResampler>(plan.stages[0].config);
             stage2_ = std::make_unique<PolyphaseResampler>(plan.stages[1].config);
+            const int64_t t1 = stage1_->tapsPerPhase();
+            const int64_t t2 = stage2_->tapsPerPhase();
+            const int64_t f1 = std::max(1, stage1_->upFactor());
+            const int64_t eff = t1 + (t2 + f1 - 1) / f1;
+            T_ = (eff > INT_MAX) ? INT_MAX : int(eff);
             tmp_.clear();
             tmpP_.assign((size_t)ch_, nullptr);
             return;
