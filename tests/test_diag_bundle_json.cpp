@@ -14,13 +14,27 @@
 //   ③ **坏输入优先**：非法 UTF-8、非法 manifest 这两条对抗用例是核心 ——
 //      它们的意义是「宁可拒传，也绝不产出坏 JSON」，后端页面按 UTF-8 解码。
 //
-// 不联网、不读写文件（append-only 的纯函数）、不开设备、不播放、不杀进程。
-#include "diag/bundle.h"
+// 不联网、不开设备、不播放、不杀进程。
+#define RLPLAYER_EMBEDDED_LIBRARY
+#include "../tools/rtaweb.cpp"
+
+namespace rta::platform {
+bool make_jpeg_thumb(const unsigned char*, size_t, int, int, std::vector<unsigned char>&) { return false; }
+}
+extern "C" {
+int rl_loopback_supported(void) { return 0; }
+int rl_loopback_create(const char*, uint32_t*, uint32_t*, char*, size_t) { return -1; }
+void rl_loopback_destroy(uint32_t, uint32_t) {}
+}
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace rta::diag;
@@ -356,33 +370,279 @@ int main() {
     }
 
     // ------------------------------------------------------------------
-    section("11. diag.json 含通道失败状态时：bundle_json 完整保留失败详情");
+    section("11. diag_snapshot_json 排障快照字段、脱敏与预算验证");
     {
-        const std::string diagWithChannels =
-            "{\"ok\":true,\"channels\":{\"ok\":true,\"checkedAt\":\"2026-11-19T07:40:00Z\","
-            "\"update\":{\"channel\":\"global\",\"url\":\"https://raw.githubusercontent.com/BH2VOQ/RLPlayer-Mac/main/latest.json\","
-            "\"ok\":false,\"http\":0,\"latency\":42,\"timedOut\":false,\"error\":\"Recv failure: Connection reset by peer\"},"
-            "\"feedback\":{\"url\":\"https://rlplayer.rainlain.com/api/v1/feedback/macos/watchdog\","
-            "\"ok\":true,\"http\":200,\"latency\":88,\"timedOut\":false,\"error\":\"\"}}}";
-        BundleSpec spec;
-        spec.case_id = "RLP-20261119-074000-chfail";
-        spec.created_utc = "2026-11-19T07:40:00Z";
-        spec.required = {kDiagName};
-        std::vector<BundleEntry> items;
-        items.push_back(make_entry(kDiagName, diagWithChannels, EntryKind::Json, 100));
-        AssembleResult rc = assemble(spec, std::move(items), "channel check\n");
-        ck(rc.ok, "含 channels 的诊断包组装成功", rc.err);
-        const std::string jc = bundle_json(rc);
-        ck(!jc.empty() && utf8_valid(jc), "bundle_json 输出合法 UTF-8");
-        const rta::net::Json parsedBundle = rta::net::json_parse(jc);
-        const rta::net::Json parsedDiag = rta::net::json_parse(parsedBundle["files"][kDiagName].s());
-        ck(parsedDiag["channels"]["update"]["ok"].b == false, "诊断包保留 update.ok=false");
-        ck((int)parsedDiag["channels"]["update"]["http"].n() == 0, "诊断包保留 update.http=0");
-        ck(parsedDiag["channels"]["update"]["error"].s() == "Recv failure: Connection reset by peer",
-           "诊断包保留 update.error 原文", parsedDiag["channels"]["update"]["error"].s());
-        ck(parsedDiag["channels"]["feedback"]["ok"].b == true &&
-           (int)parsedDiag["channels"]["feedback"]["http"].n() == 200,
-           "诊断包保留 feedback.ok=true & http=200");
+        const char* prevHome = std::getenv("HOME");
+        const char* prevState = std::getenv("RLPLAYER_STATE_DIR");
+        const char* prevLib = std::getenv("RLPLAYER_LIBRARY_DIR");
+        const bool hadHome = (prevHome != nullptr);
+        const bool hadState = (prevState != nullptr);
+        const bool hadLib = (prevLib != nullptr);
+        const std::string savedHome = prevHome ? prevHome : "";
+        const std::string savedState = prevState ? prevState : "";
+        const std::string savedLib = prevLib ? prevLib : "";
+        const std::string savedDiagDir = g_diagStartup.dir;
+
+        const char* tmpBase = std::getenv("TMPDIR");
+        std::string tmpRoot = (tmpBase && *tmpBase) ? tmpBase : "/tmp";
+        while (!tmpRoot.empty() && tmpRoot.back() == '/') tmpRoot.pop_back();
+        std::string tmpl = tmpRoot + "/rlp-diagsnap-test-XXXXXX";
+        std::vector<char> tbuf(tmpl.begin(), tmpl.end());
+        tbuf.push_back('\0');
+        const bool mkOk = (::mkdtemp(tbuf.data()) != nullptr);
+        ck(mkOk, "创建隔离临时根目录");
+        if (mkOk) {
+            const std::string root(tbuf.data());
+            const std::string secretUser = "diag_secret_alice";
+            const std::string fakeHome = root + "/Users/" + secretUser;
+            const std::string fakeState = fakeHome + "/custom_state";
+            const std::string fakeLib = fakeHome + "/custom_library";
+            const std::string fakeCfg = fakeHome + "/Library/Application Support/RLPlayer";
+            std::error_code ec;
+            fs::create_directories(fs::path(fakeState), ec);
+            fs::create_directories(fs::path(fakeLib), ec);
+            fs::create_directories(fs::path(fakeCfg), ec);
+
+            ::setenv("HOME", fakeHome.c_str(), 1);
+            ::setenv("RLPLAYER_STATE_DIR", fakeState.c_str(), 1);
+            ::setenv("RLPLAYER_LIBRARY_DIR", fakeLib.c_str(), 1);
+
+            const std::string kFakeUpdateTok = "ghp_SuperSecretUpdateToken9876543210";
+            const std::string kFakeErrTok = "ghp_SecretInErrorToken1234567890";
+            const std::string kFakeQueryTok = "tok_query_leak_888999";
+            const std::string kFakeStreamTok = "tok_stream_leak_777666";
+            const std::string kFakeIr = "/Users/" + secretUser + "/Rooms/living_room_ir.wav";
+            const std::string kFakeEq = "/Users/" + secretUser + "/EQ/hd800s_eq.txt";
+            g_diagStartup.dir = fakeState + "/instances/test-sid";
+
+            {
+                std::ofstream uf(fakeCfg + "/update.conf", std::ios::binary | std::ios::trunc);
+                uf << "token=" << kFakeUpdateTok << "\n"
+                   << "channel=cn\n";
+            }
+            {
+                std::ofstream sf(fakeState + "/rlplayer-settings.conf", std::ios::binary | std::ios::trunc);
+                sf << "backend=coreaudio-shared\n"
+                   << "rate=96000\n"
+                   << "bits=24\n"
+                   << "filter=poly-sinc-ext2\n"
+                   << "shaper=ns5\n"
+                   << "metaon=1\n"
+                   << "channels=2\n"
+                   << "device=77\n"
+                   << "buffer=120\n"
+                   << "hogexcl=0\n"
+                   << "rateFamilyPolicy=strict\n"
+                   << "ir=" << kFakeIr << "\n"
+                   << "eq=" << kFakeEq << "\n";
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(g_ps.mtx);
+                g_ps.playing.store(true);
+                g_ps.paused.store(false);
+                g_ps.current = "/Users/" + secretUser + "/Music/Miles Davis/01 So What.flac";
+                g_ps.error = "http fail https://api.example.com/v1/x?access_token=" + kFakeQueryTok +
+                             " path=/Users/" + secretUser + "/track.flac token=" + kFakeErrTok;
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_q.mtx);
+                g_q.items.clear();
+                g_q.items.push_back(QItem("/Users/" + secretUser + "/Music/01.flac"));
+                g_q.items.push_back(QItem("/Users/" + secretUser + "/Music/02.flac"));
+                g_q.items.push_back(QItem("/Users/" + secretUser + "/Music/03.flac"));
+            }
+
+            const std::string snapCn = diag_snapshot_json(false);
+            const rta::net::Json d = rta::net::json_parse(snapCn);
+            ck(utf8_valid(snapCn), "diag_snapshot_json(false) 输出合法 UTF-8");
+            ck(d.type == rta::net::Json::Obj && d["ok"].b, "diag_snapshot_json(false) 解析为 ok=true JSON 对象");
+
+            // 打印实际顶层与子对象 keys 供核验
+            auto joinKeys = [](const rta::net::Json& obj) {
+                std::string s;
+                for (const auto& kv : obj.obj) {
+                    if (!s.empty()) s += ",";
+                    s += kv.first;
+                }
+                return s;
+            };
+            std::printf("  [KEYS] top: %s\n", joinKeys(d).c_str());
+            if (d.has("app") && d["app"].type == rta::net::Json::Obj)
+                std::printf("  [KEYS] app: %s\n", joinKeys(d["app"]).c_str());
+            if (d.has("runtime") && d["runtime"].type == rta::net::Json::Obj)
+                std::printf("  [KEYS] runtime: %s\n", joinKeys(d["runtime"]).c_str());
+            if (d.has("channels") && d["channels"].type == rta::net::Json::Obj)
+                std::printf("  [KEYS] channels: %s\n", joinKeys(d["channels"]).c_str());
+            if (d.has("playback") && d["playback"].type == rta::net::Json::Obj)
+                std::printf("  [KEYS] playback: %s\n", joinKeys(d["playback"]).c_str());
+            if (d.has("settings") && d["settings"].type == rta::net::Json::Obj)
+                std::printf("  [KEYS] settings: %s\n", joinKeys(d["settings"]).c_str());
+            if (d.has("diagnostics") && d["diagnostics"].type == rta::net::Json::Obj)
+                std::printf("  [KEYS] diagnostics: %s\n", joinKeys(d["diagnostics"]).c_str());
+
+            // 1) app
+            ck(d.has("app") && d["app"].type == rta::net::Json::Obj, "diag.json 含 app 对象");
+            const rta::net::Json& app = d["app"];
+            ck(app.has("bundleId") && app["bundleId"].type == rta::net::Json::Str, "app.bundleId 存在");
+            ck(app.has("path") && app["path"].type == rta::net::Json::Str && !app["path"].s().empty() &&
+               app["path"].s().find('/') == std::string::npos && app["path"].s().find('\\') == std::string::npos,
+               "app.path 仅留 basename（不含目录分隔符）", app["path"].s());
+            ck(app.has("build") && !app["build"].s().empty(), "app.build 非空");
+            ck(app.has("version") && app["version"].s() == RLPLAYER_VERSION, "app.version 一致", app["version"].s());
+
+            // 2) runtime
+            ck(d.has("runtime") && d["runtime"].type == rta::net::Json::Obj, "diag.json 含 runtime 对象");
+            const rta::net::Json& rt = d["runtime"];
+            ck(rt.has("stateDir") && rt["stateDir"].s() == "custom_state",
+               "runtime.stateDir 只留最后目录名", rt["stateDir"].s());
+            ck(rt.has("libraryDir") && rt["libraryDir"].s() == "custom_library",
+               "runtime.libraryDir 只留最后目录名", rt["libraryDir"].s());
+            ck(rt.has("configDir") && rt["configDir"].s() == "RLPlayer",
+               "runtime.configDir 脱敏且不含绝对路径", rt["configDir"].s());
+            ck(rt.has("pid") && rt["pid"].n() > 0, "runtime.pid > 0");
+            ck(rt.has("port") && rt["port"].type == rta::net::Json::Num, "runtime.port 存在");
+            ck(rt.has("lan") && rt["lan"].type == rta::net::Json::Bool, "runtime.lan 存在");
+
+            // 3) channels (cn & global)
+            ck(d.has("channels") && d["channels"].type == rta::net::Json::Obj, "diag.json 含 channels 对象");
+            const rta::net::Json& ch = d["channels"];
+            ck(ch.has("updateChannel") && ch["updateChannel"].s() == "cn",
+               "channels.updateChannel=cn", ch["updateChannel"].s());
+            ck(ch.has("updateManifestHost") && ch["updateManifestHost"].s() == "rlplayer.rainlain.com",
+               "channels.updateManifestHost=rlplayer.rainlain.com (cn)", ch["updateManifestHost"].s());
+            ck(ch.has("feedbackEndpointHost") && ch["feedbackEndpointHost"].s() == "rlplayer.rainlain.com",
+               "channels.feedbackEndpointHost", ch["feedbackEndpointHost"].s());
+            ck(ch.has("feedbackWatchdogHost") && ch["feedbackWatchdogHost"].s() == "rlplayer.rainlain.com",
+               "channels.feedbackWatchdogHost", ch["feedbackWatchdogHost"].s());
+            ck(!ch.has("token"), "channels 不含 token 键");
+
+            // 4) playback
+            ck(d.has("playback") && d["playback"].type == rta::net::Json::Obj, "diag.json 含 playback 对象");
+            const rta::net::Json& pb = d["playback"];
+            ck(pb.has("currentPath") && pb["currentPath"].s() == "01 So What.flac",
+               "playback.currentPath 仅留文件名（不含目录与用户名）", pb["currentPath"].s());
+            ck(pb.has("playing") && pb["playing"].b == true, "playback.playing=true");
+            ck(pb.has("paused") && pb["paused"].b == false, "playback.paused=false");
+            ck(pb.has("queueCount") && (long long)pb["queueCount"].n() == 3, "playback.queueCount=3");
+            ck(pb.has("lastError") && !pb["lastError"].s().empty(), "playback.lastError 存在");
+            ck(pb["lastError"].s().find(secretUser) == std::string::npos &&
+               pb["lastError"].s().find(kFakeErrTok) == std::string::npos &&
+               pb["lastError"].s().find(kFakeQueryTok) == std::string::npos,
+               "playback.lastError 已脱敏（无用户名/token/query）", pb["lastError"].s());
+
+            // 5) settings
+            ck(d.has("settings") && d["settings"].type == rta::net::Json::Obj, "diag.json 含 settings 对象");
+            const rta::net::Json& st = d["settings"];
+            ck(st["backend"].s() == "coreaudio-shared" && st["rate"].s() == "96000" &&
+               st["bits"].s() == "24" && st["filter"].s() == "poly-sinc-ext2" &&
+               st["shaper"].s() == "ns5" && st["metaon"].s() == "1",
+               "settings 保留原有六键");
+            ck(st.has("channels") && st["channels"].s() == "2", "settings.channels=2", st["channels"].s());
+            ck(st.has("device") && st["device"].s() == "77", "settings.device=77", st["device"].s());
+            ck(st.has("output") && st["output"].s() == "coreaudio-shared", "settings.output", st["output"].s());
+            ck(st.has("buffer") && st["buffer"].s() == "120", "settings.buffer=120", st["buffer"].s());
+            ck(st.has("hogexcl") && st["hogexcl"].s() == "0", "settings.hogexcl=0", st["hogexcl"].s());
+            ck(st.has("rateFamilyPolicy") && st["rateFamilyPolicy"].s() == "strict",
+               "settings.rateFamilyPolicy=strict", st["rateFamilyPolicy"].s());
+            ck(!st.has("ir") && !st.has("eq"), "settings 不含 ir/eq 键");
+
+            // 6) diagnostics
+            ck(d.has("diagnostics") && d["diagnostics"].type == rta::net::Json::Obj, "diag.json 含 diagnostics 对象");
+            const rta::net::Json& dg = d["diagnostics"];
+            ck(dg.has("schema") && !dg["schema"].s().empty(), "diagnostics.schema 非空", dg["schema"].s());
+            ck(dg.has("caseId") && dg["caseId"].s() == d["caseId"].s() && !dg["caseId"].s().empty(),
+               "diagnostics.caseId 与顶层 caseId 一致");
+            ck(dg.has("sid") && dg["sid"].s() == d["sid"].s(), "diagnostics.sid 与顶层 sid 一致");
+            ck(dg.has("eventCounts") && dg["eventCounts"].type == rta::net::Json::Obj &&
+               dg["eventCounts"].has("written") && dg["eventCounts"].has("dropped") &&
+               dg["eventCounts"].has("recent"),
+               "diagnostics.eventCounts 含 written/dropped/recent");
+            ck(dg.has("retention") && dg["retention"].type == rta::net::Json::Obj &&
+               dg["retention"]["files"].n() >= 1 && dg["retention"]["maxBytes"].n() > 0 &&
+               dg["retention"]["totalMaxBytes"].n() > 0,
+               "diagnostics.retention 含 files/maxBytes/totalMaxBytes");
+
+            // 全局防泄露断言 + 通过真实 diag_bundle_assemble / bundle_json 校验
+            std::vector<BundleEntry> bItems;
+            bItems.push_back(make_entry(kDiagName, snapCn, EntryKind::Json, 100));
+            bItems.push_back(make_entry(kEventsName, rta::diag::event_log().snapshot_text(), EntryKind::Jsonl, 80));
+            bItems.push_back(make_entry(kUiEventsName, diag_ui_log().snapshot_text(), EntryKind::Jsonl, 60));
+            const AssembleResult ar = diag_bundle_assemble(diag_bundle_spec(), std::move(bItems));
+            ck(snapCn.size() < diag_bundle_spec().budget_bytes,
+               "diag.json 体积远小于 bundle 预算",
+               std::to_string(snapCn.size()) + " / " + std::to_string(diag_bundle_spec().budget_bytes));
+            ck(ar.ok && !ar.over_budget, "真实 diag.json 经 diag_bundle_assemble 组装成功且不超预算", ar.err);
+            const std::string bj = bundle_json(ar);
+            ck(!bj.empty() && utf8_valid(bj), "bundle_json(ar) 产出合法 UTF-8 非空串");
+            const std::string zipBytes = zip_of(ar);
+            ck(zipBytes.size() > 4 && zipBytes[0] == 'P' && zipBytes[1] == 'K',
+               "真实 diag.json 经 zip_of 产出合法 PK ZIP", std::to_string(zipBytes.size()));
+            const rta::net::Json bParsed = rta::net::json_parse(bj);
+            ck(bParsed.type == rta::net::Json::Obj && bParsed["files"][kDiagName].s() == snapCn,
+               "bundle_json 中 files['diag.json'] 与 diag_snapshot_json 逐字节一致");
+
+            auto noLeaks = [&](const std::string& blob, const char* label) {
+                ck(blob.find(kFakeUpdateTok) == std::string::npos, std::string(label) + ": 无 update token");
+                ck(blob.find(kFakeErrTok) == std::string::npos, std::string(label) + ": 无 error token");
+                ck(blob.find(kFakeQueryTok) == std::string::npos, std::string(label) + ": 无 URL query token");
+                ck(blob.find(kFakeStreamTok) == std::string::npos, std::string(label) + ": 无 stream URL token");
+                ck(blob.find(secretUser) == std::string::npos, std::string(label) + ": 无真实用户名");
+                ck(blob.find("/Users/" + secretUser) == std::string::npos, std::string(label) + ": 无绝对用户路径");
+                ck(blob.find("living_room_ir.wav") == std::string::npos && blob.find("hd800s_eq.txt") == std::string::npos &&
+                   blob.find("ir=") == std::string::npos && blob.find("eq=") == std::string::npos,
+                   std::string(label) + ": 无 ir=/eq= 文件路径");
+            };
+            noLeaks(snapCn, "diag.json");
+            noLeaks(bj, "bundle_json");
+            noLeaks(zipBytes, "diagzip");
+
+            // 切到 global 通道、paused + 空队列 + 带 token 流媒体路径复测
+            {
+                std::ofstream uf(fakeCfg + "/update.conf", std::ios::binary | std::ios::trunc);
+                uf << "token=" << kFakeUpdateTok << "\n"
+                   << "channel=global\n";
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_ps.mtx);
+                g_ps.playing.store(false);
+                g_ps.paused.store(true);
+                g_ps.current = "https://cdn.example.com/audio/HiResTrack.flac?token=" + kFakeStreamTok;
+                g_ps.error.clear();
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_q.mtx);
+                g_q.items.clear();
+            }
+            const std::string snapGlobal = diag_snapshot_json(false);
+            const rta::net::Json dg2 = rta::net::json_parse(snapGlobal);
+            ck(dg2["channels"]["updateChannel"].s() == "global" &&
+               dg2["channels"]["updateManifestHost"].s() == "raw.githubusercontent.com",
+               "channels 切回 global 时 updateChannel/updateManifestHost 随之更新",
+               dg2["channels"]["updateChannel"].s() + "/" + dg2["channels"]["updateManifestHost"].s());
+            ck(dg2["playback"]["playing"].b == false && dg2["playback"]["paused"].b == true &&
+               (long long)dg2["playback"]["queueCount"].n() == 0 &&
+               dg2["playback"]["currentPath"].s() == "HiResTrack.flac" &&
+               dg2["playback"]["lastError"].s().empty(),
+               "playback 暂停/空队列/无错误/URL 去 query 仅留文件名");
+            noLeaks(snapGlobal, "diag.json(global)");
+
+            {
+                std::lock_guard<std::mutex> lk(g_ps.mtx);
+                g_ps.playing.store(false);
+                g_ps.paused.store(false);
+                g_ps.current.clear();
+                g_ps.error.clear();
+            }
+            g_diagStartup.dir = savedDiagDir;
+            fs::remove_all(fs::path(root), ec);
+        }
+
+        if (hadHome) ::setenv("HOME", savedHome.c_str(), 1);
+        if (hadState) ::setenv("RLPLAYER_STATE_DIR", savedState.c_str(), 1);
+        else ::unsetenv("RLPLAYER_STATE_DIR");
+        if (hadLib) ::setenv("RLPLAYER_LIBRARY_DIR", savedLib.c_str(), 1);
+        else ::unsetenv("RLPLAYER_LIBRARY_DIR");
     }
 
     std::printf("\n----------------------------------------\n");

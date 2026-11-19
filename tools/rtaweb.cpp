@@ -40,8 +40,11 @@
 #include "diag/diag.h"
 #include "diag/bundle.h"
 #include "diag/report.h"
+#include "net/feedback_api.h"
 #include "net/feedback_redact.h"   // 诊断包脱敏**唯一入口**（F-7 2026-10-27：吸收上游 feedback.h 的规则清单）
 #include "net/feedback_api.h"      // 诊断通道探活：watchdog URL 常量
+#include "net/update_channel.h"
+#include "net/update_check.h"
 #include "net/http_client.h"       // 封面在线抓取：http_get/http_post（platform/http.h 的平台封装）
 #include "net/json.h"              // /api/lib/cover/prefetch 解析网易 type=10 专辑搜索响应(2026-10-26)
 #include "net/update_channel.h"    // 诊断通道探活：当前更新通道与对应 manifest URL
@@ -148,6 +151,7 @@ namespace eng = rta::engine;
 #include <arpa/inet.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <mach-o/dyld.h>
 #endif
 
 namespace rta::crash {
@@ -8837,6 +8841,82 @@ static std::string diag_channels_probe_json() {
     return out;
 }
 
+static std::string diag_basename(std::string s) {
+    if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0) {
+        const size_t q = s.find_first_of("?#");
+        if (q != std::string::npos) s.resize(q);
+    }
+    while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    if (s.empty()) return std::string();
+    const size_t sep = s.find_last_of("/\\");
+    if (sep != std::string::npos) s = s.substr(sep + 1);
+    return rta::diag::redact_text(utf8_sanitize(std::move(s)), nullptr, false);
+}
+
+static std::string diag_dir_leaf(std::string s) {
+    while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    if (s.empty()) return std::string();
+    s = rta::diag::redact_text(utf8_sanitize(std::move(s)), nullptr, false);
+    while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    const size_t sep = s.find_last_of("/\\");
+    if (sep != std::string::npos) s = s.substr(sep + 1);
+    return rta::diag::redact_text(utf8_sanitize(std::move(s)), nullptr, false);
+}
+
+static std::string diag_url_host(std::string url) {
+    const size_t sc = url.find("://");
+    std::string rest = (sc != std::string::npos) ? url.substr(sc + 3) : url;
+    const size_t pathPos = rest.find_first_of("/?#");
+    if (pathPos != std::string::npos) rest.resize(pathPos);
+    const size_t at = rest.rfind('@');
+    if (at != std::string::npos) rest = rest.substr(at + 1);
+    if (!rest.empty() && rest.front() == '[') {
+        const size_t rb = rest.find(']');
+        if (rb != std::string::npos) {
+            return rta::diag::redact_text(utf8_sanitize(rest.substr(0, rb + 1)), nullptr, false);
+        }
+    }
+    const size_t colon = rest.find(':');
+    if (colon != std::string::npos) rest.resize(colon);
+    return rta::diag::redact_text(utf8_sanitize(std::move(rest)), nullptr, false);
+}
+
+static std::string diag_app_bundle_id() {
+    std::string id;
+#if defined(__APPLE__)
+    if (CFBundleRef b = ::CFBundleGetMainBundle()) {
+        if (CFStringRef bid = ::CFBundleGetIdentifier(b)) id = mac_cfstr(bid);
+    }
+#endif
+    if (id.empty()) id = "com.rta.rlplayer";
+    return rta::diag::redact_text(utf8_sanitize(std::move(id)), nullptr, false);
+}
+
+static std::string diag_app_path_basename() {
+    std::string raw;
+#if defined(__APPLE__)
+    uint32_t sz = 0;
+    ::_NSGetExecutablePath(nullptr, &sz);
+    if (sz > 0) {
+        std::string buf(sz, '\0');
+        if (::_NSGetExecutablePath(buf.data(), &sz) == 0) {
+            buf.resize(std::strlen(buf.c_str()));
+            raw = std::move(buf);
+        }
+    }
+#endif
+    if (!raw.empty()) {
+        const size_t cm = raw.rfind("/Contents/MacOS/");
+        if (cm != std::string::npos) {
+            const std::string appLeaf = diag_dir_leaf(raw.substr(0, cm));
+            if (!appLeaf.empty()) return appLeaf;
+        }
+        const std::string exeLeaf = diag_basename(raw);
+        if (!exeLeaf.empty()) return exeLeaf;
+    }
+    return "RLPlayer";
+}
+
 static std::string diag_snapshot_json(bool withProbe) {
     auto& ps = g_ps;
     std::ostringstream j;
@@ -8844,10 +8924,73 @@ static std::string diag_snapshot_json(bool withProbe) {
     // （无缓存层），所以这里不再需要该变量。保留 refresh=1 的路由语义不变。
     const auto upSec = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - g_startTp).count();
+    const std::string caseId = diag_case_id();
+    const std::string sid = diag_sid();
+    const unsigned long pidVal = current_pid();
+    const std::string appBundleId = diag_app_bundle_id();
+    const std::string appPathLeaf = diag_app_path_basename();
+
+    std::string cfgDirRaw = rta::platform::config_dir_utf8();
+    if (cfgDirRaw.empty()) cfgDirRaw = rta::platform::module_dir_utf8();
+    std::string libDirRaw;
+    if (const char* envLib = std::getenv("RLPLAYER_LIBRARY_DIR")) {
+        if (*envLib) libDirRaw = envLib;
+    }
+    if (libDirRaw.empty()) libDirRaw = cfgDirRaw;
+    const std::string stateDirLeaf = diag_dir_leaf(runtime_state_dir());
+    const std::string libDirLeaf = diag_dir_leaf(libDirRaw);
+    const std::string cfgDirLeaf = diag_dir_leaf(cfgDirRaw);
+
+    std::string updText;
+    if (!cfgDirRaw.empty()) {
+        std::string sepDir = cfgDirRaw;
+        while (!sepDir.empty() && (sepDir.back() == '/' || sepDir.back() == '\\')) sepDir.pop_back();
+        std::ifstream uf(sepDir + "/update.conf", std::ios::binary);
+        if (uf) updText.assign(std::istreambuf_iterator<char>(uf), std::istreambuf_iterator<char>());
+    }
+    const auto updCfg = rta::update::parse_update_config(updText);
+    const std::string updChannel = rta::update::channel_config_value(updCfg.channel);
+    const std::string updManifestHost = diag_url_host(rta::update::channel_manifest_url(updCfg.channel, updCfg.manifestUrl));
+    const std::string fbEndpointHost = diag_url_host(rta::feedback::kFeedbackUploadUrl);
+    const std::string fbWatchdogHost = diag_url_host(rta::feedback::kFeedbackWatchdogUrl);
+
+    const rta::net::CastState castSt = rta::net::CastManager::instance().get_state();
+    bool pbPlaying = false;
+    bool pbPaused = false;
+    std::string pbCurrent;
+    std::string pbError;
+    std::string psSignal;
+    std::string topError;
+    {
+        std::lock_guard<std::mutex> lock(ps.mtx);
+        const bool castMode = castSt.running || (g_upnpPlayer.load() && g_upnpQueueActive.load());
+        const bool castFailed = (castSt.phase == "error" && !castSt.error.empty());
+        const bool isCastPlaying = (castSt.phase == "playing" || castSt.phase == "serving");
+        const bool isCastPreparing = (castSt.phase == "connecting" || castSt.phase == "decoding" || castSt.phase == "discovering");
+        pbPlaying = castMode ? (isCastPlaying || isCastPreparing) : ps.playing.load();
+        pbPaused = castMode ? (castSt.paused || castSt.transportState == "PAUSED" || castSt.transportState == "PAUSED_PLAYBACK") : ps.paused.load();
+        pbCurrent = castMode
+            ? (!castSt.sourceFile.empty() ? castSt.sourceFile : ps.current)
+            : ((castFailed && !castSt.sourceFile.empty()) ? castSt.sourceFile : ps.current);
+        topError = ps.error;
+        pbError = castMode
+            ? (!castSt.error.empty() ? castSt.error : ps.error)
+            : (castFailed ? castSt.error : ps.error);
+        psSignal = ps.signal;
+    }
+    size_t pbQueueCount = 0;
+    {
+        std::lock_guard<std::mutex> qlk(g_q.mtx);
+        pbQueueCount = g_q.items.size();
+    }
+    const std::string pbCurrentLeaf = pbCurrent.empty() ? std::string() : diag_basename(pbCurrent);
+    const std::string pbErrorSafe = rta::diag::redact_text(err_text_redacted(utf8_sanitize(pbError)), nullptr, false);
+    const std::string topErrorSafe = rta::diag::redact_text(err_text_redacted(utf8_sanitize(topError)), nullptr, false);
+
     j << "{\"ok\":true"
       << ",\"version\":\"" << RLPLAYER_VERSION << "\""
       << ",\"build\":\"" << jesc(g_buildTime) << "\""
-      << ",\"pid\":" << current_pid()
+      << ",\"pid\":" << pidVal
       << ",\"uptime\":" << (long long)upSec
       << ",\"os\":\"" << jesc(rta::diag::os_version_string()) << "\""
       << ",\"cpu\":\"" << jesc(rta::diag::cpu_brand()) << "\""
@@ -8855,15 +8998,36 @@ static std::string diag_snapshot_json(bool withProbe) {
                                std::string("(") + rta::dsp::GpuBridge::instance().status() + ")") << "\""
       << ",\"tester\":\"" << jesc(rta::diag::read_tester()) << "\""
       // case_id / sid：诊断包的关联键（前后端同码、同一个请求 id 的锚点）
-      << ",\"caseId\":\"" << jesc(diag_case_id()) << "\""
-      << ",\"sid\":\"" << jesc(diag_sid()) << "\""
+      << ",\"caseId\":\"" << jesc(caseId) << "\""
+      << ",\"sid\":\"" << jesc(sid) << "\""
       << ",\"rid\":\"" << jesc(rid_current()) << "\""
-      << ",\"case_id\":\"" << jesc(diag_case_id()) << "\""
+      << ",\"case_id\":\"" << jesc(caseId) << "\""
       << ",\"runState\":{\"lastExit\":\"" << rta::diag::run_marker().previous().reason_class()
       << "\",\"evidence\":\"" << jesc(rta::diag::run_marker().previous().zh_summary()) << "\"}"
       << ",\"errorCodeTable\":{\"version\":" << rta::diag::kErrorCodeTableVersion << "}"
       << ",\"port\":" << g_uiPort
-      << ",\"lan\":" << (g_lanOn ? "true" : "false");
+      << ",\"lan\":" << (g_lanOn ? "true" : "false")
+      << ",\"app\":{\"bundleId\":\"" << jesc(appBundleId)
+      << "\",\"path\":\"" << jesc(appPathLeaf)
+      << "\",\"build\":\"" << jesc(g_buildTime)
+      << "\",\"version\":\"" << RLPLAYER_VERSION << "\"}"
+      << ",\"runtime\":{\"stateDir\":\"" << jesc(stateDirLeaf)
+      << "\",\"libraryDir\":\"" << jesc(libDirLeaf)
+      << "\",\"configDir\":\"" << jesc(cfgDirLeaf)
+      << "\",\"pid\":" << pidVal
+      << ",\"port\":" << g_uiPort
+      << ",\"lan\":" << (g_lanOn ? "true" : "false") << "}"
+      << ",\"channels\":{\"updateChannel\":\"" << jesc(updChannel)
+      << "\",\"updateManifestHost\":\"" << jesc(updManifestHost)
+      << "\",\"feedbackEndpointHost\":\"" << jesc(fbEndpointHost)
+      << "\",\"feedbackWatchdogHost\":\"" << jesc(fbWatchdogHost) << "\""
+      << ",\"probe\":" << (diag_channels_cached_json().empty() ? "null" : diag_channels_cached_json())
+      << "}"
+      << ",\"playback\":{\"currentPath\":\"" << jesc(pbCurrentLeaf)
+      << "\",\"playing\":" << (pbPlaying ? "true" : "false")
+      << ",\"paused\":" << (pbPaused ? "true" : "false")
+      << ",\"queueCount\":" << pbQueueCount
+      << ",\"lastError\":\"" << jesc(pbErrorSafe) << "\"}";
 
     // 端点：每端点给友好名/ID/活状态 + 各档支持率（macOS caps() 无按位深分档，三档同表）。
     long long probeAgeMax = -1;
@@ -8898,28 +9062,60 @@ static std::string diag_snapshot_json(bool withProbe) {
         }
     }
     j << "],\"probeAge\":" << probeAgeMax;
-    // 设置摘要：只取六个白名单键（不回显 ir/eq 等文件路径内容）
+    // 设置摘要：保留原有六键，补充非敏感运行参数白名单（绝不回显 ir/eq 等文件路径）
     {
         std::ifstream f(path_in_exe_dir("rlplayer-settings.conf"));
-        std::string line, backend = "coreaudio", rate, bits, filter, shaper, metaon = "1";
+        std::map<std::string, std::string> rawCfg;
+        std::string line;
         while (std::getline(f, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             const size_t e = line.find('=');
             if (e == std::string::npos) continue;
-            const std::string k = line.substr(0, e), v = line.substr(e + 1);
-            if      (k == "backend") backend = v;
-            else if (k == "rate")    rate    = v;
-            else if (k == "bits")    bits    = v;
-            else if (k == "filter")  filter  = v;
-            else if (k == "shaper")  shaper  = v;
-            else if (k == "metaon")  metaon  = v;
+            rawCfg[line.substr(0, e)] = line.substr(e + 1);
         }
-        j << ",\"settings\":{\"backend\":\"" << jesc(backend)
-          << "\",\"rate\":\"" << jesc(rate)
-          << "\",\"bits\":\"" << jesc(bits)
-          << "\",\"filter\":\"" << jesc(filter)
-          << "\",\"shaper\":\"" << jesc(shaper)
-          << "\",\"metaon\":\"" << jesc(metaon) << "\"}";
+        auto pickSafe = [&](const char* key, const char* defVal = "") {
+            const auto it = rawCfg.find(key);
+            std::string v = (it != rawCfg.end()) ? it->second : std::string(defVal ? defVal : "");
+            return rta::diag::redact_text(utf8_sanitize(std::move(v)), nullptr, false);
+        };
+        const std::string backendVal = pickSafe("backend", "coreaudio");
+        std::string outputVal = pickSafe("output", "");
+        if (outputVal.empty()) outputVal = backendVal.empty() ? std::string("coreaudio") : backendVal;
+        std::string rgModeVal = pickSafe("rg.mode", "");
+        if (rgModeVal.empty()) rgModeVal = pickSafe("rg_mode", "");
+        if (rgModeVal.empty()) rgModeVal = pickSafe("rgmode", "");
+        if (rgModeVal.empty()) rgModeVal = pickSafe("rg", "");
+
+        j << ",\"settings\":{\"backend\":\"" << jesc(backendVal)
+          << "\",\"rate\":\"" << jesc(pickSafe("rate"))
+          << "\",\"bits\":\"" << jesc(pickSafe("bits"))
+          << "\",\"filter\":\"" << jesc(pickSafe("filter"))
+          << "\",\"shaper\":\"" << jesc(pickSafe("shaper"))
+          << "\",\"metaon\":\"" << jesc(pickSafe("metaon", "1"))
+          << "\",\"channels\":\"" << jesc(pickSafe("channels"))
+          << "\",\"device\":\"" << jesc(pickSafe("device"))
+          << "\",\"output\":\"" << jesc(outputVal)
+          << "\",\"buffer\":\"" << jesc(pickSafe("buffer"))
+          << "\",\"hogexcl\":\"" << jesc(pickSafe("hogexcl"))
+          << "\",\"rateFamilyPolicy\":\"" << jesc(pickSafe("rateFamilyPolicy"))
+          << "\",\"filterNx\":\"" << jesc(pickSafe("filterNx"))
+          << "\",\"sdmfilt\":\"" << jesc(pickSafe("sdmfilt"))
+          << "\",\"sdmfiltnx\":\"" << jesc(pickSafe("sdmfiltnx"))
+          << "\",\"phase\":\"" << jesc(pickSafe("phase"))
+          << "\",\"taps\":\"" << jesc(pickSafe("taps"))
+          << "\",\"twostage\":\"" << jesc(pickSafe("twostage"))
+          << "\",\"isp\":\"" << jesc(pickSafe("isp"))
+          << "\",\"dsd\":\"" << jesc(pickSafe("dsd"))
+          << "\",\"dsdnative\":\"" << jesc(pickSafe("dsdnative"))
+          << "\",\"directsdm\":\"" << jesc(pickSafe("directsdm"))
+          << "\",\"modfamily\":\"" << jesc(pickSafe("modfamily"))
+          << "\",\"modorder\":\"" << jesc(pickSafe("modorder"))
+          << "\",\"streamdecode\":\"" << jesc(pickSafe("streamdecode"))
+          << "\",\"gpuvendor\":\"" << jesc(pickSafe("gpuvendor"))
+          << "\",\"irgpu\":\"" << jesc(pickSafe("irgpu"))
+          << "\",\"uimode\":\"" << jesc(pickSafe("uimode"))
+          << "\",\"lang\":\"" << jesc(pickSafe("lang"))
+          << "\",\"rgMode\":\"" << jesc(rgModeVal) << "\"}";
     }
     // 日志尾 ≤8KB。当前日志不写 key 等敏感串；仍加一层 sk-[A-Za-z0-9]+ 掩码作保险
     {
@@ -8939,12 +9135,38 @@ static std::string diag_snapshot_json(bool withProbe) {
         j << ",\"logTail\":\"" << jesc(tail) << "\"";
     }
     // 最近事件（D1/D2 落盘后才有内容；没有就明确写 present:false 而不是空数组谎称"无异常"）
+    size_t recentEvCount = 0;
     {
         const auto recent = rta::diag::event_log().recent(20);
+        recentEvCount = recent.size();
         j << ",\"events\":{\"file\":\"events.jsonl\",\"present\":" << (rta::diag::event_log().is_open() ? "true" : "false")
           << ",\"recentCount\":" << recent.size() << ",\"recent\":[";
         for (size_t i = 0; i < recent.size(); ++i) { if (i) j << ","; j << rta::diag::event_to_json(recent[i]); }
         j << "]}";
+    }
+    {
+        const auto evStats = rta::diag::event_log().stats();
+        const auto uiStats = diag_ui_log().stats();
+        const auto evCfg = rta::diag::event_log().config();
+        const int retFiles = std::max(1, evCfg.files);
+        const uint64_t retMaxBytes = evCfg.max_bytes;
+        const uint64_t retTotalBytes = (uint64_t)retFiles * retMaxBytes;
+        const uint64_t bundleBudgetBytes = (uint64_t)rta::diag::BundleSpec{}.budget_bytes;
+        j << ",\"diagnostics\":{\"schema\":\"" << jesc(rta::diag::kBundleSchema)
+          << "\",\"caseId\":\"" << jesc(caseId)
+          << "\",\"sid\":\"" << jesc(sid)
+          << "\",\"eventCounts\":{\"written\":" << (unsigned long long)evStats.lines
+          << ",\"dropped\":" << (unsigned long long)evStats.dropped
+          << ",\"rotations\":" << (unsigned long long)evStats.rotations
+          << ",\"bytes\":" << (unsigned long long)evStats.bytes
+          << ",\"recent\":" << (unsigned long long)recentEvCount
+          << ",\"uiWritten\":" << (unsigned long long)uiStats.lines
+          << ",\"uiDropped\":" << (unsigned long long)uiStats.dropped << "}"
+          << ",\"retention\":{\"files\":" << retFiles
+          << ",\"maxBytes\":" << (unsigned long long)retMaxBytes
+          << ",\"totalMaxBytes\":" << (unsigned long long)retTotalBytes
+          << ",\"logTailMaxBytes\":8192"
+          << ",\"bundleBudgetBytes\":" << (unsigned long long)bundleBudgetBytes << "}}";
     }
     static const std::string tools = [] {
         std::string out="{";
@@ -8966,30 +9188,20 @@ static std::string diag_snapshot_json(bool withProbe) {
     j << ",\"diagChannel\":{\"ok\":" << (rta::diag::diag_active()?"true":"false")
       << ",\"code\":\"" << jesc(g_diagStartup.ok?"":g_diagStartup.code)
       << "\",\"secondary\":" << (g_diagStartup.secondary?"true":"false")
-      << ",\"dir\":\"" << jesc(g_diagStartup.dir)
+      << ",\"dir\":\"" << jesc(rta::diag::redact_text(utf8_sanitize(g_diagStartup.dir), nullptr, false))
       << "\",\"sid\":\"" << jesc(g_diagStartup.sid)
       << "\",\"error\":\"" << jesc(rta::diag::redact_text(g_diagStartup.error))
       << "\",\"write_error\":\"" << jesc(rta::diag::redact_text(rta::diag::event_log().last_error())) << "\"}";
-    {
-        std::lock_guard<std::mutex> lock(ps.mtx);
-        if(!ps.signal.empty()) {
-            const auto safe=rta::diag::redact_text(ps.signal,nullptr,false);
-            j << ",\"effective_settings\":" << safe
-              << ",\"settings_fingerprint\":\"" << rta::update::sha256_hex(safe) << "\"";
-        } else j << ",\"effective_settings\":null,\"settings_fingerprint\":null";
-    }
+    if(!psSignal.empty()) {
+        const auto safe=rta::diag::redact_text(psSignal,nullptr,false);
+        j << ",\"effective_settings\":" << safe
+          << ",\"settings_fingerprint\":\"" << rta::update::sha256_hex(safe) << "\"";
+    } else j << ",\"effective_settings\":null,\"settings_fingerprint\":null";
     j << ",\"io\":{\"dry\":" << g_dbgDry.load() << ",\"dry_ms\":" << g_dbgDryMs.load()
       << ",\"writes\":" << g_dbgWr.load() << ",\"zero_writes\":" << g_dbgW0.load()
       << ",\"peak\":" << g_dbgPeak.load() << ",\"clip\":" << g_dbgClip.load() << "}";
     j << ",\"actions\":" << actions_json(50);
-    {
-        std::lock_guard<std::mutex> lk(ps.mtx);
-        j << ",\"lastError\":\"" << jesc(rta::diag::redact_text(ps.error)) << "\"";
-    }
-    {
-        const std::string cachedCh = diag_channels_cached_json();
-        j << ",\"channels\":" << (cachedCh.empty() ? "null" : cachedCh);
-    }
+    j << ",\"lastError\":\"" << jesc(topErrorSafe) << "\"";
     j << "}";
     return j.str();
 }
