@@ -651,7 +651,8 @@ int RLPAppDelegateRunSelfTest(void) {
         for (NSView *v in pv) {
             if (![v isKindOfClass:[NSButton class]]) continue;
             NSButton *b = (NSButton *)v;
-            if ([b.toolTip containsString:@"随机"] || [b.toolTip containsString:@"循环"]) ++sym;
+            if ([b.identifier isEqualToString:@"pb.shuffle"] || [b.identifier isEqualToString:@"pb.repeat"] ||
+                [b.toolTip containsString:@"随机"] || [b.toolTip containsString:@"循环"]) ++sym;
         }
         STCheck(sym >= 2, "播放条有随机与循环按钮",
                 [NSString stringWithFormat:@"modeButtons=%ld", (long)sym]);

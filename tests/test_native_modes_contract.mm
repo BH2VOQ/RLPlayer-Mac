@@ -553,7 +553,7 @@ int main() {
             if ([path isEqualToString:@"/api/settings"] && [body isEqualToString:@"uimode=pro"]) {
                 postedUimodePro = YES;
             }
-            if (![path isEqualToString:@"/api/settings"] && ![path hasPrefix:@"/api/peq"]) touchedForbidden = YES;
+            if (![path isEqualToString:@"/api/settings"] && ![path isEqualToString:@"/api/ui/events"] && ![path hasPrefix:@"/api/peq"]) touchedForbidden = YES;
         }
         for (NSString *req in g_spy.requests) {
             if ([req containsString:@"/api/play"] || [req containsString:@"/api/stop"] ||

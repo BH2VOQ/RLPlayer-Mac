@@ -476,9 +476,11 @@ static NSString *RLPBarSeekErrorText(NSDictionary *json) {
     // 播放模式：随机（Fisher–Yates 整表乱序，核心侧已实现）与列表循环。
     // 放在播放键左侧，与 QQ 音乐 / Spotify 的位置习惯一致。
     self.shuffleBtn = [self symbolButton:@"shuffle" tip:@"随机播放"];
+    self.shuffleBtn.identifier = @"pb.shuffle";
     self.shuffleBtn.target = self;
     self.shuffleBtn.action = @selector(toggleShuffle:);
     self.repeatBtn = [self symbolButton:@"repeat" tip:@"列表循环"];
+    self.repeatBtn.identifier = @"pb.repeat";
     self.repeatBtn.target = self;
     self.repeatBtn.action = @selector(toggleRepeat:);
     // 停止（与暂停不同：停止会释放设备，web 版底栏也有这个键）

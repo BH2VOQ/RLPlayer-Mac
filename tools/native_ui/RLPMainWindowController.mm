@@ -143,6 +143,23 @@ static void RLPCollectTopLevelScrollViews(NSView *root, NSMutableArray<NSScrollV
 
 /// 页面容器：延伸到 mainHost 底部，让页面内容真正从悬浮播放条后方滚过；
 /// 并为延伸到播放条区域下方的顶层 NSScrollView 预留底部 contentInset，避免末行被永久遮挡。
+static void RLPResetTopPageScroll(NSView *root) {
+    if (!root) return;
+    NSMutableArray<NSScrollView *> *ss = [NSMutableArray array];
+    RLPCollectTopLevelScrollViews(root, ss);
+    for (NSScrollView *sv in ss) {
+        if (sv.isHiddenOrHasHiddenAncestor || !sv.contentView) continue;
+        NSRect vis = sv.documentVisibleRect;
+        const CGFloat topY = sv.documentView.isFlipped
+            ? 0.0
+            : MAX(0.0, sv.documentView.frame.size.height - sv.contentView.bounds.size.height);
+        if (fabs(vis.origin.y - topY) > 0.5) {
+            [sv.contentView scrollToPoint:NSMakePoint(vis.origin.x, topY)];
+            [sv reflectScrolledClipView:sv.contentView];
+        }
+    }
+}
+
 @interface RLPPageHostView : NSView
 @property (nonatomic, weak) NSView *floatingBar;
 - (void)syncScrollInsets;
@@ -710,6 +727,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.pageHost setNeedsLayout:YES];
     [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    if (self.currentContent) RLPResetTopPageScroll(self.currentContent.view);
     [self schedulePageInsetsSync];
     [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
@@ -818,6 +836,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.pageHost setNeedsLayout:YES];
     [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    if (self.currentContent) RLPResetTopPageScroll(self.currentContent.view);
     [self schedulePageInsetsSync];
     // 顺序重要：先同步标题（会清空计数），再 activate（页面此时上报计数）
     [self syncTopbarTitle];
@@ -988,6 +1007,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.pageHost setNeedsLayout:YES];
     [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    if (self.currentContent) RLPResetTopPageScroll(self.currentContent.view);
     [self schedulePageInsetsSync];
 }
 
@@ -1081,6 +1101,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.pageHost setNeedsLayout:YES];
     [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    if (self.currentContent) RLPResetTopPageScroll(self.currentContent.view);
     [self schedulePageInsetsSync];
     [self syncTopbarTitle];
     if ([vc respondsToSelector:@selector(activate)]) [(id)vc activate];
@@ -1416,6 +1437,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [self.pageHost setNeedsLayout:YES];
     [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
+    if (self.currentContent) RLPResetTopPageScroll(self.currentContent.view);
     [self schedulePageInsetsSync];
 }
 
@@ -1663,6 +1685,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         if (!ss) return;
         [ss.pageHost layoutSubtreeIfNeeded];
         [(RLPPageHostView *)ss.pageHost syncScrollInsets];
+        if (ss.currentContent) RLPResetTopPageScroll(ss.currentContent.view);
     });
 }
 
