@@ -223,10 +223,20 @@
     self.scroll = nil;
     self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:self.stack];
+    // 嵌入设置页时，本视图的高度由调用方给一个**固定常量**。旧实现只钉了 stack 的
+    // leading/trailing/top，没有任何东西把它约束到容器底 ⟹ stack 永远停在顶部、
+    // 高度由内容决定；容器比内容高多少，卡片里就留多少纯空白
+    // （实测设置·声音校准页「房间校正」卡内约 187pt 空白）。
+    // 这里补 bottom 约束 + 低优先级，让 stack 至少和内容等高、且不会把视图撑高：
+    //   * stack.height >= 内容自然高度（防止内容被压扁）
+    //   * stack.bottom <= 容器底（允许容器更高，但内容不会被拉伸/居中）
+    NSLayoutConstraint *bottom = [self.stack.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor];
+    bottom.priority = NSLayoutPriorityRequired;
     [NSLayoutConstraint activateConstraints:@[
         [self.stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+        bottom,
     ]];
 }
 

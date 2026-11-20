@@ -527,6 +527,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) RLPInputView *inputView;
 @property (nonatomic, strong) RLPCastView *castView;
 @property (nonatomic, strong) RLPCalibrationView *calView;
+/// 校准卡高度下限（内容变化后按 preferredContentHeight 重新校正，避免卡内留大片空白）。
+@property (nonatomic, strong, nullable) NSLayoutConstraint *calHeightConstraint;
 @property (nonatomic, strong) NSTextField *coverProgress;
 @property (nonatomic, strong) NSTextField *writebackStatus;
 @property (nonatomic, strong) NSTextField *wbDesc;
@@ -1094,6 +1096,15 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     if (tab == RLPSTabMeta) {
         const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
         [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
+    }
+    // 校准页的卡片高度必须**每次显示时**按当前内容重算：
+    // fillCalibration 只在首次建 pane 时跑一次，之后重进校准页用的是缓存 pane，
+    // 向导分支的增删（生成计划 / 取消测量）都会让「内容实际高度」变化，
+    // 而高度约束停在旧值 ⟹ 卡内留大片空白（实测 130pt）。
+    if (tab == RLPSTabCal) {
+        [self syncCalHeight];
+        [self.calView.superview setNeedsLayout:YES];
+        [self.paneHost layoutSubtreeIfNeeded];
     }
     // 上面这些分支（流媒体 contentDidChange、元数据响应式重排）都会改文档高度；
     // 改完再钉一次顶部，保证这一帧画出来的内容从顶部开始。
@@ -3756,6 +3767,24 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     });
 }
 
+/// 让校准卡高度回到「内容真正需要的高度」。
+///
+/// 为什么需要：校准视图的内容随向导步骤增删（生成计划 / 测量 / IR 段），
+/// 高度约束如果只在建卡时定一次，后续内容变少时卡片不会回缩，就留下大片空白
+/// （实测「房间校正」卡内约 187pt 纯空白，是用户在设置页能直接看到的空块）。
+/// 这里只在**偏小时**抬高，绝不把卡片压得比内容还矮。
+- (void)syncCalHeight {
+    if (!self.calView || !self.calHeightConstraint) return;
+    const CGFloat need = MAX(240.0, [self.calView preferredContentHeight]);
+    // 双向校正：内容变多要抬高，内容变少（向导分支收起）也要收回来，
+    // 否则卡片底部会留一大块空白（实测 130pt）。
+    if (fabs(self.calHeightConstraint.constant - need) > 0.5) {
+        self.calHeightConstraint.constant = need;
+        [self.calView invalidateIntrinsicContentSize];
+        [self.calView.superview setNeedsLayout:YES];
+    }
+}
+
 - (void)fillCalibration:(NSStackView *)stack t:(RLPTheme *)t {
     // web calSettingsHtml() 是**三张** sgroup：
     //   ① 房间校正（测量向导） ② EQ 文件（REW / AutoEq 文本） ③ 房间校正 IR（WAV 脉冲响应）
@@ -3770,8 +3799,19 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     self.calView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.calView setEmbeddedInPage:YES];
     [wizGroup addFullRow:self.calView];
-    [[self.calView.heightAnchor
-        constraintEqualToConstant:MAX(240.0, [self.calView preferredContentHeight])] setActive:YES];
+    // 高度必须跟着**当前实际内容**走，而不是建卡那一刻算出的常量。
+    // 实测缺陷：常量在建卡时把当时所有分支（含未展开的向导步骤）都算进去，
+    // 之后分支隐藏卡片却不回缩 ⟹ 「房间校正」卡里留下约 187pt 纯空白（截图量得）。
+    // 这里用 >= 内容高度的下限 + 由内容驱动的 hugging，
+    // 并在内容变化后（reloadData / 切换页签）重新校正一次。
+    // 高度**等于**内容高度（不再是 >= 一个可能偏大的常量）：
+    // 实测缺陷：常量在建卡时算成 450，而内容只需 320 ⟹ 卡内 130pt 纯空白。
+    // >= 约束解决不了这个问题，因为常量本身就是错的；必须由内容反推。
+    self.calHeightConstraint = [self.calView.heightAnchor
+        constraintEqualToConstant:MAX(240.0, [self.calView preferredContentHeight])];
+    [self.calHeightConstraint setActive:YES];
+    // 内容变化后重新校正（见 syncCalHeight 注释）。
+    [self syncCalHeight];
 
     // ② EQ 文件（REW / AutoEq 文本）：web 的 sp_eq 路径输入 + tip 说明。
     RLPSettingsGroup *eqFileGroup = (RLPSettingsGroup *)RLPSGroup(

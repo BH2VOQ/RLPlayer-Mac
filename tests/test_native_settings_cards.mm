@@ -157,6 +157,15 @@ int main() {
 
         RLPSettingsViewController *settings = [[RLPSettingsViewController alloc] init];
         NSView *v = settings.view;
+        // 放进真实 NSWindow（不 orderFront，仍然离屏）：
+        // 没有 window 时 NSScrollView/NSStackView 的 layout 不会真正解算，
+        // 卡片 frame 恒为 0，任何"卡体 vs 内容"的几何判据都会变成恒真。
+        NSWindow *hostWin = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 900)
+                                                        styleMask:NSWindowStyleMaskBorderless
+                                                          backing:NSBackingStoreBuffered
+                                                            defer:NO];
+        hostWin.releasedWhenClosed = NO;
+        hostWin.contentView = v;
         v.frame = NSMakeRect(0, 0, 1280, 900);
         [v layoutSubtreeIfNeeded];
 
@@ -487,6 +496,43 @@ int main() {
         Ck(CardsIn(calPane).count > 0, @"【A】声音校准页有卡片容器", @"cards=0");
         if (snapDir) Snap(eqPane, snapDir, @"native-pane-eq.png");
         if (snapDir) Snap(calPane, snapDir, @"native-pane-cal.png");
+
+        // ---- 【E】校准卡不得在标题下方留大片空白（本轮实测 130pt）----
+        //
+        // 现象：设置·声音校准页「房间校正」卡里，标题下方空出约 130pt 纯空白。
+        // 根因：calView 的高度是**建卡那一刻**按 preferredContentHeight 定死的常量
+        // （当时算成 450），而首次显示时实际内容只要 320；且 fillCalibration 只在
+        // 首次建 pane 时跑，重进校准页用的是缓存 pane，高度再没机会重算。
+        // 判据直接量：calView 高度 - 其内部可见控件的最低点 ≤ 24pt。
+        {
+            [settings selectPane:@"cal"];
+            NSView *pane = PaneRoot(v, @"cal");
+            NSView *doc = [pane isKindOfClass:[NSScrollView class]] ? ((NSScrollView *)pane).documentView : pane;
+            [doc layoutSubtreeIfNeeded];
+            [pane layoutSubtreeIfNeeded];
+            Pump(0.4);
+            [doc layoutSubtreeIfNeeded];
+
+            NSView *cal = nil;
+            for (NSView *d in Descendants(pane)) {
+                if ([NSStringFromClass(d.class) isEqualToString:@"RLPCalibrationView"]) { cal = d; break; }
+            }
+            Ck(cal != nil, @"【E】声音校准页能定位到校准视图", @"找不到 RLPCalibrationView");
+            if (cal) {
+                CGFloat maxBottom = 0;
+                for (NSView *d in Descendants(cal)) {
+                    if (d == cal || d.isHiddenOrHasHiddenAncestor) continue;
+                    if (!IsControl(d)) continue;
+                    const NSRect r = [d convertRect:d.bounds toView:cal];
+                    maxBottom = MAX(maxBottom, NSMaxY(r));
+                }
+                const CGFloat slack = NSHeight(cal.bounds) - maxBottom;
+                Ck(slack <= 24.0,
+                   @"【E】校准卡内没有大片空白（视图高 - 内容底 ≤ 24pt）",
+                   [NSString stringWithFormat:@"calH=%.0f content=%.0f slack=%.0f",
+                    NSHeight(cal.bounds), maxBottom, slack]);
+            }
+        }
 
         std::printf("结果：%d passed, %d failed\n", gPass, gFail);
         return gFail == 0 ? 0 : 1;
