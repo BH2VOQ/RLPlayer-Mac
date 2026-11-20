@@ -2126,6 +2126,202 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     return [NSString stringWithFormat:@"%@/%ld", sr, (long)bits];
 }
 
+#pragma mark - 投送交接（本机输出 ⇄ 局域网投放）纯逻辑
+// 用户 2026-11-20：「点完投送，输出设备就改成局域网投放；取消投送就切回投送之前的设置」。
+// 纯函数 + 注入式传输（send/sleep），测试不起核心、不出声、不真等 8 秒。
+typedef NSDictionary * _Nullable (^RLPCastHandoffSend)(NSString *method, NSString *path, NSString * _Nullable body);
+typedef void (^RLPCastHandoffSleep)(NSTimeInterval seconds);
+
+static BOOL RLPCHOk(NSDictionary * _Nullable r) {
+    return [r isKindOfClass:[NSDictionary class]] && [r[@"ok"] respondsToSelector:@selector(boolValue)] && [r[@"ok"] boolValue];
+}
+static NSString *RLPCHErr(NSDictionary * _Nullable r) {
+    id e = [r isKindOfClass:[NSDictionary class]] ? r[@"error"] : nil;
+    return ([e isKindOfClass:[NSString class]] && [(NSString *)e length]) ? (NSString *)e : @"";
+}
+static NSString *RLPCHStr(id v) { return [v isKindOfClass:[NSString class]] ? (NSString *)v : @""; }
+
+/// 投送前输出快照。已有快照（已在投送）原样保留，绝不被「backend=upnp」覆盖；
+/// 没有快照且当前已是 upnp（例如快照丢失）⟹ 回落 coreaudio（mac 默认），不假装知道更多。
+NSDictionary *RLPCastHandoffPrevSnapshot(NSDictionary * _Nullable existingPrev, NSDictionary * _Nullable kv) {
+    NSString *eb = RLPCHStr(existingPrev[@"backend"]);
+    if (eb.length && ![eb isEqualToString:@"upnp"]) return existingPrev;
+    NSString *bk = RLPCHStr(kv[@"backend"]);
+    if (!bk.length || [bk isEqualToString:@"upnp"]) bk = @"coreaudio";
+    return @{ @"backend": bk, @"device": RLPCHStr(kv[@"device"]), @"upnpdev": RLPCHStr(kv[@"upnpdev"]) };
+}
+/// pos/dur → 0...0.9999（未知/非法 = 0；1.0 会让后端精确跳到文件末尾）。
+double RLPCastHandoffFraction(double pos, double dur) {
+    if (!isfinite(pos) || !isfinite(dur) || dur <= 0 || pos <= 0) return 0.0;
+    const double f = pos / dur;
+    return f > 0.9999 ? 0.9999 : f;
+}
+/// /api/settings 表单体（一次写多键；nil = 不写该键）。每个值按 encodeURIComponent 编码（& = ? # + 都转义）。
+NSString *RLPCastHandoffSettingsBody(NSString * _Nullable backend, NSString * _Nullable device, NSString * _Nullable upnpdev) {
+    NSMutableArray *parts = [NSMutableArray array];
+    if (backend) [parts addObject:[@"backend=" stringByAppendingString:RLPEnc(backend)]];
+    if (device) [parts addObject:[@"device=" stringByAppendingString:RLPEnc(device)]];
+    if (upnpdev) [parts addObject:[@"upnpdev=" stringByAppendingString:RLPEnc(upnpdev)]];
+    return [parts componentsJoinedByString:@"&"];
+}
+NSString *RLPCastHandoffRestoreBody(NSDictionary *prev) {
+    return RLPCastHandoffSettingsBody(RLPCHStr(prev[@"backend"]).length ? prev[@"backend"] : @"coreaudio",
+                                      [prev[@"device"] isKindOfClass:[NSString class]] ? prev[@"device"] : nil,
+                                      [prev[@"upnpdev"] isKindOfClass:[NSString class]] ? prev[@"upnpdev"] : nil);
+}
+NSString *RLPCastHandoffPlayBody(NSString *file, NSInteger index) {
+    NSMutableString *b = [NSMutableString stringWithFormat:@"file=%@", RLPEnc(file)];
+    if (index >= 0) [b appendFormat:@"&index=%ld", (long)index];
+    return b;
+}
+/// /api/queue?meta=1 里 index 指向的条目必须就是 file 才可信；否则 -1（不带 index，让后端按路径找）。
+NSInteger RLPCastHandoffQueueIndex(NSDictionary * _Nullable q, NSString *file) {
+    NSArray *items = [q[@"items"] isKindOfClass:[NSArray class]] ? q[@"items"] : @[];
+    if (![q[@"index"] respondsToSelector:@selector(integerValue)]) return -1;
+    const NSInteger i = [q[@"index"] integerValue];
+    if (i < 0 || i >= (NSInteger)items.count) return -1;
+    id it = items[(NSUInteger)i];
+    NSString *p = [it isKindOfClass:[NSString class]] ? it
+                : ([it isKindOfClass:[NSDictionary class]] ? (RLPCHStr(it[@"path"]).length ? it[@"path"] : it[@"file"]) : @"");
+    return [RLPCHStr(p) isEqualToString:file] ? i : -1;
+}
+
+/// 本机恢复后等 /api/status 报 playing 且时长已知再 seek（seekReq 在线程起来之前写会被丢）。
+static BOOL RLPCastHandoffSeekLocal(RLPCastHandoffSend send, RLPCastHandoffSleep sleep, double fraction) {
+    if (fraction <= 0) return YES;
+    BOOL ready = NO;
+    for (int i = 0; i < 16 && !ready; ++i) {
+        NSDictionary *st = send(@"GET", @"/api/status", nil);
+        ready = RLPCHOk(st) && [st[@"playing"] boolValue] && [st[@"dur"] doubleValue] > 0;
+        if (!ready) sleep(0.25);
+    }
+    if (!ready) return NO;
+    NSDictionary *r = send(@"POST", [NSString stringWithFormat:@"/api/seek?pos=%.4f", fraction], nil);
+    return RLPCHOk(r) && ![r[@"skipped"] boolValue];
+}
+
+/// 失败回滚：停 cast（若有）→ 恢复设置 → 本机重放 → seek。不假装成功：回滚失败如实标出。
+static NSDictionary *RLPCastHandoffRollback(RLPCastHandoffSend send, RLPCastHandoffSleep sleep, NSDictionary *prev,
+                                            NSString *file, NSInteger index, double fraction) {
+    NSDictionary *st = send(@"GET", @"/api/cast/state", nil);
+    if ([st[@"running"] boolValue]) send(@"POST", @"/api/cast/stop", @"");
+    if (!RLPCHOk(send(@"POST", @"/api/settings", RLPCastHandoffRestoreBody(prev))))
+        return @{ @"rolledBack": @NO, @"rollbackFailed": @YES };
+    if (file.length && !RLPCHOk(send(@"POST", @"/api/play", RLPCastHandoffPlayBody(file, index))))
+        return @{ @"rolledBack": @NO, @"rollbackFailed": @YES, @"settingsRestored": @YES };
+    RLPCastHandoffSeekLocal(send, sleep, fraction);
+    return @{ @"rolledBack": @YES, @"rollbackFailed": @NO, @"settingsRestored": @YES };
+}
+
+static NSDictionary *RLPCHFail(NSString *stage, NSString *err, NSDictionary *rb, NSDictionary *prev, BOOL keepPrev) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionaryWithDictionary:@{ @"ok": @NO, @"stage": stage, @"error": err ?: @"",
+        @"keepPrev": @(keepPrev) }];
+    if (prev) d[@"prev"] = prev;
+    if (rb) [d addEntriesFromDictionary:rb];
+    return d;
+}
+
+/// 投送：快照 → 写 settings(backend=upnp&upnpdev) → /api/play 起播（保持队列）→ 轮询 cast/state → 恢复进度。
+NSDictionary *RLPCastHandoffRunStart(RLPCastHandoffSend send, RLPCastHandoffSleep sleep, NSDictionary * _Nullable existingPrev,
+                                     NSString *file, NSString *deviceId, double fallbackFraction) {
+    NSDictionary *kv = send(@"GET", @"/api/settings", nil);
+    if (!RLPCHOk(kv) || ![kv[@"kv"] isKindOfClass:[NSDictionary class]])
+        return RLPCHFail(@"snapshot", RLPCHErr(kv), nil, nil, NO);
+    NSDictionary *prev = RLPCastHandoffPrevSnapshot(existingPrev, kv[@"kv"]);
+    double fraction = fallbackFraction;
+    NSDictionary *status = send(@"GET", @"/api/status", nil);
+    if (RLPCHOk(status) && [status[@"dur"] doubleValue] > 0)
+        fraction = RLPCastHandoffFraction([status[@"pos"] doubleValue], [status[@"dur"] doubleValue]);
+    const NSInteger index = RLPCastHandoffQueueIndex(send(@"GET", @"/api/queue?meta=1", nil), file);
+
+    NSDictionary *sr = send(@"POST", @"/api/settings", RLPCastHandoffSettingsBody(@"upnp", nil, deviceId));
+    if (!RLPCHOk(sr)) return RLPCHFail(@"settings", RLPCHErr(sr), nil, prev, existingPrev != nil);
+
+    NSDictionary *pr = send(@"POST", @"/api/play", RLPCastHandoffPlayBody(file, index));
+    if (!RLPCHOk(pr))
+        return RLPCHFail(@"play", RLPCHErr(pr), RLPCastHandoffRollback(send, sleep, prev, file, index, fraction), prev, NO);
+
+    BOOL running = NO, durationKnown = NO;
+    NSString *lastErr = @"";
+    for (int i = 0; i < 16; ++i) {
+        NSDictionary *st = send(@"GET", @"/api/cast/state", nil);
+        running = RLPCHOk(st) && [st[@"running"] boolValue];
+        durationKnown = running && [st[@"durationSec"] doubleValue] > 0;
+        if (RLPCHOk(st) && RLPCHErr(st).length) lastErr = RLPCHErr(st);
+        if (running && (durationKnown || fraction <= 0)) break;
+        sleep(0.5);
+    }
+    if (!running)
+        return RLPCHFail(@"cast", lastErr, RLPCastHandoffRollback(send, sleep, prev, file, index, fraction), prev, NO);
+    BOOL seekFailed = NO;
+    if (fraction > 0) {
+        NSDictionary *sk = durationKnown ? send(@"POST", [NSString stringWithFormat:@"/api/seek?pos=%.4f", fraction], nil) : nil;
+        seekFailed = !(RLPCHOk(sk) && ![sk[@"skipped"] boolValue]);
+    }
+    return @{ @"ok": @YES, @"seekFailed": @(seekFailed), @"prev": prev, @"keepPrev": @YES };
+}
+
+/// 停止投送：读 cast/state 的位置 → 停 cast → 恢复 prev 设置 → 本机重放当前曲 → seek。
+NSDictionary *RLPCastHandoffRunStop(RLPCastHandoffSend send, RLPCastHandoffSleep sleep, NSDictionary * _Nullable existingPrev,
+                                    NSString * _Nullable fallbackFile) {
+    NSDictionary *st = send(@"GET", @"/api/cast/state", nil);
+    NSString *file = RLPCHStr(st[@"sourceFile"]).length ? RLPCHStr(st[@"sourceFile"]) : (fallbackFile ?: @"");
+    const double fraction = RLPCHOk(st) ? RLPCastHandoffFraction([st[@"positionSec"] doubleValue], [st[@"durationSec"] doubleValue]) : 0.0;
+    const NSInteger index = file.length ? RLPCastHandoffQueueIndex(send(@"GET", @"/api/queue?meta=1", nil), file) : -1;
+    NSDictionary *prev = existingPrev;
+    if (!RLPCHStr(prev[@"backend"]).length || [prev[@"backend"] isEqualToString:@"upnp"]) {
+        NSDictionary *kv = send(@"GET", @"/api/settings", nil);
+        prev = RLPCHOk(kv) && [kv[@"kv"] isKindOfClass:[NSDictionary class]]
+            ? RLPCastHandoffPrevSnapshot(nil, kv[@"kv"]) : @{ @"backend": @"coreaudio" };
+    }
+    NSDictionary *stop = send(@"POST", @"/api/cast/stop", @"");
+    if (!RLPCHOk(stop)) return RLPCHFail(@"stop", RLPCHErr(stop), nil, prev, YES);
+    NSDictionary *sr = send(@"POST", @"/api/settings", RLPCastHandoffRestoreBody(prev));
+    if (!RLPCHOk(sr)) return RLPCHFail(@"settings", RLPCHErr(sr), nil, prev, YES);
+    if (file.length) {
+        NSDictionary *pr = send(@"POST", @"/api/play", RLPCastHandoffPlayBody(file, index));
+        if (!RLPCHOk(pr)) return RLPCHFail(@"play", RLPCHErr(pr), nil, prev, NO);
+    }
+    const BOOL seekOk = file.length ? RLPCastHandoffSeekLocal(send, sleep, fraction) : YES;
+    return @{ @"ok": @YES, @"seekFailed": @(!seekOk), @"prev": prev, @"keepPrev": @NO, @"backend": RLPCHStr(prev[@"backend"]) };
+}
+
+static NSString *const kRLPCastHandoffPrevKey = @"RLPCastHandoffPrev";
+static NSDictionary *RLPCastHandoffStoredPrev(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:kRLPCastHandoffPrevKey];
+    return [v isKindOfClass:[NSDictionary class]] ? v : nil;
+}
+static void RLPCastHandoffStorePrev(NSDictionary * _Nullable prev) {
+    if (prev) [[NSUserDefaults standardUserDefaults] setObject:prev forKey:kRLPCastHandoffPrevKey];
+    else [[NSUserDefaults standardUserDefaults] removeObjectForKey:kRLPCastHandoffPrevKey];
+}
+static void RLPCastHandoffAsync(NSDictionary *(^work)(RLPCastHandoffSend, RLPCastHandoffSleep), void (^done)(NSDictionary *)) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("rlp.cast.handoff", DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(q, ^{
+        NSDictionary *r = work(^NSDictionary *(NSString *m, NSString *p, NSString *b) {
+            return [[RLPCoreClient shared] jsonWithMethod:m path:p body:b];
+        }, ^(NSTimeInterval s) { [NSThread sleepForTimeInterval:s]; });
+        dispatch_async(dispatch_get_main_queue(), ^{ done(r); });
+    });
+}
+/// 失败文案：阶段 + 后端原因 + 回滚结果（如实）。
+static NSString *RLPCastHandoffFailureText(NSDictionary *r) {
+    NSString *stage = r[@"stage"];
+    NSString *head = [stage isEqualToString:@"settings"] ? RLPTr(@"保存输出设置失败，未投送")
+        : [stage isEqualToString:@"snapshot"] ? RLPTr(@"读取当前输出设置失败，未投送")
+        : [stage isEqualToString:@"play"] ? ([r[@"keepPrev"] boolValue] ? RLPTr(@"恢复本机播放失败") : RLPTr(@"投送起播失败"))
+        : [stage isEqualToString:@"stop"] ? RLPTr(@"停止投放失败")
+        : [stage isEqualToString:@"cast"] ? RLPTr(@"投送设备未响应")
+        : RLPTr(@"投放失败");
+    NSString *err = RLPCHStr(r[@"error"]);
+    NSString *msg = err.length ? [NSString stringWithFormat:@"%@：%@", head, err] : head;
+    if ([r[@"rolledBack"] boolValue]) msg = [msg stringByAppendingFormat:@" · %@", RLPTr(@"已恢复投送前输出")];
+    else if ([r[@"rollbackFailed"] boolValue]) msg = [msg stringByAppendingFormat:@" · %@", RLPTr(@"恢复投送前输出也失败，请检查输出设置")];
+    return msg;
+}
+
 @interface RLPCastDialogContentView : NSView
 @end
 @implementation RLPCastDialogContentView
@@ -2194,6 +2390,7 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property(nonatomic,assign) BOOL castRunningState;
 @property(nonatomic,copy) NSString *castDeviceName;
 @property(nonatomic,strong,nullable) NSTimer *castPoll;
+@property(nonatomic,assign) BOOL castHandoffBusy;
 @property(nonatomic,copy) NSDictionary *trackMetadata;
 @property(nonatomic,strong) NSPopover *knowledgePopover;
 /// web `#npDrawerBg` / `#npDrawer`：页内遮罩 + 抽屉浮卡（不再用系统 NSPopover）。
@@ -4142,21 +4339,30 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     const BOOL fromDialog = self.castDialogOpen && self.castDialogStarting;
     const NSUInteger dialogSeq = self.castDialogSeq;
     __weak __typeof__(self) ws = self;
-    [[RLPCoreClient shared] postJSON:@"/api/cast/start" body:body
-                          completion:^(NSDictionary * _Nullable r) {
+    // 投送 = 把输出改成局域网投放并由 /api/play(backend=upnp) 起播（保持队列，不并行起本地线程），
+    // 不再走 /api/cast/start（它不写 backend/upnpdev，也不维护队列）。
+    NSString *handoffFile = [self.currentPath copy];
+    NSString *handoffDev = [device[@"location"] isKindOfClass:[NSString class]] ? device[@"location"] : @"";
+    NSDictionary *existingPrev = RLPCastHandoffStoredPrev();
+    const double fb = RLPCastHandoffFraction(self.webStatus.position, self.webStatus.duration);
+    self.castHandoffBusy = YES;
+    RLPCastHandoffAsync(^NSDictionary *(RLPCastHandoffSend send, RLPCastHandoffSleep sleep) {
+        return RLPCastHandoffRunStart(send, sleep, existingPrev, handoffFile, handoffDev, fb);
+    }, ^(NSDictionary *r) {
         void (^apply)(void) = ^{
             __typeof__(self) s = ws;
             if (!s) return;
-            const BOOL ok = [r isKindOfClass:[NSDictionary class]] && [r[@"ok"] boolValue];
+            s.castHandoffBusy = NO;
+            const BOOL ok = RLPCHOk(r);
+            if ([r[@"keepPrev"] boolValue] && [r[@"prev"] isKindOfClass:[NSDictionary class]]) RLPCastHandoffStorePrev(r[@"prev"]);
+            else if (![r[@"keepPrev"] boolValue]) RLPCastHandoffStorePrev(nil);
+            if (ok || [r[@"rolledBack"] boolValue] || [r[@"rollbackFailed"] boolValue])
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:s];
             if (fromDialog) {
                 const BOOL sameOpenDialog = s.castDialogOpen && s.castDialogSeq == dialogSeq && s.castDialogWindow != nil;
                 if (!ok) {
                     if (!sameOpenDialog) return;
-                    NSString *err = ([r isKindOfClass:[NSDictionary class]] &&
-                                     [r[@"error"] isKindOfClass:[NSString class]] &&
-                                     [(NSString *)r[@"error"] length])
-                        ? (NSString *)r[@"error"]
-                        : RLPTr(@"网络错误或设备未响应");
+                    NSString *err = RLPCastHandoffFailureText(r ?: @{});
                     s.castDialogStarting = NO;
                     s.castDialogErrorState = YES;
                     [s.castDialogSpinner stopAnimation:nil];
@@ -4175,11 +4381,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                     [s closeCastDialogWithCode:NSModalResponseOK];
                 }
             } else if (!ok) {
-                NSString *err = ([r isKindOfClass:[NSDictionary class]] &&
-                                 [r[@"error"] isKindOfClass:[NSString class]] &&
-                                 [(NSString *)r[@"error"] length])
-                    ? (NSString *)r[@"error"] : RLPTr(@"投放失败");
-                RLPToast(err);
+                RLPToast(RLPCastHandoffFailureText(r ?: @{}));
                 return;
             }
             NSString *label = [device[@"name"] isKindOfClass:[NSString class]] ? (NSString *)device[@"name"] : nil;
@@ -4187,29 +4389,44 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                 NSString *loc = [device[@"location"] isKindOfClass:[NSString class]] ? (NSString *)device[@"location"] : @"";
                 label = RLPNowPlayingCastDeviceLabel(loc);
             }
-            RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), label]);
+            RLPToast([r[@"seekFailed"] boolValue] ? RLPTr(@"已投送，进度恢复失败")
+                     : [NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), label]);
             [s refreshCastChipState];   // 芯片立刻变成 on 态（不等轮询）
         };
-        if ([NSThread isMainThread]) apply();
-        else dispatch_async(dispatch_get_main_queue(), apply);
-    }];
+        apply();
+    });
 }
 
 - (void)onCastCurrent:(id)s {
     (void)s;
     if (self.castRunningState) {
         // web castToggle：投放中点按钮 = 停止（不弹设备列表）。
+        // 停止 = 停 cast → 恢复投送前的 backend/device/upnpdev → 本机重放当前曲 → seek 回原位置。
+        if (self.castHandoffBusy) return;
+        self.castHandoffBusy = YES;
         __weak __typeof__(self) ws = self;
-        [[RLPCoreClient shared] postJSON:@"/api/cast/stop" body:@""
-                              completion:^(NSDictionary * _Nullable r) {
+        NSDictionary *existingPrev = RLPCastHandoffStoredPrev();
+        NSString *fallbackFile = [self.currentPath copy];
+        RLPCastHandoffAsync(^NSDictionary *(RLPCastHandoffSend send, RLPCastHandoffSleep sleep) {
+            return RLPCastHandoffRunStop(send, sleep, existingPrev, fallbackFile);
+        }, ^(NSDictionary *r) {
             __typeof__(self) s2 = ws;
             if (!s2) return;
-            if (![r[@"ok"] boolValue] && [r[@"error"] isKindOfClass:[NSString class]])
-                RLPToast((NSString *)r[@"error"]);
-            else
-                RLPToast(RLPTr(@"已停止投放，输出回到本机"));
+            s2.castHandoffBusy = NO;
+            if (RLPCHOk(r)) {
+                RLPCastHandoffStorePrev(nil);
+                [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:s2];
+                NSString *msg = [NSString stringWithFormat:@"%@ %@", RLPTr(@"已停止投放，输出回到"), RLPCHStr(r[@"backend"])];
+                if ([r[@"seekFailed"] boolValue]) msg = [msg stringByAppendingFormat:@" · %@", RLPTr(@"进度恢复失败")];
+                RLPToast(msg);
+            } else {
+                if (![r[@"keepPrev"] boolValue]) RLPCastHandoffStorePrev(nil);
+                if ([r[@"stage"] isEqualToString:@"play"])
+                    [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:s2];
+                RLPToast(RLPCastHandoffFailureText(r));
+            }
             [s2 refreshCastChipState];
-        }];
+        });
         return;
     }
     if (!self.currentPath.length) return;
