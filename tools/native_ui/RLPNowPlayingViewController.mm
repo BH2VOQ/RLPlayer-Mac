@@ -2891,6 +2891,8 @@ static NSString *RLPCastHandoffFailureText(NSDictionary *r) {
     // 视图只负责画；取数在 loadWaveformForPath（切曲/首次进入一次），播放头只跟 /api/status。
     self.waveformView=[[RLPWaveformView alloc] initWithFrame:NSZeroRect];
     self.waveformView.identifier=@"np.waveform";
+    // 初始就没有数据：先不占位（layoutWebPlayback 只摆 frame，不决定显隐）。
+    self.waveformView.hidden = YES;
     __weak __typeof__(self) wsWave=self;
     self.waveformView.onSeek=^(double fraction){
         __typeof__(self) s=wsWave;
@@ -5703,6 +5705,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         self.waveformPath = nil;
         self.waveformSelection = nil;
         [self.waveformView clearWaveform];
+        // 没有曲目/远端流时整条波形**不该占位**：
+        // 只画基线时它是一条横贯内容区的浅灰带，用户看到的是"页面底部莫名多一块灰色"。
+        self.waveformView.hidden = YES;
         return;
     }
     if ([path isEqualToString:self.waveformPath ?: @""] && self.waveformView.peaks.count) return;
@@ -5711,7 +5716,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     NSString *tk = [self.trackKey copy] ?: @"";
     self.waveformPath = path;
     self.waveformSelection = nil;
-    [self.waveformView clearWaveform];       // 旧曲包络不能留在新曲上（新数据回来前只画基线）
+    [self.waveformView clearWaveform];       // 旧曲包络不能留在新曲上
+    // 数据回来之前先收起波形条（同 web 「无波形就不占位」的观感），
+    // 否则新曲加载期间会先闪一条空灰带再变成波形。
+    self.waveformView.hidden = YES;
     NSString *url = [NSString stringWithFormat:@"/api/waveform?file=%@&bins=512", RLPEnc(path)];
     __weak __typeof__(self) ws = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
@@ -5723,6 +5731,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
         if (!peaks.count) return;            // 解码失败/超限：保持空态，同一首不再打后端
         NSArray *rms = [json[@"rms"] isKindOfClass:[NSArray class]] ? json[@"rms"] : nil;
         [s.waveformView setPeaks:peaks rms:rms duration:[json[@"duration"] doubleValue]];
+        s.waveformView.hidden = NO;         // 有包络了才占位
     }];
 }
 
