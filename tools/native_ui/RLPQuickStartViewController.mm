@@ -3964,7 +3964,6 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         NSString *capsKey = [NSString stringWithFormat:@"%@|%@|%@", bk, dev, upnpDev];
         if (![capsKey isEqualToString:self_.presetCapsKey ?: @""]) {
             self_.presetCapsKey = capsKey;
-            self_.hasCustomPresetNote = NO;
             [self_ loadPresetCaps:YES];
         }
         [self_ syncOutputSummary];
