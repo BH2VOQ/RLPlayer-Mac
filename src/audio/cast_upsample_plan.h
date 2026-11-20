@@ -23,6 +23,8 @@
 #include <cmath>
 #include <initializer_list>
 
+#include "audio/rate_family_policy.h"
+
 namespace rta::audio {
 
 struct CastRateDecision {
@@ -31,6 +33,7 @@ struct CastRateDecision {
     bool        capped     = false;  // 请求值被 ceiling/渲染器能力压低过
     bool        undeclared = false;  // 渲染器未声明任何速率
     bool        forced     = false;  // 强制升频：目标率未经渲染器声明验证（用户显式勾选）
+    bool        crossFamily = false; // 兼容跨族：目标率与源率不属于同一时钟族（非 bit-perfect）
     std::string reason;              // 机器可读枚举，见下表
     std::string noteZh;              // 用户可见中文真相（可为空：off/src 时也给一句话更好）
     std::string noteEn;              // 同位英文（非空、不含中文）
@@ -41,7 +44,8 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
                                                 const std::vector<uint32_t>& rendererRates,
                                                 uint32_t ceiling,
                                                 bool applyUpsample,
-                                                bool forceRate = false);
+                                                bool forceRate = false,
+                                                RateFamilyPolicy policy = RateFamilyPolicy::Prefer);
 
 struct CastBitDecision {
     int servedBits = 0;
@@ -126,7 +130,8 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
                                                 const std::vector<uint32_t>& rendererRates,
                                                 uint32_t ceiling,
                                                 bool applyUpsample,
-                                                bool forceRate) {
+                                                bool forceRate,
+                                                RateFamilyPolicy policy) {
     CastRateDecision d;
 
     // 1. applyUpsample == false → target=sourceRate, upsample=false, reason="off"
@@ -283,6 +288,41 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
             }
             d.targetRate = sourceRate;
             d.upsample = false;
+            return d;
+        }
+    }
+
+    // 5c. 兼容跨族（policy == Compatible）：不要求整数倍，只取渲染器**已声明**的速率。
+    //     max：声明里满足 sourceRate < r <= cap 的最高值；数字：请求值在声明里且 <= 上限且 > 源率。
+    //     prefer / strict 不进入本段，保持同族整数倍行为。
+    if (policy == RateFamilyPolicy::Compatible && !rendererRates.empty()) {
+        uint32_t best = 0;
+        if (lowerReq == "max") {
+            for (uint32_t r : rendererRates) {
+                if (r > sourceRate && r <= cap && r > best) best = r;
+            }
+        } else if (reqNum > sourceRate && cap == reqNum &&
+                   std::find(rendererRates.begin(), rendererRates.end(), reqNum) != rendererRates.end()) {
+            best = reqNum;
+        }
+        if (best > sourceRate) {
+            d.targetRate = best;
+            d.upsample = true;
+            d.reason = "ok";
+            d.crossFamily = rate_family(sourceRate) != rate_family(best);
+            const std::string srcStr = std::to_string(sourceRate);
+            const std::string dstStr = std::to_string(best);
+            const std::string declStr = cast_plan_detail::join_rates(rendererRates);
+            if (d.crossFamily) {
+                d.noteZh = "源采样率 " + srcStr + " Hz 升频至 " + dstStr + " Hz（渲染器声明：" + declStr +
+                           " Hz；兼容跨族，非 bit-perfect）";
+                d.noteEn = "Source rate " + srcStr + " Hz upsampled to " + dstStr + " Hz (renderer declared: " +
+                           declStr + " Hz); compatible cross-family, not bit-perfect.";
+            } else {
+                d.noteZh = "源采样率 " + srcStr + " Hz 升频至 " + dstStr + " Hz（渲染器声明：" + declStr + " Hz）";
+                d.noteEn = "Source rate " + srcStr + " Hz upsampled to " + dstStr +
+                           " Hz (renderer declared: " + declStr + " Hz).";
+            }
             return d;
         }
     }
