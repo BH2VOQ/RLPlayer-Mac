@@ -855,7 +855,10 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         [self.paneHost.bottomAnchor constraintEqualToAnchor:self.statusLine.topAnchor constant:-6],
         [self.statusLine.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:24],
         [self.statusLine.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-24],
-        [self.statusLine.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-10],
+        // 底栏是**悬浮**的（Apple Music 式），页面容器一直延伸到窗口底部。
+        // 状态行原先只离底 10pt ⟹ 整行被 66pt 高的播放条压住，只露出半截字
+        // （离屏截图实测）。这里让出播放条高度 66 + 上下留白 14+10。
+        [self.statusLine.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-90],
     ]];
 
     [self showTab:self.tab];
