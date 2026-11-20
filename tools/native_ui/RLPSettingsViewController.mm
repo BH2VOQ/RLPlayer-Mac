@@ -2858,7 +2858,12 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     [stack addArrangedSubview:updGroup];
     self.updGroup = updGroup;
 
-    self.updChannelPopup = [self popupForKey:@"sp_updchannel" items:@[ @"global", @"cn" ]
+    // 列表里显示**可读文案**，不显示内部 key：
+    // 旧实现直接摆 `global` / `cn`，用户在设置页看到的是技术标识（截图实测）。
+    // 读回与提交都按**索引**（read_update_channel_value + indexOfSelectedItem），
+    // 所以只换显示标题不会影响落盘值。
+    self.updChannelPopup = [self popupForKey:@"sp_updchannel"
+                                       items:@[ RLPTr(@"全球（GitHub）"), RLPTr(@"中国大陆（国内后台）") ]
                                       action:@selector(onUpdateChannel:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"更新通道"), self.updChannelPopup,
         RLPTr(@"全球 = GitHub 通道；中国大陆 = 国内后台通道"), t)];

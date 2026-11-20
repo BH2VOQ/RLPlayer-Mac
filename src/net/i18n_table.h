@@ -2549,6 +2549,8 @@ inline const I18nPair* i18n_table(std::size_t* count) {
         {"能力尚未确认，正在探测 UPnP 渲染器…", "Capabilities pending; probing UPnP renderer…"},
         {"UPnP 渲染器未声明支持的采样率或能力未知，请在「输出」中选择可用渲染器。", "UPnP renderer reported no supported sample rates or capabilities are unknown; select an available renderer in Output."},
         {"UPnP 渲染器未声明足够高的 PCM 载波率（≥176.4 kHz / 24-bit），不支持 DoP 输出。", "UPnP renderer does not advertise a high enough PCM carrier rate (≥176.4 kHz / 24-bit); DoP output is not supported."},
+        {"全球（GitHub）", "Global (GitHub)"},
+        {"中国大陆（国内后台）", "Mainland China (domestic backend)"},
         {"AirPlay 共享输出（非 bit-perfect，端到端逐位未获验证）", "AirPlay shared output (non-bit-perfect, end-to-end bit-perfection unverified)"},
         {"AirPlay 设备：将使用系统共享输出（不独占/Hog），端到端 bit-perfect 未获验证", "AirPlay device: will use system shared output (no exclusive/Hog), end-to-end bit-perfect unverified"},
         {"AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM", "AirPlay does not support DoP/Native DSD output; please set output mode to PCM to play"},
