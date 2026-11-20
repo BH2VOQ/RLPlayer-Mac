@@ -379,6 +379,23 @@
     _emptyCard.hidden = configured;
     _gridScroll.hidden = !configured || !_gridMode;
     _listScroll.hidden = !configured || _gridMode;
+    // 没有服务器时，工具栏上的「服务器下拉 / 刷新 / 测试连接 / 上一级」全是**无对象**的操作：
+    // 下拉是空的、测试连接点不动、上一级本来就 disabled。留着只会让页面顶层看起来
+    // 是一排坏掉的控件（离屏截图实测）。空态卡里已经有「去设置里配置 / 重试」两个真入口，
+    // 所以这台面上不需要这些。网格/列表切换同理由空态接管。
+    if (!configured) {
+        _serverPicker.hidden = YES;
+        _refreshBtn.hidden = YES;
+        _pingBtn.hidden = YES;
+        _backButton.hidden = YES;
+        _viewToggle.hidden = YES;
+    } else {
+        _serverPicker.hidden = NO;
+        _refreshBtn.hidden = NO;
+        _pingBtn.hidden = NO;
+        _backButton.hidden = NO;
+        _viewToggle.hidden = NO;
+    }
     if (configured) return;
     _lastEmptyReason = [reason copy];
     _emptyHint.stringValue = [NSString stringWithFormat:@"%@\n%@",
