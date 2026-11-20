@@ -188,7 +188,16 @@ static void test_skip_adopts_latest_filter_settings(const std::string& wav1, con
         std::lock_guard<std::mutex> lk(g_ps.mtx);
         sig = g_ps.signal;
     }
-    ck(sig.find("\"taps\":8192") != std::string::npos, "skip 后第 2 曲采用 taps=8192", sig);
+    // 2026-11-21：判据口径对齐 8b9e446「report real polyphase taps」。
+    // 那条提交之后，信号链里的 `taps` 是**实际系数个数**（poly-sinc-long-lp @44.1k→96k
+    // 实测 90240 = 282 taps/phase × 320 相位），而**用户设定的预算**在 `nominalTaps`。
+    // 本条要证明的是「切曲后用户最新选定的抽头预算真的生效」⟹ 断言 nominalTaps。
+    // （旧断言写死 taps=8192，是 8b9e446 之前的口径，此后恒红；实测同快照里
+    //   nominalTaps:8192、taps:90240、filter:poly-sinc-long-lp，参数确实生效了。）
+    ck(sig.find("\"nominalTaps\":8192") != std::string::npos,
+       "skip 后第 2 曲采用用户设定的抽头预算 nominalTaps=8192", sig);
+    ck(sig.find("\"filter\":\"poly-sinc-long-lp\"") != std::string::npos,
+       "skip 后第 2 曲采用最新滤波器 poly-sinc-long-lp", sig);
     ck(sig.find("\"phaseCode\":\"minimum\"") != std::string::npos, "skip 后第 2 曲采用 phaseCode=minimum", sig);
     ck(sig.find("\"deviceId\":\"null\"") != std::string::npos, "skip 后仍保持 null 后端", sig);
 
@@ -250,7 +259,8 @@ static void test_queue_thread_auto_advance_preserves_session_and_adopts_dsp(
         std::lock_guard<std::mutex> lk(g_ps.mtx);
         sig2 = g_ps.signal;
     }
-    ck(sig2.find("\"taps\":8192") != std::string::npos, "自动续播第 2 曲采用 taps=8192", sig2);
+    ck(sig2.find("\"nominalTaps\":8192") != std::string::npos,
+       "自动续播第 2 曲采用用户设定的抽头预算 nominalTaps=8192", sig2);
     ck(sig2.find("\"phaseCode\":\"minimum\"") != std::string::npos, "自动续播第 2 曲采用 phaseCode=minimum", sig2);
     ck(sig2.find("\"twoStage\":false") != std::string::npos, "自动续播第 2 曲采用 twoStage=false", sig2);
     ck(sig2.find("\"deviceId\":\"null\"") != std::string::npos, "自动续播第 2 曲保持会话 backend=null", sig2);

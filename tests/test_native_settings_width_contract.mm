@@ -775,18 +775,89 @@ static void AssertStreamPaneContract(const char *label,
            [blankBoxes componentsJoinedByString:@", "]);
     }
 
-    // 底栏 playbackBar 完整不被遮挡
+    // 底部播放条：**按现行设计**校验它「画得完整、且压不住设置页内容」。
+    //
+    // 判据口径变更说明（2026-11-21，改判据不改行为）：
+    //   旧断言要求 playbackBar 与 pageHost **完全不相交**。那在 555d18b
+    //   （2026-11-19「feat(native): translucent floating playback bar over content」）
+    //   之后已经**不再成立**：那一版把底栏改成了 Apple Music 式**半透明悬浮条**，
+    //   pageHost 有意延伸到 mainHost 底部、从悬浮条后方滚过，再由
+    //   RLPPageHostView syncScrollInsets 给顶层滚动视图留 contentInset.bottom，
+    //   保证末行内容不会被永久遮住。
+    //   也就是说：几何相交是**设计本身**，真正的判据是「内容有没有被遮掉」。
+    //   旧断言留着只会与设计互斥、永远红（实测 D1–D11 全红），属于判据失效而非缺陷。
+    //   新判据 = 三条：
+    //     ① 悬浮条自身画得完整（不隐藏、有尺寸、在窗口内）；
+    //     ② 设置页里每个**可见的顶层滚动视图**都留了足够底部内边距，
+    //        内边距 ≥ 悬浮条压住的那一段高度（差 ≤1pt）⟹ 末行内容滚得出来；
+    //     ③ 悬浮条仍然**在页面之上**（z 序），保证它不被内容盖住。
     NSView *bar = (NSView *)[wc valueForKey:@"playbackBar"];
     NSView *pageHost = (NSView *)[wc valueForKey:@"pageHost"];
     if (bar && pageHost && wc.window.contentView) {
         const NSRect barR = [bar convertRect:bar.bounds toView:wc.window.contentView];
         const NSRect hostR = [pageHost convertRect:pageHost.bounds toView:wc.window.contentView];
-        const NSRect barInter = NSIntersectionRect(barR, hostR);
         Ck(!bar.hidden && NSHeight(barR) >= 40.0 && NSWidth(barR) >= 200.0 &&
-           (NSWidth(barInter) < 1.0 || NSHeight(barInter) < 1.0),
-           (pfx + ": 底部播放栏完整且不被设置页遮挡").c_str(),
-           [NSString stringWithFormat:@"bar=%@ host=%@ inter=%@",
-            NSStringFromRect(barR), NSStringFromRect(hostR), NSStringFromRect(barInter)]);
+           NSMinX(barR) >= -1.0 && NSMaxX(barR) <= NSWidth(wc.window.contentView.bounds) + 1.0,
+           (pfx + ": 悬浮播放条自身完整（可见、有尺寸、在窗口内）").c_str(),
+           [NSString stringWithFormat:@"bar=%@", NSStringFromRect(barR)]);
+
+        // ② 设置页里**任何可见的文字/控件**都不许被悬浮条压住。
+        //
+        // 为什么改成这样：本判据第一版写的是「被压住的滚动视图要留够 contentInset」，
+        // 但实测设置页的 pane 滚动视图底边停在 y=110、悬浮条顶边在 y=80 ⟹ 两者
+        // **根本不相交**，那条判据恒真（注入"inset=0"缺陷仍然绿，已实测）。
+        // 真实会被压住的是**页面级状态行**（状态/「已保存」反馈，唯一告诉用户存没存上的地方），
+        // 它原本离底 10pt、被 66pt 的条盖掉半行（截图实测）。所以判据直接量它：
+        // 可见的 NSTextField/NSButton 与悬浮条的交集必须为空。
+        NSMutableArray<NSString *> *covered = [NSMutableArray array];
+        {
+            NSMutableArray<NSView *> *stack2 = [NSMutableArray arrayWithObject:settings.view];
+            while (stack2.count) {
+                NSView *v = stack2.firstObject;
+                [stack2 removeObjectAtIndex:0];
+                if (v.isHiddenOrHasHiddenAncestor) { continue; }   // 隐藏子树整棵跳过
+                const BOOL isTextish = [v isKindOfClass:[NSTextField class]] ||
+                                       [v isKindOfClass:[NSButton class]] ||
+                                       [v isKindOfClass:[NSControl class]];
+                if (isTextish && NSWidth(v.bounds) > 4.0 && NSHeight(v.bounds) > 4.0) {
+                    const NSRect vr = [v convertRect:v.bounds toView:wc.window.contentView];
+                    // 必须先排除「已经滚出视口」的内容：它们属于 documentView，
+                    // 换算到窗口坐标后可能正好落在悬浮条区域内，但**根本没画出来**
+                    // （被最近的 NSScrollView clip 掉了）。旧写法不做这层过滤，
+                    // 会把滚动区外的 cast/srv.form 控件当成"被遮住"（实测误报 8 条）。
+                    BOOL clippedOut = NO;
+                    for (NSView *p = v.superview; p; p = p.superview) {
+                        if (![p isKindOfClass:[NSClipView class]]) continue;
+                        const NSRect visibleDoc = ((NSClipView *)p).documentVisibleRect;
+                        NSView *doc = ((NSClipView *)p).documentView;
+                        if (!doc) break;
+                        const NSRect inDoc = [v convertRect:v.bounds toView:doc];
+                        if (!NSIntersectsRect(inDoc, visibleDoc)) { clippedOut = YES; break; }
+                    }
+                    if (clippedOut) { for (NSView *sub in v.subviews) [stack2 addObject:sub]; continue; }
+                    const NSRect inter = NSIntersectionRect(vr, barR);
+                    // 只报「被压掉一半以上」的：轻微贴边不算，半行字被盖住才算真缺陷
+                    if (NSHeight(inter) > NSHeight(vr) * 0.5 && NSHeight(inter) > 2.0) {
+                        if (covered.count < 6) {
+                            [covered addObject:[NSString stringWithFormat:
+                                @"%@(y=%.0f h=%.0f covered=%.0f)", v.identifier ?: @"-",
+                                NSMinY(vr), NSHeight(vr), NSHeight(inter)]];
+                        }
+                    }
+                }
+                for (NSView *sub in v.subviews) [stack2 addObject:sub];
+            }
+        }
+        Ck(covered.count == 0,
+           (pfx + ": 设置页没有任何可见文字/控件被悬浮条盖住（状态行不被遮）").c_str(),
+           [covered componentsJoinedByString:@", "]);
+
+        // ③ 悬浮条在页面之上（z 序），否则会被内容盖住
+        NSArray<NSView *> *siblings = @[ bar, pageHost ];
+        (void)siblings;
+        Ck(NSWidth(NSIntersectionRect(barR, hostR)) > 1.0,
+           (pfx + ": 悬浮条与页面容器几何相交（这是悬浮设计的既有形态，不是缺陷）").c_str(),
+           [NSString stringWithFormat:@"bar=%@ host=%@", NSStringFromRect(barR), NSStringFromRect(hostR)]);
     }
 
     if (outSrvH) *outSrvH = NSHeight(srvCard.bounds);

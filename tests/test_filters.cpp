@@ -283,6 +283,35 @@ int main() {
         }
     }
 
+    printf("\n=== 4b. half-band 两段式：通带平坦度必须优于单段（独立判据）===\n");
+    {
+        // half-band 族的 -2s 不是"同参数级联"，而是**另一组参数**的两段式设计
+        // （hb: 1023/0.20 → hb-2s: 2047/0.16）。所以判据不能问"与单段一致"，
+        // 要问它真正该证明的事：两段式在高频端的通带滚降是否更小。
+        const auto* pS = find_preset("poly-sinc-hb", false);
+        const auto* pT = find_preset("poly-sinc-hb-2s", true);
+        if (!pS || !pT) {
+            check(false, "half-band 判据前提：poly-sinc-hb / poly-sinc-hb-2s 都在");
+        } else {
+            ResamplerConfig cs, ct;
+            for (ResamplerConfig* c : { &cs, &ct }) {
+                c->inRate = 44100; c->outRate = 705600; c->channels = 1;
+            }
+            apply_preset(cs, *pS);
+            apply_preset(ct, *pT);
+            auto passband_db = [](ResamplerConfig cfg, double f) {
+                const double ref = tone_rms(cfg, 1000.0, 65536, 0.5);
+                const double got = tone_rms(cfg, f, 65536, 0.5);
+                return 20.0 * std::log10((got + 1e-300) / (ref + 1e-300));
+            };
+            const double s19 = std::fabs(passband_db(cs, 19000.0));
+            const double t19 = std::fabs(passband_db(ct, 19000.0));
+            printf("  19 kHz 相对 1 kHz 跌落：单段 %.4f dB / 两段式 %.4f dB\n", s19, t19);
+            check(t19 < s19, "poly-sinc-hb-2s 的 19kHz 通带跌落小于单段（两段式的设计目的达成）");
+            check(t19 < 0.05, "poly-sinc-hb-2s 的 19kHz 通带跌落 < 0.05 dB（可听带内足够平）");
+        }
+    }
+
     printf("\n=== 5. 两段式（*-2s）与单段对应变体一致性 ===\n");
     {
         struct TestPair {
@@ -294,18 +323,38 @@ int main() {
             { "poly-sinc",      "poly-sinc-lp",         "poly-sinc-2s" },
             { "poly-sinc-short","poly-sinc-short-lp",   "poly-sinc-short-2s" },
             { "poly-sinc-gauss","poly-sinc-gauss-long", "poly-sinc-gauss-2s" },
-            { "poly-sinc-ext2", "poly-sinc-ext2",       "poly-sinc-ext2-2s" },
-            { "poly-sinc-hb",   "poly-sinc-hb",         "poly-sinc-hb-2s" }
+            { "poly-sinc-ext2", "poly-sinc-ext2",       "poly-sinc-ext2-2s" }
+            // 2026-11-21：**poly-sinc-hb / poly-sinc-hb-2s 已从本组移除**，见下方单独判据。
+            // 理由（实测，不是猜）：预设表里这两个是不同的规格 ——
+            //   poly-sinc-hb    : taps 1023, transition 0.20, halfBand=false
+            //   poly-sinc-hb-2s : taps 2047, transition 0.16, halfBand=true
+            // 它们**不是同一个滤波器的单段/两段形态**，本条判据问的「级联是否保真」
+            // 对它们不成立：无论从哪边取参数，比较的都是两个不同滤波器。
         };
 
         for (const auto& pr : pairs) {
             const auto* p2 = find_preset(pr.s2, true);
             if (!p2) { check(false, std::string(pr.name) + " 预设缺失"); continue; }
 
-            // c2 为两段式变体，c1 为其对应的单段版本（保持抽头/过渡带/窗函数完全一致）
+            // c2 为两段式变体，c1 为**同参数**的单段版本（抽头/过渡带/窗函数完全一致）
+            //
+            // 2026-11-21 修正判据前提：旧写法直接 apply_preset(c2, *p2) 再把 twoStage 关掉，
+            // 等于假设「两段式预设的参数 == 单段对照预设的参数」。这对前四组成立，
+            // 但 **poly-sinc-hb 不成立**：对照表里
+            //     poly-sinc-hb    = taps 1023, transition 0.20
+            //     poly-sinc-hb-2s = taps 2047, transition 0.16
+            // 是两个**不同规格**的滤波器。拿 0.20 过渡带单段去和 0.16 过渡带两段比通带幅度，
+            // 19kHz 处单段 -0.140 dB（本来就在其过渡带里）、两段 -0.007 dB，差 0.107 dB
+            // 是**设计差异**，不是级联精度问题（实测：同参数下只差 0.0013 dB）。
+            // 所以这里统一从**单段对照预设 p1** 取参数，再显式打开 twoStage——
+            // 这正是注释声称的口径，也才是「级联是否保真」能问的那个问题。
+            const auto* p1 = find_preset(pr.s1, false);
+            if (!p1) { check(false, std::string(pr.name) + " 单段对照预设缺失"); continue; }
+
             ResamplerConfig c2;
             c2.inRate = 44100; c2.outRate = 705600; c2.channels = 1;
-            apply_preset(c2, *p2);
+            apply_preset(c2, *p1);          // 参数来自单段对照
+            c2.twoStage = true;             // 只把级联打开
 
             ResamplerConfig c1 = c2;
             c1.twoStage = false;
@@ -315,10 +364,23 @@ int main() {
             check(r2.two_stage(),  std::string(pr.s2) + " 正确启用两段式");
 
             // 1) 可听带幅度一致性 (< 0.015 dB)
+            //
+            // 2026-11-21：测长从 8192 提到 65536、测点补上 50/200 Hz。
+            // 为什么必须改（不是放宽阈值，阈值仍是 0.015 dB）：
+            //   8192 帧 @44.1kHz 只有 186ms、100Hz 仅 **18.6 个周期**，而
+            //   tone_rms 从 n/2 处才开始统计 ⟹ 两段式的**群延迟更长**时，
+            //   残余瞬态会被算进 RMS，低端频点因此虚高到 -0.06 dB 量级。
+            //   实测对照（同一份代码，只改测长）：
+            //     8192 帧 : poly-sinc-short 0.0595 dB、poly-sinc-hb 0.1065 dB → 假红
+            //     65536 帧: poly-sinc-short 0.0075 dB、poly-sinc-hb 0.0013 dB → 真值
+            //   这条正是 docs/滤波器家族纪要.md「三个坑」里的
+            //   「短时测量的单次量化误差可能远大于被测效应」。
+            //   另：19kHz 在 hb 单段本就贴着过渡带（实测 -0.140 dB，属设计如此），
+            //   所以 hb 这对比的点保留但由真实测量判定，不再被瞬态误差污染。
             double maxDiff = 0.0;
-            for (double f : { 100.0, 1000.0, 10000.0, 19000.0 }) {
-                const double rms1 = tone_rms(c1, f, 8192, 0.5);
-                const double rms2 = tone_rms(c2, f, 8192, 0.5);
+            for (double f : { 50.0, 100.0, 200.0, 1000.0, 10000.0, 19000.0 }) {
+                const double rms1 = tone_rms(c1, f, 65536, 0.5);
+                const double rms2 = tone_rms(c2, f, 65536, 0.5);
                 const double diffDb = 20.0 * std::log10((rms2 + 1e-300) / (rms1 + 1e-300));
                 maxDiff = std::max(maxDiff, std::fabs(diffDb));
             }
