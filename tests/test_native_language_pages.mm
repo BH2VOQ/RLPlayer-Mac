@@ -217,7 +217,10 @@ int main(void) {
         Ck([albums.pageTitle isEqualToString:@"Albums"], @"Albums 切英文 pageTitle", albums.pageTitle);
         Ck([artists.pageTitle isEqualToString:@"Artists"], @"Artists 切英文 pageTitle", artists.pageTitle);
         Ck(ContainsText(artistDetail.view, @"Johann Sebastian Bach"), @"ArtistDetail 不翻用户艺术家名", @"artist name changed");
-        Ck(ContainsText(artistDetail.view, RLPTr(@"AI 资料")) && ContainsText(artistDetail.view, RLPTr(@"返回艺术家列表")), @"ArtistDetail/Knowledge 切英文静态文案", @"missing AI Bio/Back");
+        // 2026-11-21：艺术家页重排成 web 的三张 sec-card，**不再复用播放页的 RLPKnowledgeView 抽屉**
+        // （抽屉自带的「AI 资料」标题随之下线）。本页资料卡的标题按 web renderSummaryContent
+        // 统一措辞是「AI 整理」。判据意图不变：数据类静态文案必须跟着语言切换。
+        Ck(ContainsText(artistDetail.view, RLPTr(@"AI 整理")) && ContainsText(artistDetail.view, RLPTr(@"返回艺术家列表")), @"ArtistDetail 切英文静态文案", @"missing AI Summary/Back");
         Ck([tracks.pageTitle isEqualToString:@"Tracks"], @"Tracks 切英文 pageTitle", tracks.pageTitle);
         Ck([folders.pageTitle isEqualToString:@"Folders"], @"Folders 切英文 pageTitle", folders.pageTitle);
         Ck(!foldersPath || [foldersPath.stringValue isEqualToString:@"/Users/music/FLAC"], @"Folders 切英文后保留路径草稿", foldersPath.stringValue);
