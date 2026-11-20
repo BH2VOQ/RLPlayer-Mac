@@ -555,6 +555,8 @@ struct CastState {
     // 1.1.3 投放升频新增状态字段
     bool        upsampleApplied = false;
     bool        upsampleForced = false;   // 目标率是"用户强制"的：未获渲染器声明验证
+    bool        crossFamily = false;      // 兼容跨族升频（非 bit-perfect）
+    std::string rateFamilyPolicy;         // 本次投放使用的采样率族策略名（prefer/strict/compatible）
     uint32_t    servedRate = 0;      // 实际供出去的采样率
     int         servedBits = 0;      // 实际供出去的位深
     std::string servedFilter;        // 实际使用的命名滤波器（未知名字已回退时显示回退后的名字）
@@ -587,6 +589,7 @@ struct CastStartParams {
     uint32_t    ceilingRate   = 192000;
     std::string filterName;      // 命名滤波器；空 = 默认 "poly-sinc-lp"
     std::string requestedRate;   // "" | "src" | "follow" | "max" | 十进制数字
+    std::string rateFamilyPolicy; // "" = prefer | "strict" | "compatible"
 };
 
 struct CastStartResult {
@@ -765,6 +768,9 @@ public:
         state_.lastVolumeError.clear();
         state_.upsampleApplied = false;
         state_.upsampleForced = false;
+        state_.crossFamily = false;
+        state_.rateFamilyPolicy = rta::audio::rate_family_policy_name(
+            rta::audio::parse_rate_family_policy(p.rateFamilyPolicy));
         state_.servedRate = 0;
         state_.servedBits = 0;
         state_.servedFilter.clear();
@@ -1530,7 +1536,8 @@ private:
                 rendererRates,
                 p.ceilingRate,
                 p.applyUpsample,
-                p.forceUpsampleRate
+                p.forceUpsampleRate,
+                rta::audio::parse_rate_family_policy(p.rateFamilyPolicy)
             );
 
             if (!rateDecision.upsample) {
@@ -1539,6 +1546,7 @@ private:
                     std::lock_guard<std::mutex> lk(mtx_);
                     state_.upsampleApplied = false;
                     state_.upsampleForced = false;
+                    state_.crossFamily = false;
                     state_.servedRate = sourceRate;
                     state_.servedBits = sourceBits;
                     state_.upsampleNote = rateDecision.noteZh;
@@ -1744,6 +1752,7 @@ private:
                     state_.prepFramesDone = 0;
                     state_.upsampleApplied = true;
                     state_.upsampleForced = rateDecision.forced;
+                    state_.crossFamily = rateDecision.crossFamily;
                     state_.servedRate = targetRate;
                     state_.servedBits = servedBits;
                     state_.servedFilter = effectiveFilter;

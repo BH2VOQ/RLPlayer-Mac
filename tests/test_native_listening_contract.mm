@@ -82,6 +82,7 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong) NSTextField *presetNotes;
 @property (nonatomic, copy, nullable) NSDictionary *presetCapsJSON;
 @property (nonatomic, copy, nullable) NSString *presetCapsKey;
+@property (nonatomic, assign) NSUInteger presetCapsSeq;
 @property (nonatomic, copy, nullable) NSString *presetCapsDevice;
 @property (nonatomic, copy, nullable) NSString *localDevice;
 @property (nonatomic, strong, nullable) NSPopover *popover;
@@ -107,6 +108,9 @@ static NSView *FindById(NSView *root, NSString *ident) {
 + (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
                                                   playbackActive:(BOOL)active;
 - (void)applyPresetCaps:(NSDictionary * _Nullable)json;
+- (NSString *)currentPresetCapsKey;
+- (NSUInteger)beginPresetCapsRequestWithKey:(NSString *)key;
+- (BOOL)completePresetCaps:(NSDictionary * _Nullable)json seq:(NSUInteger)seq key:(NSString *)key;
 - (void)syncCapabilitiesUI;
 - (void)syncOutputSummary;
 - (void)syncPlayAndStyleCards;
@@ -1567,6 +1571,71 @@ int main(int argc, char **argv) {
                "C3k2 UPnP 探测失败时不回落到 CoreAudio 默认设备并显示「能力未知」",
                qvc.capsInfoLabel.stringValue ?: @"nil");
 
+            // C3k3 UPnP + PCM + rate=max：卡面目标率随 caps 与 castCeiling 随动（与投放 compatible 决策一致）
+            {
+                NSDictionary *(^upnpCaps)(NSString *, NSArray *, NSNumber *) = ^NSDictionary *(NSString *nm, NSArray *rates, NSNumber *ceiling) {
+                    NSMutableDictionary *j = [@{
+                        @"ok": @YES,
+                        @"device": @{@"name": nm, @"backend": @"upnp", @"rates": rates,
+                                     @"maxRate": rates.lastObject, @"dop": @NO},
+                    } mutableCopy];
+                    if (ceiling) j[@"castCeiling"] = ceiling;
+                    return j;
+                };
+                [qvc applyPresetCaps:upnpCaps(@"DAC-192", @[@44100, @192000], @192000)];
+                CK([qvc.playSub.stringValue containsString:@"192"],
+                   "C3k3a backend=upnp rate=max caps maxRate=192000 → playSub 含 192", qvc.playSub.stringValue ?: @"nil");
+                [qvc applyPresetCaps:upnpCaps(@"DAC-96", @[@44100, @48000, @96000], @192000)];
+                CK([qvc.playSub.stringValue containsString:@"96"] && ![qvc.playSub.stringValue containsString:@"192"],
+                   "C3k3b apply 96000 caps → playSub 含 96（随动，不含 192）", qvc.playSub.stringValue ?: @"nil");
+                [qvc applyPresetCaps:upnpCaps(@"DAC-384", @[@44100, @192000, @384000], @192000)];
+                CK([qvc.playSub.stringValue containsString:@"192"] && ![qvc.playSub.stringValue containsString:@"384"],
+                   "C3k3c caps 384k 但 castCeiling=192k → playSub 为 192（与实投一致）", qvc.playSub.stringValue ?: @"nil");
+                [qvc applyPresetCaps:upnpCaps(@"DAC-mix", @[@44100, @176400, @192000], @192000)];
+                CK([qvc.playSub.stringValue containsString:@"192"] && ![qvc.playSub.stringValue containsString:@"176"],
+                   "C3k3d 声明 {176.4k,192k} → 卡面 192（禁止卡面 192 实投 176.4）", qvc.playSub.stringValue ?: @"nil");
+            }
+
+            // C3k4 旧设备 A 的 caps 回包延迟：切到 B，B 先回、A 后回 → 最终为 B，A 被丢弃
+            {
+                RLPQuickStartViewController *sq = [[RLPQuickStartViewController alloc] init];
+                sq.view.frame = NSMakeRect(0, 0, 1100, 760);
+                sq.filters = items;
+                NSDictionary *(^kv)(NSString *) = ^NSDictionary *(NSString *dev) {
+                    return @{@"backend": @"upnp", @"upnpdev": dev, @"rate": @"max",
+                             @"filter": @"poly-sinc-tight-lp", @"dsd": @"0", @"directsdm": @"0"};
+                };
+                NSDictionary *(^capsFor)(NSString *, NSArray *) = ^NSDictionary *(NSString *nm, NSArray *rates) {
+                    return @{@"ok": @YES, @"castCeiling": @192000,
+                             @"device": @{@"name": nm, @"backend": @"upnp", @"rates": rates,
+                                          @"maxRate": rates.lastObject, @"dop": @NO}};
+                };
+                sq.settings = kv(@"uuid:A");
+                sq.presetCapsKey = [sq currentPresetCapsKey];
+                NSString *keyA = sq.presetCapsKey;
+                const NSUInteger seqA = [sq beginPresetCapsRequestWithKey:keyA];
+                sq.settings = kv(@"uuid:B");
+                sq.presetCapsKey = [sq currentPresetCapsKey];
+                NSString *keyB = sq.presetCapsKey;
+                const NSUInteger seqB = [sq beginPresetCapsRequestWithKey:keyB];
+                const BOOL okB = [sq completePresetCaps:capsFor(@"Renderer-B", @[@44100, @96000]) seq:seqB key:keyB];
+                const BOOL okA = [sq completePresetCaps:capsFor(@"Renderer-A", @[@44100, @192000]) seq:seqA key:keyA];
+                CK(okB && !okA && [sq.presetCapsDevice isEqualToString:@"Renderer-B"] &&
+                   [sq.capsInfoLabel.stringValue containsString:@"Renderer-B"] &&
+                   ![sq.capsInfoLabel.stringValue containsString:@"Renderer-A"] &&
+                   [sq.playSub.stringValue containsString:@"96"] && keyA.length && ![keyA isEqualToString:keyB],
+                   "C3k4 B 先回 A 后回：最终 presetCapsDevice/capsInfoLabel/playSub 为 B，A 被丢弃",
+                   [NSString stringWithFormat:@"okB=%d okA=%d dev=%@ info=%@ sub=%@", okB, okA,
+                    sq.presetCapsDevice ?: @"nil", sq.capsInfoLabel.stringValue ?: @"", sq.playSub.stringValue ?: @""]);
+                // 同一键下旧序号也必须丢弃（只认最新请求）
+                const NSUInteger seqB1 = [sq beginPresetCapsRequestWithKey:keyB];
+                const NSUInteger seqB2 = [sq beginPresetCapsRequestWithKey:keyB];
+                const BOOL lateOld = [sq completePresetCaps:capsFor(@"Stale-B", @[@44100, @48000]) seq:seqB1 key:keyB];
+                const BOOL newest = [sq completePresetCaps:capsFor(@"Renderer-B2", @[@44100, @96000]) seq:seqB2 key:keyB];
+                CK(!lateOld && newest && [sq.presetCapsDevice isEqualToString:@"Renderer-B2"],
+                   "C3k4b 同键旧序号回包丢弃、最新序号落地", sq.presetCapsDevice ?: @"nil");
+            }
+
             // C3l 后端 GET /api/preset/caps：真实回环 mock UPnP 渲染器
             TestLoopbackUpnpRenderer mockRenderer(
                 "Living Room DAC",
@@ -1609,6 +1678,20 @@ int main(int argc, char **argv) {
                    mockRenderer.descHits.load() > 0 && mockRenderer.cmHits.load() > 0,
                    "C3l /api/preset/caps backend=upnp 探测选中 UPnP 渲染器 ProtocolInfo 且不调用 CoreAudio 探测",
                    capsRes.description ?: @"nil");
+
+                // C3l2 caps JSON 新字段契约：probeKey / probeBackend / probeUpnpDev / castCeiling / refresh
+                NSDictionary *capsRef = [core jsonWithMethod:@"GET" path:@"/api/preset/caps?refresh=1" body:nil];
+                CK([capsRes[@"probeKey"] isKindOfClass:[NSString class]] &&
+                   [capsRes[@"probeKey"] containsString:descURL] &&
+                   [capsRes[@"probeBackend"] isEqualToString:@"upnp"] &&
+                   [capsRes[@"probeUpnpDev"] isEqualToString:descURL] &&
+                   [capsRes[@"castCeiling"] unsignedIntegerValue] > 0 &&
+                   ![capsRes[@"refresh"] boolValue] &&
+                   [capsRef[@"refresh"] boolValue] &&
+                   [capsRef[@"probeKey"] isEqualToString:capsRes[@"probeKey"]] &&
+                   [capsRef[@"device"][@"rates"] isEqualToArray:wantRates],
+                   "C3l2 /api/preset/caps 回显 probeKey/probeBackend/probeUpnpDev/castCeiling，refresh=1 真实重探测",
+                   capsRef.description ?: @"nil");
             }
 
             // C3m 可注入 UPnP probe hook：caps 与 /api/preset/apply 不走 CoreAudio 且按 UPnP caps 规划

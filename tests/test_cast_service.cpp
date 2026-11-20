@@ -2120,6 +2120,55 @@ int main() {
             std::remove(src96kWavPath.c_str());
         }
 
+        // ================= 判据 13: Compatible 跨族 44.1k → 192k（渲染器只声明 192000） =================
+        {
+            mock.set_sink("http-get:*:audio/L24:rate=192000");
+            for (int variant = 0; variant < 2; ++variant) {
+                const bool compat = (variant == 0);
+                CastStartParams pc;
+                pc.dev = descUrl;
+                pc.file = srcWavPath;
+                pc.applyUpsample = true;
+                pc.requestedRate = "max";
+                pc.ceilingRate = 192000;
+                pc.filterName = "poly-sinc-lp";
+                pc.rateFamilyPolicy = compat ? "compatible" : "prefer";
+                auto startRes = mgr.start(pc);
+                ck(startRes.ok, compat ? "判据 13(compatible): 起播请求受理成功" : "判据 13(prefer): 起播请求受理成功");
+                for (int i = 0; i < 60; ++i) {
+                    if (mgr.get_state().phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CastState stc = mgr.get_state();
+                if (compat) {
+                    ck(stc.phase == "playing", "判据 13(compatible): 进入 playing", stc.phase);
+                    ck(stc.upsampleApplied == true, "判据 13(compatible): upsampleApplied 为 true");
+                    ck(stc.servedRate == 192000, "判据 13(compatible): servedRate 精确为 192000", std::to_string(stc.servedRate));
+                    ck(stc.crossFamily == true, "判据 13(compatible): crossFamily 为 true");
+                    ck(stc.rateFamilyPolicy == "compatible", "判据 13(compatible): 状态回显 rateFamilyPolicy", stc.rateFamilyPolicy);
+                    ck(stc.upsampleNoteEn.find("not bit-perfect") != std::string::npos,
+                       "判据 13(compatible): note 声明非 bit-perfect", stc.upsampleNoteEn);
+                    HttpFetchResult rc = fetch_http_data(mock.get_current_uri());
+                    ck(rc.body.size() >= 44, "判据 13(compatible): 获取到合法 WAV 头");
+                    if (rc.body.size() >= 44) {
+                        const uint8_t* h = reinterpret_cast<const uint8_t*>(rc.body.data());
+                        uint32_t rate = (uint32_t)h[24] | ((uint32_t)h[25] << 8) | ((uint32_t)h[26] << 16) | ((uint32_t)h[27] << 24);
+                        uint32_t dataSz = (uint32_t)h[40] | ((uint32_t)h[41] << 8) | ((uint32_t)h[42] << 16) | ((uint32_t)h[43] << 24);
+                        uint16_t ch = (uint16_t)h[22] | ((uint16_t)h[23] << 8);
+                        uint16_t bits = (uint16_t)h[34] | ((uint16_t)h[35] << 8);
+                        ck(rate == 192000, "判据 13(compatible): WAV 头采样率精确为 192000", std::to_string(rate));
+                        const uint64_t expFrames = (uint64_t)std::llround((double)kSrcFrames * 192000.0 / 44100.0);
+                        ck(dataSz == expFrames * (uint64_t)ch * ((bits + 7) / 8),
+                           "判据 13(compatible): 帧数守恒且 data 字节等于理论值");
+                    }
+                } else {
+                    ck(stc.upsampleApplied == false && stc.servedRate == 44100 && stc.crossFamily == false,
+                       "判据 13(prefer): 同族无解 → 保持源直供、crossFamily=false");
+                }
+                mgr.stop();
+            }
+        }
+
         // 清理测试源文件与 Mock
         mock.stop();
         std::remove(srcWavPath.c_str());

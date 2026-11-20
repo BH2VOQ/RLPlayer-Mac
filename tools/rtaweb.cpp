@@ -2843,9 +2843,11 @@ static std::vector<uint32_t> probe_exclusive_rates(const std::string& deviceId, 
 // ⚠️ 如实说明：重试与缓存这两层依赖真实设备的瞬时态，没有自动化测试覆盖（离线造不出
 //    端点重配置窗口），只有代码审查 + 逻辑推演 + 现场日志形态推演。
 static std::vector<uint32_t> probe_rates_cached(const std::string& deviceId, int bits, int channels,
-                                                const char* why, int tries = 3) {
+                                                const char* why, int tries = 3,
+                                                bool allowStale = true) {
     std::vector<uint32_t> rr = probe_exclusive_rates(deviceId, bits, channels, tries);
     if (!rr.empty()) return rr;
+    if (!allowStale) return rr;      // refresh=1：强制探测，绝不拿旧缓存冒充新结果
     rr = rate_cache_get(deviceId, bits, channels);
     if (!rr.empty()) {
         play_log(std::string("RATEPROBE_STALE ") + why + " 探测为空，沿用上次结果（最高 " +
@@ -2997,6 +2999,7 @@ struct CastPlaybackUpsampleDecision {
     bool applyUpsample = false;
     std::string requestedRate;
     std::string filterName;
+    std::string policyName = "compatible";   // rateFamilyPolicy（投放升频跟随该策略）
 };
 
 // 投放实际升频统一跟随全局「播放方式 / 升频开关」，独立 cast_upsample 不再能反向覆盖：
@@ -3038,7 +3041,10 @@ static CastPlaybackUpsampleDecision current_cast_upsample_from_conf() {
     const std::string dir = conf_get("directsdm", "0");
     const bool directSdm = (dir == "1" || dir == "true");
     const std::string filter = conf_get("filter", "");
-    return resolve_cast_upsample_from_playback(rate, dsd.level, directSdm, filter);
+    auto d = resolve_cast_upsample_from_playback(rate, dsd.level, directSdm, filter);
+    const std::string pol = conf_get("rateFamilyPolicy", "compatible");
+    d.policyName = rta::audio::valid_rate_family_policy(pol) ? pol : std::string("prefer");
+    return d;
 }
 
 static uint32_t get_cast_upsample_ceiling() {
@@ -3078,6 +3084,7 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
     cp.ceilingRate = get_cast_upsample_ceiling();
     cp.filterName = castDec.filterName;
     cp.requestedRate = castDec.requestedRate;
+    cp.rateFamilyPolicy = castDec.policyName;
     rta::net::CastManager::instance().stop();
     const auto r = rta::net::CastManager::instance().start(cp);
     if (!r.ok) {
@@ -4063,7 +4070,7 @@ static void probe_upnp_renderer_caps(const std::string& upnpDev,
     }
 }
 
-static rta::engine::DeviceCaps preset_probe_caps() {
+static rta::engine::DeviceCaps preset_probe_caps(bool force = false, std::string* probeKeyOut = nullptr) {
     using rta::engine::DeviceCaps;
     DeviceCaps c;
     const std::string savedBackend = conf_get("backend", "");
@@ -4084,14 +4091,16 @@ static rta::engine::DeviceCaps preset_probe_caps() {
             if (!activeDev.empty()) upnpDev = activeDev;
             else if (upnpDev.empty() && !castSt.device.empty()) upnpDev = castSt.device;
         }
-        probe_upnp_renderer_caps(upnpDev, bits, c);
+        if (probeKeyOut) *probeKeyOut = std::string("upnp|") + conf_get("device", "") + "|" + upnpDev;
+        probe_upnp_renderer_caps(upnpDev, bits, c);   // UPnP 每次都真实探测（不走进程内缓存）
         return c;
     }
 
     const std::string devId = conf_get("device", "");
     c.backend = savedBackend.empty() ? "coreaudio" : savedBackend;
     g_presetCoreAudioProbeCount.fetch_add(1, std::memory_order_relaxed);
-    const auto rates = probe_rates_cached(devId, bits, ch, "PRESET_CAPS");
+    if (probeKeyOut) *probeKeyOut = normBe + "|" + devId + "|" + conf_get("upnpdev", "");
+    const auto rates = probe_rates_cached(devId, bits, ch, "PRESET_CAPS", 3, !force);
     c.rates = rates;
     c.maxRate = rates.empty() ? 0u : rates.back();
     const bool isSharedOrOffline = (normBe == "coreaudio-shared" || normBe == "naa" || normBe == "null");
@@ -4247,8 +4256,9 @@ static bool preset_write_conf(const std::map<std::string, std::string>& kv, std:
 }
 
 // GET /api/preset/caps → 设备能力（字段与界面约定一致，多带 notes 便于排查）
-static std::string preset_caps_json() {
-    const rta::engine::DeviceCaps c = preset_probe_caps();
+static std::string preset_caps_json(bool force = false) {
+    std::string probeKey;
+    const rta::engine::DeviceCaps c = preset_probe_caps(force, &probeKey);
     play_log(preset_caps_line(c));
     const bool castActive = g_upnpPlayer.load() || rta::net::CastManager::instance().get_state().running;
     std::ostringstream j;
@@ -4269,6 +4279,11 @@ static std::string preset_caps_json() {
       << ",\"channels\":" << c.channels
       << ",\"bits\":" << c.bits
       << "},\"readonly\":true,\"castActive\":" << (castActive ? "true" : "false")
+      << ",\"probeKey\":\"" << jesc(probeKey) << "\""
+      << ",\"probeBackend\":\"" << jesc(normalize_backend_id(conf_get("backend", ""))) << "\""
+      << ",\"probeUpnpDev\":\"" << jesc(conf_get("upnpdev", "")) << "\""
+      << ",\"refresh\":" << (force ? "true" : "false")
+      << ",\"castCeiling\":" << get_cast_upsample_ceiling()
       << ",\"probeNote\":\"" << jesc(c.probeNote) << "\",\"notes\":[";
     if (!c.probeNote.empty()) j << "\"" << jesc(c.probeNote) << "\"";
     j << "]}";
@@ -14037,6 +14052,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"upsampleApplied\":" << (st.upsampleApplied ? "true" : "false")
               << ",\"upsampleForced\":" << (st.upsampleForced ? "true" : "false")
               << ",\"castUpsampleForce\":" << (castForceEff ? "true" : "false")
+              << ",\"castRateFamilyPolicy\":\"" << jesc(st.rateFamilyPolicy.empty() ? castDec.policyName : st.rateFamilyPolicy) << "\""
+              << ",\"castCrossFamily\":" << (st.crossFamily ? "true" : "false")
               << ",\"servedRate\":" << st.servedRate
               << ",\"servedFilter\":\"" << jesc(st.servedFilter) << "\""
               << ",\"servedBits\":" << st.servedBits
@@ -14073,6 +14090,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 if (j.has("ceilingRate")) p.ceilingRate = (uint32_t)j["ceilingRate"].n();
                 if (j.has("filterName")) p.filterName = j["filterName"].s();
                 if (j.has("requestedRate")) p.requestedRate = j["requestedRate"].s();
+                if (j.has("rateFamilyPolicy")) p.rateFamilyPolicy = j["rateFamilyPolicy"].s();
             } else {
                 std::istringstream is(rq.body);
                 std::string tok;
@@ -14093,6 +14111,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                     else if (k == "ceilingRate") p.ceilingRate = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
                     else if (k == "filterName") p.filterName = v;
                     else if (k == "requestedRate") p.requestedRate = v;
+                    else if (k == "rateFamilyPolicy") p.rateFamilyPolicy = v;
                 }
             }
             if (p.port == 0) p.port = 8912;
@@ -14112,6 +14131,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 p.requestedRate = castDec.requestedRate;
             }
             p.forceUpsampleRate = p.applyUpsample && (p.forceUpsampleRate || conf_get("cast_upsample_force", "0") == "1");
+            p.rateFamilyPolicy = castDec.policyName;   // 与播放设置一致，请求体不能反向覆盖
             // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
             // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
             g_upnpQueueActive.store(false);
@@ -15084,7 +15104,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
     //    所以 pcm2dsd 档的 notes 只写 DoP 载波率，绝不出现「原生 / 1-bit 直送」。
     if (rq.path.rfind("/api/preset", 0) == 0) {
         ct = "application/json; charset=utf-8";
-        if (rq.path.rfind("/api/preset/caps", 0) == 0) return preset_caps_json();
+        if (rq.path.rfind("/api/preset/caps", 0) == 0) {
+            const auto capsQ = preset_query(rq.path);
+            const auto rf = capsQ.find("refresh");
+            return preset_caps_json(rf != capsQ.end() && (rf->second == "1" || rf->second == "true"));
+        }
         if (rq.path.rfind("/api/preset/apply", 0) == 0) return preset_apply_json(rq.path);
         rta::net::webui_set_status(400);
         return std::string("{\"ok\":false,\"error\":\"未知的预设端点：只支持 /api/preset/caps 与 "

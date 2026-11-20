@@ -474,6 +474,39 @@ int main() {
            bpForceDec.reason);
     }
 
+    // ---------- RateFamilyPolicy：Compatible 跨族 ----------
+    {
+        const auto P = RateFamilyPolicy::Compatible;
+        auto dCmp = decide_cast_target_rate(44100, "max", {192000}, 192000, true, false, P);
+        ck(dCmp.upsample && dCmp.targetRate == 192000 && dCmp.crossFamily && dCmp.reason == "ok",
+           "Compatible: 44100+max+{192000} → 192000 upsample crossFamily", dCmp.reason);
+        ck(dCmp.noteEn.find("compatible cross-family, not bit-perfect") != std::string::npos &&
+           dCmp.noteZh.find("兼容跨族，非 bit-perfect") != std::string::npos && !has_cjk(dCmp.noteEn),
+           "Compatible: note 中英文如实声明非 bit-perfect", dCmp.noteEn);
+        for (auto pol : {RateFamilyPolicy::Prefer, RateFamilyPolicy::Strict}) {
+            auto d = decide_cast_target_rate(44100, "max", {192000}, 192000, true, false, pol);
+            ck(!d.upsample && d.targetRate == 44100 && d.reason == "no-same-family" && !d.crossFamily,
+               "Prefer/Strict: 44100+max+{192000} → 44100 no-same-family", d.reason);
+        }
+        auto dDef = decide_cast_target_rate(44100, "max", {192000}, 192000, true, false);
+        ck(!dDef.upsample && dDef.reason == "no-same-family", "默认策略仍是 Prefer（同族整数倍）", dDef.reason);
+        auto d2 = decide_cast_target_rate(44100, "max", {176400, 192000}, 192000, true, false, P);
+        ck(d2.upsample && d2.targetRate == 192000 && d2.crossFamily,
+           "Compatible: 44100+{176400,192000} → 192000（最高声明率）", std::to_string(d2.targetRate));
+        auto d3 = decide_cast_target_rate(48000, "max", {96000}, 192000, true, false, P);
+        ck(d3.upsample && d3.targetRate == 96000 && !d3.crossFamily,
+           "Compatible: 48000+{96000} → 96000 同族不变且 crossFamily=false", std::to_string(d3.targetRate));
+        auto d4 = decide_cast_target_rate(44000, "192000", {192000}, 192000, true, false, P);
+        ck(d4.upsample && d4.targetRate == 192000, "Compatible: 44000+\"192000\"+{192000} → 192000", std::to_string(d4.targetRate));
+        auto d5 = decide_cast_target_rate(44100, "192000", {96000}, 192000, true, false, P);
+        ck(!d5.upsample && d5.targetRate == 44100, "Compatible: 请求值未被渲染器声明 → 不升频", d5.reason);
+        auto d6 = decide_cast_target_rate(44100, "max", {192000}, 96000, true, false, P);
+        ck(!d6.upsample, "Compatible: 声明率超过 ceiling 不被选中", std::to_string(d6.targetRate));
+        auto d7 = decide_cast_target_rate(44100, "max", {}, 192000, true, false, P);
+        ck(d7.undeclared && d7.targetRate == 44100 && !d7.upsample,
+           "Compatible: 渲染器未声明 → 仍按同族整数倍规则，跨族上限不启用", std::to_string(d7.targetRate));
+    }
+
     std::printf("\n=======================================================\n");
     std::printf("test_cast_upsample_plan 结果: PASS=%d, FAIL=%d\n", g_pass, g_fail);
     std::printf("=======================================================\n");

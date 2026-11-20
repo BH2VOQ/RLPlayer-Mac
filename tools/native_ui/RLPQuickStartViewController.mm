@@ -1386,6 +1386,7 @@
 @property (nonatomic, copy, nullable) NSString *localDevice;
 @property (nonatomic, copy, nullable) NSDictionary *presetCapsJSON;
 @property (nonatomic, copy, nullable) NSString *presetCapsKey;
+@property (nonatomic, assign) NSUInteger presetCapsSeq;   // 单调递增：只有最新一次探测的回包可以落地
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, copy, nullable) NSString *defaultDeviceName;
 @property (nonatomic, copy) NSArray<NSString *> *lastRoots;
@@ -3958,10 +3959,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         self_.settings = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : @{};
         self_.localDevice = RLPRememberedLocalDevice(self_.settings, self_.localDevice);
         [self_ syncDeviceSelection];
-        NSString *bk = [self_ str:@"backend" def:@"coreaudio"];
-        NSString *dev = [self_ str:@"device" def:@""];
-        NSString *upnpDev = [self_ str:@"upnpdev" def:@""];
-        NSString *capsKey = [NSString stringWithFormat:@"%@|%@|%@", bk, dev, upnpDev];
+        NSString *capsKey = [self_ currentPresetCapsKey];
         if (![capsKey isEqualToString:self_.presetCapsKey ?: @""]) {
             self_.presetCapsKey = capsKey;
             [self_ loadPresetCaps:YES];
@@ -4045,6 +4043,20 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
                 ? [dev[@"maxRate"] doubleValue] : 0.0;
             if ([rateSet isEqualToString:@"max"] && maxRate > 0) {
                 double capped = maxRate > 384000.0 ? 384000.0 : maxRate;
+                if (kvIsUpnp) {
+                    // 投放实际目标 = min(渲染器声明最高率, 投放上限) 内的最高声明率（compatible 跨族语义）。
+                    const double ceil = [self.presetCapsJSON[@"castCeiling"] respondsToSelector:@selector(doubleValue)]
+                        ? [self.presetCapsJSON[@"castCeiling"] doubleValue] : 0.0;
+                    if (ceil > 0 && ceil < capped) capped = ceil;
+                    double best = 0;
+                    for (id r in ([dev[@"rates"] isKindOfClass:[NSArray class]] ? (NSArray *)dev[@"rates"] : @[])) {
+                        if ([r respondsToSelector:@selector(doubleValue)]) {
+                            const double v = [r doubleValue];
+                            if (v <= capped && v > best) best = v;
+                        }
+                    }
+                    if (best > 0) capped = best;
+                }
                 self.playSub.stringValue = [NSString stringWithFormat:@"%.1f kHz", capped / 1000.0];
             } else if (rateSet.doubleValue > 0) {
                 self.playSub.stringValue = [NSString stringWithFormat:@"%.1f kHz", rateSet.doubleValue / 1000.0];
@@ -4757,13 +4769,38 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
 /// /api/preset/caps：探测本机对官方推荐预设的支持能力（web loadPresetCaps 同源）。
 - (void)loadPresetCaps:(BOOL)force {
     if (![RLPCoreClient shared].started) return;
+    NSString *key = [self currentPresetCapsKey];
+    self.presetCapsKey = key;   // 期望键：回包落地时必须仍等于它
+    const NSUInteger seq = [self beginPresetCapsRequestWithKey:key];
     NSString *url = force ? @"/api/preset/caps?refresh=1" : @"/api/preset/caps";
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
-        [self_ applyPresetCaps:json];
+        [self_ completePresetCaps:json seq:seq key:key];
     }];
+}
+
+/// 能力探测键：后端 | 本地设备 | UPnP 目标。任何一项变化都意味着旧 caps 回包不再属于当前输出。
+- (NSString *)currentPresetCapsKey {
+    return [NSString stringWithFormat:@"%@|%@|%@",
+            [self str:@"backend" def:@"coreaudio"],
+            [self str:@"device" def:@""],
+            [self str:@"upnpdev" def:@""]];
+}
+
+/// 登记一次探测请求，返回其序号（单调递增）。
+- (NSUInteger)beginPresetCapsRequestWithKey:(NSString *)key {
+    (void)key;
+    return ++self.presetCapsSeq;
+}
+
+/// 探测回包落地闸门：序号必须是最新、请求时的键必须仍等于当前 presetCapsKey，否则丢弃（返回 NO）。
+- (BOOL)completePresetCaps:(NSDictionary * _Nullable)json seq:(NSUInteger)seq key:(NSString *)key {
+    if (seq != self.presetCapsSeq) return NO;
+    if (![key isEqualToString:self.presetCapsKey ?: @""]) return NO;
+    [self applyPresetCaps:json];
+    return YES;
 }
 
 /// 纯函数：`/api/preset/caps` 响应 → @{known, pcmReady, dsdReady}。
