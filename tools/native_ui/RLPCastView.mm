@@ -30,6 +30,7 @@
 @property (nonatomic, strong) NSTextField *msg;
 /// 投放升频三件套（web cast_up / cast_ceil / cast_force）
 @property (nonatomic, strong) NSSwitch *upSwitch;
+@property (nonatomic, strong) NSTextField *upLabel;
 @property (nonatomic, strong) NSPopUpButton *upCeilPopup;
 @property (nonatomic, strong) NSSwitch *upForceSwitch;
 @property (nonatomic, strong) NSTextField *upInfo;
@@ -137,13 +138,14 @@
     // ---- 投放升频（web cast_up / cast_ceil / cast_force / cast_up_info）----
     self.upSwitch = [[NSSwitch alloc] initWithFrame:NSZeroRect];
     self.upSwitch.identifier = @"cast_up";
-    self.upSwitch.target = self;
-    self.upSwitch.action = @selector(onCastUpsample:);
+    self.upSwitch.enabled = NO;
+    self.upSwitch.toolTip = RLPTr(@"由全局播放方式 / 升频开关自动决定，不可在此单独覆盖");
     NSStackView *upRow = [[NSStackView alloc] init];
     upRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     upRow.spacing = 8;
     [upRow addArrangedSubview:self.upSwitch];
-    [upRow addArrangedSubview:RLPLabel(RLPTr(@"投放时应用本机升频"), t.small, t.text)];
+    self.upLabel = RLPLabel(RLPTr(@"投放升频（跟随播放方式）"), t.small, t.text);
+    [upRow addArrangedSubview:self.upLabel];
     [self.stack addArrangedSubview:upRow];
 
     self.upCeilPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -166,7 +168,7 @@
     [forceRow addArrangedSubview:RLPLabel(RLPTr(@"强制目标率（忽略渲染器声明）"), t.small, t.text)];
     [self.stack addArrangedSubview:forceRow];
 
-    self.upInfo = RLPLabel(@"", t.small, t.mut);
+    self.upInfo = RLPLabel(RLPTr(@"跟随播放方式（加载设置后同步）"), t.small, t.mut);
     self.upInfo.identifier = @"sp_cast_up_info";
     self.upInfo.maximumNumberOfLines = 2;
     [[self.upInfo.widthAnchor constraintEqualToConstant:560] setActive:YES];
@@ -291,11 +293,20 @@
     }];
 }
 
+static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
+    NSString *s = [obj isKindOfClass:[NSString class]] ? (NSString *)obj
+                : ([obj respondsToSelector:@selector(stringValue)] ? [obj stringValue] : @"0");
+    NSString *low = [[s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if ([low hasPrefix:@"native"]) low = [low substringFromIndex:6];
+    else if ([low hasPrefix:@"nat"]) low = [low substringFromIndex:3];
+    else if ([low hasPrefix:@"dop"]) low = [low substringFromIndex:3];
+    const NSInteger v = [low integerValue];
+    return (v == 64 || v == 128 || v == 256 || v == 512) ? v : 0;
+}
+
 - (void)onCastUpsample:(NSSwitch *)s {
-    [RLPCoreClient.shared postJSON:@"/api/settings"
-                              body:[NSString stringWithFormat:@"cast_upsample=%@",
-                                    s.state == NSControlStateValueOn ? @"1" : @"0"]
-                        completion:nil];
+    // cast_up 为跟随全局播放方式的只读镜像，不再向后端 POST cast_upsample 覆盖。
+    (void)s;
 }
 - (void)onCastCeiling:(NSPopUpButton *)s {
     [RLPCoreClient.shared postJSON:@"/api/settings"
@@ -334,8 +345,52 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
         NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : json;
-        NSString *up = [kv[@"cast_upsample"] respondsToSelector:@selector(description)] ? [kv[@"cast_upsample"] description] : @"0";
-        self_.upSwitch.state = [up isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+
+        id dirObj = kv[@"directsdm"];
+        NSString *dirStr = [dirObj isKindOfClass:[NSString class]] ? (NSString *)dirObj
+                         : ([dirObj respondsToSelector:@selector(stringValue)] ? [dirObj stringValue] : @"0");
+        const BOOL directSdm = [dirStr isEqualToString:@"1"] || [[dirStr lowercaseString] isEqualToString:@"true"];
+
+        id rateObj = kv[@"rate"];
+        NSString *rateRaw = [rateObj isKindOfClass:[NSString class]] ? (NSString *)rateObj
+                          : ([rateObj respondsToSelector:@selector(stringValue)] ? [rateObj stringValue] : @"");
+        NSString *rateStr = [rateRaw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        const BOOL rateIsSrc = (!rateStr.length || [rateStr isEqualToString:@"src"] || [rateStr isEqualToString:@"follow"]);
+
+        const NSInteger dsdLevel = RLPCastParseDsdLevel(kv[@"dsd"]);
+
+        id filtObj = kv[@"filter"];
+        NSString *filterStr = [filtObj isKindOfClass:[NSString class]]
+            ? [(NSString *)filtObj stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+            : @"";
+
+        BOOL followUpsample = NO;
+        NSString *infoText = nil;
+        if (directSdm) {
+            followUpsample = NO;
+            infoText = RLPTr(@"已跟随播放方式：DirectSDM / 原音直通（投放不升频）");
+        } else if (dsdLevel >= 64) {
+            followUpsample = YES;
+            infoText = [NSString stringWithFormat:
+                        RLPTr(@"已跟随播放方式：DSD%ld 升频（PCM 投放按上限升频；DSD 源保持 DoP 直通）"),
+                        (long)dsdLevel];
+        } else if (!rateIsSrc) {
+            followUpsample = YES;
+            infoText = [NSString stringWithFormat:
+                        RLPTr(@"已跟随播放方式：PCM 升频（目标率 %@ · 上限与强制选项生效）"),
+                        rateStr];
+        } else if (filterStr.length > 0) {
+            followUpsample = NO;
+            infoText = RLPTr(@"已跟随播放方式：跟随源采样率（仅滤波器自定义，投放不升频）");
+        } else {
+            followUpsample = NO;
+            infoText = RLPTr(@"已跟随播放方式：原音直通（投放不升频）");
+        }
+
+        self_.upSwitch.enabled = NO;
+        self_.upSwitch.state = followUpsample ? NSControlStateValueOn : NSControlStateValueOff;
+        self_.upInfo.stringValue = infoText;
+
         NSString *ceilVal = [kv[@"cast_upsample_ceiling"] isKindOfClass:[NSString class]]
             ? kv[@"cast_upsample_ceiling"]
             : ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(stringValue)] ? [kv[@"cast_upsample_ceiling"] stringValue] : @"192000");
@@ -488,6 +543,7 @@
     RLPTheme *t = [RLPTheme current];
     self.devMsg.textColor = t.mut;
     self.msg.textColor = t.mut;
+    self.upLabel.textColor = t.text;
     self.upInfo.textColor = t.mut;
     for (NSTextField *f in @[ self.statPhase, self.statDev, self.statPos, self.statTransport,
                               self.statBytes, self.statReqs, self.statPort, self.statRateMatch,

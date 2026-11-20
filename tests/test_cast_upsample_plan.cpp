@@ -384,6 +384,96 @@ int main() {
         }
     }
 
+    // =========================================================================
+    // 4. 投放升频跟随播放方式契约（旧码红对照 + 新语义 + decide_cast_target_rate 联动）
+    // =========================================================================
+    std::printf("\n-- 4. 投放升频跟随播放方式契约测试 --\n");
+    {
+        auto legacyApplyUpsample = [](const std::string& castUpsampleConf) -> bool {
+            // 改前实现（tools/rtaweb.cpp 旧码）：只读独立的 cast_upsample
+            return castUpsampleConf == "1";
+        };
+        auto resolveFromPlayback = [](const std::string& rate, int dsd, bool directSdm,
+                                      const std::string& filter, std::string& outReqRate) -> bool {
+            (void)filter;
+            const bool rateIsSrc = (rate.empty() || rate == "src" || rate == "follow");
+            if (directSdm) {
+                outReqRate = rate;
+                return false;
+            }
+            if (dsd >= 64) {
+                outReqRate = rateIsSrc ? std::string("max") : rate;
+                return true;
+            }
+            if (!rateIsSrc) {
+                outReqRate = rate;
+                return true;
+            }
+            outReqRate = rate;
+            return false;
+        };
+
+        struct PlaybackFollowCase {
+            const char* profile;
+            const char* rate;
+            int dsd;
+            bool directSdm;
+            const char* filter;
+            const char* castUpsampleConf;
+            bool expApplyUpsample;
+            bool expDecisionUpsample;
+            uint32_t expTargetRate;
+            bool expectLegacyWrong;
+        };
+
+        const std::vector<PlaybackFollowCase> followCases = {
+            { "bitperfect",         "src",    0,   false, "",                   "0", false, false, 48000,  false },
+            { "bitperfect+stale1",  "src",    0,   false, "",                   "1", false, false, 48000,  true  },
+            { "bitperfect_dsd",     "src",    128, true,  "",                   "1", false, false, 48000,  true  },
+            { "pcm_192k+stale0",    "192000", 0,   false, "poly-sinc-tight-lp", "0", true,  true,  192000, true  },
+            { "pcm_max+stale0",     "max",    0,   false, "poly-sinc-tight-lp", "0", true,  true,  192000, true  },
+            { "pcm_directsdm",      "192000", 0,   true,  "poly-sinc-tight-lp", "1", false, false, 48000,  true  },
+            { "dsd128+stale0",      "src",    128, false, "poly-sinc-tight-lp", "0", true,  true,  192000, true  },
+            { "custom_filter_only", "src",    0,   false, "poly-sinc-lp",       "1", false, false, 48000,  true  },
+            { "follow_empty",       "",       0,   false, "",                   "1", false, false, 48000,  true  },
+            { "follow_kw",          "follow", 0,   false, "poly-sinc-lp",       "1", false, false, 48000,  true  },
+        };
+
+        for (const auto& fc : followCases) {
+            std::string reqRate;
+            const bool apply = resolveFromPlayback(fc.rate, fc.dsd, fc.directSdm, fc.filter, reqRate);
+            const bool leg = legacyApplyUpsample(fc.castUpsampleConf);
+            const CastRateDecision dec = decide_cast_target_rate(
+                48000, reqRate, {48000, 96000, 192000}, 192000, apply, /*forceRate=*/false);
+
+            std::printf("  [follow] profile=%s rate=%s dsd=%d directsdm=%d cast_upsample=%s -> legacy=%s applyUpsample=%s targetRate=%u upsample=%s\n",
+                        fc.profile, fc.rate, fc.dsd, fc.directSdm ? 1 : 0, fc.castUpsampleConf,
+                        leg ? "true" : "false", apply ? "true" : "false",
+                        dec.targetRate, dec.upsample ? "true" : "false");
+
+            ck(apply == fc.expApplyUpsample,
+               (std::string("跟随播放方式 applyUpsample: ") + fc.profile).c_str(),
+               std::string("got=") + (apply ? "true" : "false"));
+            ck(dec.upsample == fc.expDecisionUpsample && dec.targetRate == fc.expTargetRate,
+               (std::string("联动 decide_cast_target_rate: ") + fc.profile).c_str(),
+               "target=" + std::to_string(dec.targetRate) + " reason=" + dec.reason);
+            if (fc.expectLegacyWrong) {
+                ck(leg != fc.expApplyUpsample,
+                   (std::string("旧码对照确实失真(红): ") + fc.profile).c_str(),
+                   std::string("legacy=") + (leg ? "true" : "false"));
+            }
+        }
+
+        // bitperfect 下即使 cast_upsample_force=1 且 ceiling=384000，全局关闭时仍不生效
+        std::string bpReq;
+        const bool bpApply = resolveFromPlayback("src", 0, false, "", bpReq);
+        const CastRateDecision bpForceDec = decide_cast_target_rate(
+            48000, bpReq, {44100}, 384000, bpApply, /*forceRate=*/true);
+        ck(!bpApply && !bpForceDec.upsample && bpForceDec.reason == "off",
+           "bitperfect 下 force=true + ceiling=384000 不生效（reason=off）",
+           bpForceDec.reason);
+    }
+
     std::printf("\n=======================================================\n");
     std::printf("test_cast_upsample_plan 结果: PASS=%d, FAIL=%d\n", g_pass, g_fail);
     std::printf("=======================================================\n");

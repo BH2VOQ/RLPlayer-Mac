@@ -2960,6 +2960,58 @@ static bool upnp_is_dsd_file(const std::string& file) {
 
 static std::string conf_get(const std::string& key, const std::string& def = std::string());
 
+static bool is_src_or_follow_rate(const std::string& rate) {
+    return rate.empty() || rate == "src" || rate == "follow";
+}
+
+struct CastPlaybackUpsampleDecision {
+    bool applyUpsample = false;
+    std::string requestedRate;
+    std::string filterName;
+};
+
+// 投放实际升频统一跟随全局「播放方式 / 升频开关」，独立 cast_upsample 不再能反向覆盖：
+//   1. directsdm == 1（含 DSD 源原音直通）→ 不升频；
+//   2. dsd >= 64（DSD 升频）→ 升频（rate 为 src/follow/空 时对 PCM 源按 max 升频；DSD 源仍 DoP 直通）；
+//   3. rate 非 src/follow/空（PCM 升频，且 directsdm != 1）→ 升频；
+//   4. rate=src/follow/空 且 dsd < 64（含仅设 filter 的 custom）→ 按直通处理，不升频。
+static CastPlaybackUpsampleDecision resolve_cast_upsample_from_playback(
+    const std::string& rate,
+    int dsdLevel,
+    bool directSdm,
+    const std::string& filter)
+{
+    CastPlaybackUpsampleDecision d;
+    d.filterName = filter;
+    if (directSdm) {
+        d.applyUpsample = false;
+        d.requestedRate = rate;
+        return d;
+    }
+    if (dsdLevel >= 64) {
+        d.applyUpsample = true;
+        d.requestedRate = is_src_or_follow_rate(rate) ? std::string("max") : rate;
+        return d;
+    }
+    if (!is_src_or_follow_rate(rate)) {
+        d.applyUpsample = true;
+        d.requestedRate = rate;
+        return d;
+    }
+    d.applyUpsample = false;
+    d.requestedRate = rate;
+    return d;
+}
+
+static CastPlaybackUpsampleDecision current_cast_upsample_from_conf() {
+    const std::string rate = conf_get("rate", "");
+    const auto dsd = parse_dsd_setting(conf_get("dsd", "0"));
+    const std::string dir = conf_get("directsdm", "0");
+    const bool directSdm = (dir == "1" || dir == "true");
+    const std::string filter = conf_get("filter", "");
+    return resolve_cast_upsample_from_playback(rate, dsd.level, directSdm, filter);
+}
+
 static uint32_t get_cast_upsample_ceiling() {
     const std::string c = conf_get("cast_upsample_ceiling", "192000");
     if (c == "96000") return 96000;
@@ -2990,12 +3042,13 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
     cp.dop = !rta::net::CastManager::is_airplay_dev(p.upnpDev) &&
              (upnp_is_dsd_file(file) || p.dsd >= 64);
     cp.initialVolumeDb = std::isfinite(p.volume) ? std::clamp(p.volume, -120.0, 20.0) : -20.0;
-    cp.applyUpsample = (conf_get("cast_upsample", "0") == "1");
-    // 强制目标率：默认关。打开后即使渲染器没声明目标速率，也按上限升（状态里必须标明"未获声明验证"）。
-    cp.forceUpsampleRate = (conf_get("cast_upsample_force", "0") == "1");
+    const auto castDec = current_cast_upsample_from_conf();
+    cp.applyUpsample = castDec.applyUpsample;
+    // 强制目标率与上限仅在全局升频开启时生效。
+    cp.forceUpsampleRate = castDec.applyUpsample && (conf_get("cast_upsample_force", "0") == "1");
     cp.ceilingRate = get_cast_upsample_ceiling();
-    cp.filterName = conf_get("filter", "");
-    cp.requestedRate = conf_get("rate", "");
+    cp.filterName = castDec.filterName;
+    cp.requestedRate = castDec.requestedRate;
     rta::net::CastManager::instance().stop();
     const auto r = rta::net::CastManager::instance().start(cp);
     if (!r.ok) {
@@ -13694,6 +13747,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         if (rq.path.rfind("/api/cast/state", 0) == 0) {
             auto st = rta::net::CastManager::instance().get_state();
+            const auto castDec = current_cast_upsample_from_conf();
+            const bool castForceEff = castDec.applyUpsample && (conf_get("cast_upsample_force", "0") == "1");
             // 英文界面：error 按当前 lang 选择（英文缺失时**回落中文**，绝不给空串 ——
             // 前端就是拿 st.error 直接显示到投放面板上的：src/net/ui_script.h 的
             // updateCastStateUi → errEl.textContent = st.error）。errorZh 保留中文真相
@@ -13730,7 +13785,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"lastVolumeError\":\"" << jesc(st.lastVolumeError) << "\""
               << ",\"upsampleApplied\":" << (st.upsampleApplied ? "true" : "false")
               << ",\"upsampleForced\":" << (st.upsampleForced ? "true" : "false")
-              << ",\"castUpsampleForce\":" << (conf_get("cast_upsample_force", "0") == "1" ? "true" : "false")
+              << ",\"castUpsampleForce\":" << (castForceEff ? "true" : "false")
               << ",\"servedRate\":" << st.servedRate
               << ",\"servedFilter\":\"" << jesc(st.servedFilter) << "\""
               << ",\"servedBits\":" << st.servedBits
@@ -13739,7 +13794,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
               << ",\"prepPercent\":" << st.prepPercent
               << ",\"prepFramesTotal\":" << st.prepFramesTotal
               << ",\"prepFramesDone\":" << st.prepFramesDone
-              << ",\"castUpsample\":" << (conf_get("cast_upsample", "0") == "1" ? "true" : "false")
+              << ",\"castUpsample\":" << (castDec.applyUpsample ? "true" : "false")
+              << ",\"castUpsampleFollowsPlayback\":true"
               << ",\"castCeiling\":" << get_cast_upsample_ceiling()
               << ",\"resampled\":" << (st.resampled ? "true" : "false")
               << "}";
@@ -13789,21 +13845,22 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                 }
             }
             if (p.port == 0) p.port = 8912;
-            if (!p.applyUpsample && conf_get("cast_upsample", "0") == "1") {
-                p.applyUpsample = true;
-            }
+            const auto castDec = current_cast_upsample_from_conf();
+            // 投放升频跟随播放方式/升频开关，独立的 cast_upsample 不再能反向覆盖
+            p.applyUpsample = castDec.applyUpsample;
             if (p.ceilingRate == 0 || p.ceilingRate == 192000) {
                 p.ceilingRate = get_cast_upsample_ceiling();
             }
             if (p.filterName.empty()) {
-                p.filterName = conf_get("filter", "");
+                p.filterName = castDec.filterName;
             }
             if (p.requestedRate.empty()) {
-                p.requestedRate = conf_get("rate", "");
+                p.requestedRate = castDec.requestedRate;
+            } else if (castDec.applyUpsample && is_src_or_follow_rate(p.requestedRate) &&
+                       parse_dsd_setting(conf_get("dsd", "0")).level >= 64) {
+                p.requestedRate = castDec.requestedRate;
             }
-            if (!p.forceUpsampleRate) {
-                p.forceUpsampleRate = (conf_get("cast_upsample_force", "0") == "1");
-            }
+            p.forceUpsampleRate = p.applyUpsample && (p.forceUpsampleRate || conf_get("cast_upsample_force", "0") == "1");
             // 一条会话原则（261024-01 #9）：手动「开始投放」先停本地播放，
             // 避免本机声卡与网络渲染器同时出声；播放器状态交给投放会话接管前先清零。
             g_upnpQueueActive.store(false);
@@ -15253,6 +15310,8 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         const auto cs = rta::net::CastManager::instance().get_state();
         if (cs.running) {
             const bool ap = rta::net::CastManager::is_airplay_dev(cs.device);
+            const auto castUpDec = current_cast_upsample_from_conf();
+            const bool castForceEff = castUpDec.applyUpsample && (conf_get("cast_upsample_force", "0") == "1");
             std::ostringstream live;
             live << "{\"ok\":true,\"path\":{\"src\":\"" << jesc(cs.sourceFile) << "\""
                  << ",\"codec\":\"" << jesc(rta::audio::lowerExt(cs.sourceFile)) << "\""
@@ -15278,7 +15337,9 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
                  << ",\"prepPercent\":" << cs.prepPercent
                  << ",\"prepFramesDone\":" << cs.prepFramesDone
                  << ",\"prepFramesTotal\":" << cs.prepFramesTotal
-                 << ",\"castUpsample\":" << (conf_get("cast_upsample", "0") == "1" ? "true" : "false")
+                 << ",\"castUpsample\":" << (castUpDec.applyUpsample ? "true" : "false")
+                 << ",\"castUpsampleFollowsPlayback\":true"
+                 << ",\"castUpsampleForce\":" << (castForceEff ? "true" : "false")
                  << ",\"castCeiling\":" << get_cast_upsample_ceiling()
                  // 投放走的是「解码 → 供源/推流」，不经过播放器的升频/EQ/IR/音量链。
                  // 静默忽略用户设置是最坏的形态：这里把事实交给界面去说清楚。
@@ -15649,10 +15710,16 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
           << ",\"upsampleNote\":\"" << jesc(castMode ? (castTransition ? "" : castSt.upsampleNote) : "") << "\""
           << ",\"prepPercent\":" << (castMode ? (castTransition ? -1 : castSt.prepPercent) : -1)
           << ",\"prepFramesDone\":" << (castMode ? (castTransition ? 0ULL : castSt.prepFramesDone) : 0ULL)
-          << ",\"prepFramesTotal\":" << (castMode ? (castTransition ? 0ULL : castSt.prepFramesTotal) : 0ULL)
-          << ",\"castUpsample\":" << (conf_get("cast_upsample", "0") == "1" ? "true" : "false")
-          << ",\"castCeiling\":" << get_cast_upsample_ceiling()
-          << ",\"outBits\":" << bitsStat
+          << ",\"prepFramesTotal\":" << (castMode ? (castTransition ? 0ULL : castSt.prepFramesTotal) : 0ULL);
+        {
+            const auto castUpDec = current_cast_upsample_from_conf();
+            const bool castForceEff = castUpDec.applyUpsample && (conf_get("cast_upsample_force", "0") == "1");
+            j << ",\"castUpsample\":" << (castUpDec.applyUpsample ? "true" : "false")
+              << ",\"castUpsampleFollowsPlayback\":true"
+              << ",\"castUpsampleForce\":" << (castForceEff ? "true" : "false")
+              << ",\"castCeiling\":" << get_cast_upsample_ceiling();
+        }
+        j << ",\"outBits\":" << bitsStat
           << ",\"gpu\":" << (gpuF.gpu ? "true" : "false")
           << ",\"gpuUsed\":" << (gpuF.gpuUsed ? "true" : "false")
           << ",\"gpuResample\":" << (gpuF.gpuResample ? "true" : "false")

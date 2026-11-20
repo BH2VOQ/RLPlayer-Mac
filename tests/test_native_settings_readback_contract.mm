@@ -653,10 +653,13 @@ int main(void) {
                [NSString stringWithFormat:@"idx=%ld", (long)(provPop ? provPop.indexOfSelectedItem : -1)]);
         }
 
-        // 12. 投放面板（RLPCastView）设置回显 + loadUpnpDevices 同步 + 状态框按内容显隐
+        // 12. 投放面板（RLPCastView）设置回显（跟随播放方式）+ /api/cast/state + /api/status + loadUpnpDevices + 状态框显隐
         {
+            // 12a: 原音直通 (rate=src, dsd=0, directsdm=0, filter="") 即使历史配置残留 cast_upsample=1：
+            //   cast_up 必须禁用且为 Off；cast_ceil / cast_force 仍按配置回显；
+            //   /api/cast/state 与 /api/status 的 castUpsample 反映有效值 false（且 castUpsampleForce=false）。
             [core jsonWithMethod:@"POST" path:@"/api/settings"
-                body:@"cast_upsample=1&cast_upsample_ceiling=384000&cast_upsample_force=1&upnpdev=upnp://192.168.1.99/desc.xml"];
+                body:@"rate=src&dsd=0&directsdm=0&filter=&cast_upsample=1&cast_upsample_ceiling=384000&cast_upsample_force=1&upnpdev=upnp://192.168.1.99/desc.xml"];
             [settings selectPane:@"stream"];
             Pump(0.2);
             NSView *castView = [settings valueForKey:@"castView"];
@@ -666,20 +669,173 @@ int main(void) {
             NSSwitch *upSw = (NSSwitch *)FindId(v, @"cast_up");
             NSPopUpButton *ceilPop = (NSPopUpButton *)FindId(v, @"cast_ceil");
             NSSwitch *forceSw = (NSSwitch *)FindId(v, @"cast_force");
+            NSTextField *upInfoLabel = (NSTextField *)FindId(v, @"sp_cast_up_info");
             WaitUntil(1.5, ^BOOL {
-                return upSw && upSw.state == NSControlStateValueOn &&
+                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
                        ceilPop && [ceilPop.titleOfSelectedItem isEqualToString:@"384000"] &&
-                       forceSw && forceSw.state == NSControlStateValueOn;
+                       forceSw && forceSw.state == NSControlStateValueOn &&
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"原音直通"];
             });
-            Ck(upSw && upSw.state == NSControlStateValueOn,
-               @"12a RLPCastView reload 回显 cast_upsample=1",
-               [NSString stringWithFormat:@"state=%ld", (long)(upSw ? upSw.state : -1)]);
+            NSDictionary *csBP = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            NSDictionary *stBP = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+            std::printf("  [cast-follow] profile=bitperfect rate=src dsd=0 cast_upsample=1 -> cast_up.state=%ld cast_up.enabled=%d state.castUpsample=%d status.castUpsample=%d\n",
+                        (long)(upSw ? upSw.state : -1), upSw ? (int)upSw.enabled : -1,
+                        [csBP[@"castUpsample"] boolValue], [stBP[@"castUpsample"] boolValue]);
+            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOff,
+               @"12a RLPCastView cast_up 为禁用只读镜像且 rate=src/dsd=0 时忽略 cast_upsample=1 保持 Off",
+               [NSString stringWithFormat:@"enabled=%d state=%ld info=%@",
+                upSw ? (int)upSw.enabled : -1, (long)(upSw ? upSw.state : -1),
+                upInfoLabel ? upInfoLabel.stringValue : @"nil"]);
             Ck(ceilPop && [ceilPop.titleOfSelectedItem isEqualToString:@"384000"],
                @"12b RLPCastView reload 回显 cast_upsample_ceiling=384000",
                ceilPop ? ceilPop.titleOfSelectedItem : @"nil");
             Ck(forceSw && forceSw.state == NSControlStateValueOn,
                @"12c RLPCastView reload 回显 cast_upsample_force=1",
                [NSString stringWithFormat:@"state=%ld", (long)(forceSw ? forceSw.state : -1)]);
+            Ck(![csBP[@"castUpsample"] boolValue] &&
+               [csBP[@"castUpsampleFollowsPlayback"] boolValue] &&
+               ![csBP[@"castUpsampleForce"] boolValue] &&
+               ![stBP[@"castUpsample"] boolValue] &&
+               [stBP[@"castUpsampleFollowsPlayback"] boolValue],
+               @"12a2 bitperfect + cast_upsample=1 时 /api/cast/state 与 /api/status 有效 castUpsample=false",
+               [NSString stringWithFormat:@"state=%@ status=%@", csBP, stBP]);
+
+            // 12g: PCM 升频 (rate=192000, dsd=0, cast_upsample=0) → cast_up=On (仍禁用), 后端有效值 true
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"rate=192000&dsd=0&directsdm=0&filter=poly-sinc-tight-lp&cast_upsample=0"];
+            if ([castView respondsToSelector:NSSelectorFromString(@"reloadSettings")]) {
+                [castView performSelector:NSSelectorFromString(@"reloadSettings")];
+            }
+            WaitUntil(1.5, ^BOOL {
+                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"192000"];
+            });
+            NSDictionary *csPcm = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            NSDictionary *stPcm = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+            std::printf("  [cast-follow] profile=pcm rate=192000 dsd=0 cast_upsample=0 -> cast_up.state=%ld state.castUpsample=%d status.castUpsample=%d\n",
+                        (long)(upSw ? upSw.state : -1), [csPcm[@"castUpsample"] boolValue], [stPcm[@"castUpsample"] boolValue]);
+            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+               upInfoLabel && [upInfoLabel.stringValue containsString:@"192000"],
+               @"12g rate=192000 且 cast_upsample=0 时 cast_up 跟随为 On 且仍禁用",
+               [NSString stringWithFormat:@"enabled=%d state=%ld info=%@",
+                upSw ? (int)upSw.enabled : -1, (long)(upSw ? upSw.state : -1),
+                upInfoLabel ? upInfoLabel.stringValue : @"nil"]);
+            Ck([csPcm[@"castUpsample"] boolValue] &&
+               [csPcm[@"castUpsampleFollowsPlayback"] boolValue] &&
+               [csPcm[@"castUpsampleForce"] boolValue] &&
+               [stPcm[@"castUpsample"] boolValue] &&
+               [stPcm[@"castUpsampleFollowsPlayback"] boolValue],
+               @"12g2 PCM rate=192000 + cast_upsample=0 时 /api/cast/state 与 /api/status castUpsample=true",
+               [NSString stringWithFormat:@"state=%@ status=%@", csPcm, stPcm]);
+
+            // 12h: PCM max (rate=max, dsd=0, cast_upsample=0) → castUpsample=true
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"rate=max&dsd=0&directsdm=0&cast_upsample=0"];
+            if ([castView respondsToSelector:NSSelectorFromString(@"reloadSettings")]) {
+                [castView performSelector:NSSelectorFromString(@"reloadSettings")];
+            }
+            WaitUntil(1.5, ^BOOL {
+                return upSw && upSw.state == NSControlStateValueOn &&
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"max"];
+            });
+            NSDictionary *csMax = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            std::printf("  [cast-follow] profile=pcm rate=max dsd=0 cast_upsample=0 -> cast_up.state=%ld state.castUpsample=%d\n",
+                        (long)(upSw ? upSw.state : -1), [csMax[@"castUpsample"] boolValue]);
+            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+               [csMax[@"castUpsample"] boolValue],
+               @"12h rate=max 且 cast_upsample=0 时 cast_up=On 且 /api/cast/state castUpsample=true",
+               [NSString stringWithFormat:@"state=%ld castUpsample=%@", (long)upSw.state, csMax[@"castUpsample"]]);
+
+            // 12i: DSD 升频 (rate=src, dsd=128, directsdm=0, cast_upsample=0) → cast_up=On, castUpsample=true
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"rate=src&dsd=128&directsdm=0&modfamily=dsd&modcut=125&cast_upsample=0"];
+            if ([castView respondsToSelector:NSSelectorFromString(@"reloadSettings")]) {
+                [castView performSelector:NSSelectorFromString(@"reloadSettings")];
+            }
+            WaitUntil(1.5, ^BOOL {
+                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"DSD128"];
+            });
+            NSDictionary *csDsd = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            NSDictionary *stDsd = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+            std::printf("  [cast-follow] profile=dsd rate=src dsd=128 cast_upsample=0 -> cast_up.state=%ld state.castUpsample=%d status.castUpsample=%d\n",
+                        (long)(upSw ? upSw.state : -1), [csDsd[@"castUpsample"] boolValue], [stDsd[@"castUpsample"] boolValue]);
+            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+               upInfoLabel && [upInfoLabel.stringValue containsString:@"DSD128"] &&
+               [csDsd[@"castUpsample"] boolValue] && [stDsd[@"castUpsample"] boolValue],
+               @"12i dsd=128 + rate=src + cast_upsample=0 时 cast_up=On 且 /api/cast/state castUpsample=true",
+               [NSString stringWithFormat:@"state=%ld info=%@ cs=%@",
+                (long)upSw.state, upInfoLabel ? upInfoLabel.stringValue : @"nil", csDsd[@"castUpsample"]]);
+
+            // 12j: rate=src 且仅设 filter (custom) + cast_upsample=1 → 按直通处理 (Off / false)
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:[NSString stringWithFormat:@"rate=src&dsd=0&directsdm=0&filter=%@&cast_upsample=1", f1]];
+            if ([castView respondsToSelector:NSSelectorFromString(@"reloadSettings")]) {
+                [castView performSelector:NSSelectorFromString(@"reloadSettings")];
+            }
+            WaitUntil(1.5, ^BOOL {
+                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"滤波器"];
+            });
+            NSDictionary *csCustom = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            NSDictionary *stCustom = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
+            std::printf("  [cast-follow] profile=custom(filter-only) rate=src dsd=0 cast_upsample=1 -> cast_up.state=%ld state.castUpsample=%d\n",
+                        (long)(upSw ? upSw.state : -1), [csCustom[@"castUpsample"] boolValue]);
+            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
+               ![csCustom[@"castUpsample"] boolValue] && ![stCustom[@"castUpsample"] boolValue],
+               @"12j rate=src + filter + cast_upsample=1 按直通处理：cast_up=Off 且 castUpsample=false",
+               [NSString stringWithFormat:@"state=%ld info=%@ cs=%@",
+                (long)upSw.state, upInfoLabel ? upInfoLabel.stringValue : @"nil", csCustom[@"castUpsample"]]);
+
+            // 12k: directsdm=1（即使带 rate=192000 或 dsd=128 与 cast_upsample=1）→ 按直通处理 (Off / false)
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"rate=192000&dsd=0&directsdm=1&cast_upsample=1"];
+            if ([castView respondsToSelector:NSSelectorFromString(@"reloadSettings")]) {
+                [castView performSelector:NSSelectorFromString(@"reloadSettings")];
+            }
+            WaitUntil(1.5, ^BOOL {
+                return upSw && upSw.state == NSControlStateValueOff &&
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"DirectSDM"];
+            });
+            NSDictionary *csDirPcm = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"rate=src&dsd=128&directsdm=1&cast_upsample=1"];
+            NSDictionary *csDirDsd = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
+            std::printf("  [cast-follow] profile=directsdm directsdm=1 cast_upsample=1 -> pcm.castUpsample=%d dsd.castUpsample=%d\n",
+                        [csDirPcm[@"castUpsample"] boolValue], [csDirDsd[@"castUpsample"] boolValue]);
+            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
+               ![csDirPcm[@"castUpsample"] boolValue] && ![csDirDsd[@"castUpsample"] boolValue],
+               @"12k directsdm=1 时即使 rate=192000/dsd=128 且 cast_upsample=1 仍为 Off/false",
+               [NSString stringWithFormat:@"dirPcm=%@ dirDsd=%@", csDirPcm[@"castUpsample"], csDirDsd[@"castUpsample"]]);
+
+            // 12l: 验证 RLPCastView 不再绑定或 POST cast_upsample 覆盖
+            {
+                Method postM = class_getInstanceMethod([RLPCoreClient class], @selector(postJSON:body:completion:));
+                IMP origPostCast = method_getImplementation(postM);
+                __block BOOL postedCastUpsample = NO;
+                IMP spyPostImp = imp_implementationWithBlock(^(id _self, NSString *path, NSString *body, RLPJsonDone completion) {
+                    if ([path isEqualToString:@"/api/settings"] && body && [body containsString:@"cast_upsample="]) {
+                        postedCastUpsample = YES;
+                    }
+                    ((void (*)(id, SEL, NSString *, NSString *, RLPJsonDone))origPostCast)(
+                        _self, @selector(postJSON:body:completion:), path, body, completion);
+                });
+                method_setImplementation(postM, spyPostImp);
+                if (upSw && [castView respondsToSelector:NSSelectorFromString(@"onCastUpsample:")]) {
+                    upSw.state = NSControlStateValueOn;
+                    [castView performSelector:NSSelectorFromString(@"onCastUpsample:") withObject:upSw];
+                }
+                Pump(0.1);
+                method_setImplementation(postM, origPostCast);
+                Ck(upSw && upSw.target == nil && upSw.action == NULL && !postedCastUpsample,
+                   @"12l RLPCastView cast_up 无 target/action 且绝不 POST cast_upsample 覆盖",
+                   [NSString stringWithFormat:@"target=%p action=%s posted=%d",
+                    (__bridge void *)upSw.target, upSw.action ? sel_getName(upSw.action) : "NULL", (int)postedCastUpsample]);
+            }
+
+            // 恢复干净播放方式设置（保留 upnpdev 给 12d 使用）
+            [core jsonWithMethod:@"POST" path:@"/api/settings"
+                body:@"rate=src&dsd=0&directsdm=0&filter=&cast_upsample=0&cast_upsample_ceiling=192000&cast_upsample_force=0"];
 
             // 12d: loadUpnpDevices 填充 sp_cast_dev 并保留/同步 saved upnpdev
             Method getM2 = class_getInstanceMethod([RLPCoreClient class], @selector(getJSON:completion:));

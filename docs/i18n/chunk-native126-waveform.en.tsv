@@ -4,4 +4,12 @@
 已发现 1 台设备（已自动选中）	Found 1 device (auto-selected)	正在播放页投放弹窗单设备自动选中状态
 正在推送到设备…	Casting to device...	正在播放页投放弹窗发起推送加载态
 网络错误或设备未响应	Network error or device not responding	正在播放页投放弹窗网络/超时错误
+投放升频（跟随播放方式）	Cast upsampling (follows playback mode)	流媒体投放面板只读升频开关标签
+由全局播放方式 / 升频开关自动决定，不可在此单独覆盖	Determined automatically by the global playback mode / upsampling setting; cannot be overridden separately here	流媒体投放面板只读升频开关提示
+跟随播放方式（加载设置后同步）	Follows playback mode (syncs after loading settings)	流媒体投放面板升频说明初始占位
+已跟随播放方式：DirectSDM / 原音直通（投放不升频）	Following playback mode: DirectSDM / Bit-Perfect (cast upsampling off)	流媒体投放面板升频状态（DirectSDM 直通）
+已跟随播放方式：DSD%ld 升频（PCM 投放按上限升频；DSD 源保持 DoP 直通）	Following playback mode: DSD%ld upsampling (PCM cast upsamples within ceiling; DSD sources stay DoP passthrough)	流媒体投放面板升频状态（DSD 升频）
+已跟随播放方式：PCM 升频（目标率 %@ · 上限与强制选项生效）	Following playback mode: PCM upsampling (target rate %@ · ceiling and force options apply)	流媒体投放面板升频状态（PCM 升频）
+已跟随播放方式：跟随源采样率（仅滤波器自定义，投放不升频）	Following playback mode: Follow source rate (filter-only custom mode; cast upsampling off)	流媒体投放面板升频状态（仅滤波器自定义）
+已跟随播放方式：原音直通（投放不升频）	Following playback mode: Bit-Perfect passthrough (cast upsampling off)	流媒体投放面板升频状态（原音直通）
 
