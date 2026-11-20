@@ -332,8 +332,11 @@
     [self clearResult];
     // 不足 5 条如实提示（web：目标 ≥5，未做臆造）
     if (distinct < 5) {
+        // 这是**数据稀疏的事实说明**，不是错误：很多作品本来就没几个录音版本，
+        // 用 warn（橙）会把"资料就这么少"画成一个告警，看起来像查询失败。
+        // 用 mut2 如实呈现即可（与 web 该行的 --mut2 口径一致）。
         NSTextField *hint = RLPLabel([NSString stringWithFormat:
-            RLPTr(@"不同演绎仅 %ld 个（目标 ≥5，未做臆造）"), (long)distinct], t.small, t.warn);
+            RLPTr(@"不同演绎仅 %ld 个（目标 ≥5，未做臆造）"), (long)distinct], t.small, t.mut2);
         [self.resultStack addArrangedSubview:hint];
     }
     for (id p in perfs) {
