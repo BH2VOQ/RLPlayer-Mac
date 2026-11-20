@@ -554,6 +554,9 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, copy) NSString *lastAppliedLang;
 /// 语言切换期间跨所有 cachedPane 保存的未提交草稿（tabKey -> @{ identifier: draftString }）。
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary<NSString *, NSString *> *> *pendingPaneDrafts;
+/// 当前挂在 paneHost 里的那个页签的边贴边约束。换页签时先摘掉这一组，
+/// 而不是「先把子视图全删掉再挂新的」—— 后者中间有一帧空容器（见 showTab 注释）。
+@property (nonatomic, strong) NSMutableArray<NSLayoutConstraint *> *activePaneConstraints;
 /// 用户已修改但尚未保存成功的控件 identifier（防止延迟 /api/settings 与 /api/llm 回包覆盖）。
 @property (nonatomic, strong) NSMutableSet<NSString *> *dirtyControlIds;
 /// 最近一次从后端回填到各控件的值（用于识别未触发 textDidChange 的草稿改动）。
@@ -609,7 +612,29 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 /// 设置页滚动容器：当纵向滚动条随展开/折叠显隐、contentView 宽度发生 ±17pt 变化而
 /// scroll 自身 frame 未变时，AppKit `-tile` 改了 clip frame 却不会触发 docView 重算，
 /// 导致 stack 停留在旧宽（714>697 或 657<674）。在 layout/tile 后同步一次 docView 布局。
+/// 设置页每个页签的文档视图（**翻转坐标**：原点左上、y 向下）。
+///
+/// 为什么必须是翻转的：
+///   文档视图若沿用 AppKit 默认的**非翻转** NSStackView，坐标系原点在**内容底端**，
+///   clip 的 bounds.origin.y=0 看到的是文档最下面一截。buildPane 又在栈尾放了一个
+///   可伸展的空白 spacer（用来把真实内容压到顶部），于是新建页签第一次上屏时，
+///   可见区正好落在 spacer 上 = **一整屏空白**；要等后续某一轮 runloop 把 clip
+///   原点夹回文档顶，内容才「跳」回来。改成翻转文档视图后，「顶部」就是 origin.y=0，
+///   新建/复用的页签天然从顶部开始画，不依赖任何异步补救。
+///
+/// 为什么可以安全翻转：栈内子视图由 Auto Layout 排布，坐标方向只影响「第 0 个元素在
+/// 上还是下」；NSStackView 在 flipped 祖先里同样自上而下排列（已离屏实测）。
+@interface RLPSettingsPaneDocView : NSStackView
+@end
+
+@implementation RLPSettingsPaneDocView
+- (BOOL)isFlipped { return YES; }
+@end
+
 @interface RLPSettingsScrollView : NSScrollView
+/// 同步把可见区钉到内容顶部（换页签首帧调用，见 showTab）。
+- (void)pinToTopNow;
+- (void)clampVerticalScrollIfNeeded;
 @end
 
 @implementation RLPSettingsScrollView {
@@ -623,11 +648,35 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     const CGFloat clipH = clip.bounds.size.height;
     const CGFloat docH = doc.frame.size.height;
     if (clipH <= 1.0 || docH <= 1.0) return;
-    const CGFloat maxY = MAX(0.0, docH - clipH);
+    // 「顶部」随坐标系不同：翻转文档是 0，非翻转文档是 docH-clipH。
+    // 旧实现只按非翻转写了 docH-clipH；文档视图翻过来之后再用那个公式，
+    // 会把「本来就在顶部」的页签**反向推到底部**，反而制造一次跳屏。
+    const CGFloat topY = doc.isFlipped ? 0.0 : MAX(0.0, docH - clipH);
+    const CGFloat maxY = MAX(topY, docH - clipH);
     NSPoint o = clip.bounds.origin;
-    if (o.y > maxY + 0.5 || o.y < -0.5) {
-        o.y = MIN(maxY, MAX(0.0, o.y));
+    if (o.y > maxY + 0.5 || o.y < topY - 0.5) {
+        o.y = MIN(maxY, MAX(topY, o.y));
         [clip scrollToPoint:o];
+        [self reflectScrolledClipView:clip];
+    }
+}
+
+/// 把可见区**同步**钉在内容顶部。
+///
+/// 为什么必须同步、不能等下一轮 runloop：异步补位的那一帧就是用户要看到的那块空白。
+- (void)pinToTopNow {
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    if (!clip || !doc) return;
+    // 先让文档把 Auto Layout 解算完：否则此刻拿到的 docH 还是上一轮的旧值，
+    // 夹回顶部会定在一个马上又变的位置上。
+    [clip layoutSubtreeIfNeeded];
+    [doc layoutSubtreeIfNeeded];
+    const CGFloat clipH = clip.bounds.size.height;
+    const CGFloat docH = doc.frame.size.height;
+    const CGFloat topY = doc.isFlipped ? 0.0 : MAX(0.0, docH - clipH);
+    if (fabs(clip.bounds.origin.y - topY) > 0.5) {
+        [clip scrollToPoint:NSMakePoint(clip.bounds.origin.x, topY)];
         [self reflectScrolledClipView:clip];
     }
 }
@@ -690,6 +739,7 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
         _paneCache = [NSMutableDictionary dictionary];
         _loadedKeys = [NSMutableSet set];
         _pendingPaneDrafts = [NSMutableDictionary dictionary];
+        _activePaneConstraints = [NSMutableArray array];
         _dirtyControlIds = [NSMutableSet set];
         _lastLoadedValues = [NSMutableDictionary dictionary];
         // 默认页签 = 「通用」，与 web 一致（2026-10-29 用户要求「通用」排第一并默认选中）。
@@ -972,15 +1022,36 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     // 页签根视图 identifier = "tab.<web data-g>"：parity 表靠它机械核对
     // 「web 的每个设置页签在原生都存在」，不靠人记。
     pane.identifier = RLP_PaneIdentifier(tab);
-    for (NSView *v in self.paneHost.subviews) [v removeFromSuperview];
+    // 换页签必须**原子**：旧实现是「先把 paneHost 的子视图全摘掉，再挂新页签」，
+    // 中间存在一个「paneHost 空着、新页签 frame 还是 (0,0,0,0)」的瞬间；
+    // 只要这一瞬间被合成器抓到一次，用户看到的就是整块空白，等下一次 layout 才出内容。
+    // 现在：先摘旧页签的边贴边约束（视图**仍留在树里**）→ 挂新页签并同步排版 →
+    // 最后才把旧页签移出。全程没有任何一帧是空容器。
+    if (self.activePaneConstraints.count) {
+        [NSLayoutConstraint deactivateConstraints:self.activePaneConstraints];
+        [self.activePaneConstraints removeAllObjects];
+    }
     pane.translatesAutoresizingMaskIntoConstraints = NO;
     [self.paneHost addSubview:pane];
-    [NSLayoutConstraint activateConstraints:@[
+    NSArray<NSLayoutConstraint *> *fresh = @[
         [pane.leadingAnchor constraintEqualToAnchor:self.paneHost.leadingAnchor],
         [pane.trailingAnchor constraintEqualToAnchor:self.paneHost.trailingAnchor],
         [pane.topAnchor constraintEqualToAnchor:self.paneHost.topAnchor],
         [pane.bottomAnchor constraintEqualToAnchor:self.paneHost.bottomAnchor],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:fresh];
+    [self.activePaneConstraints addObjectsFromArray:fresh];
+    // 首帧顶对齐（2026-11-21 用户实测「先露空白、再跳回去」）：必须**同步**做完，
+    // 不能留给主窗口 schedulePageInsetsSync 的下一轮 runloop。
+    if ([pane isKindOfClass:[RLPSettingsScrollView class]]) {
+        [(RLPSettingsScrollView *)pane pinToTopNow];
+    } else {
+        [self.paneHost layoutSubtreeIfNeeded];
+    }
+    for (NSView *v in [self.paneHost.subviews copy]) {
+        if (v == pane) continue;
+        [v removeFromSuperview];
+    }
     // ② 草稿恢复**不再只限新建页签**（旧实现 if (freshlyBuilt)）：页签对象虽然还在缓存里，
     //    但它在被摘出视图树时同样可能丢掉 field editor 里的编辑中文本（stringValue 还是旧值）。
     //    恢复是幂等的（值相同就不写），每次显示都过一遍最稳。
@@ -1021,6 +1092,11 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
         const BOOL laidOut = (self.paneHost && self.paneHost.bounds.size.width > 1.0);
         [self updateMetaResponsiveLayoutForHostWidth:[self metaTargetHostWidthPreferringViewBounds:laidOut]];
     }
+    // 上面这些分支（流媒体 contentDidChange、元数据响应式重排）都会改文档高度；
+    // 改完再钉一次顶部，保证这一帧画出来的内容从顶部开始。
+    if ([pane isKindOfClass:[RLPSettingsScrollView class]]) {
+        [(RLPSettingsScrollView *)pane pinToTopNow];
+    }
 }
 
 - (void)viewWillLayout {
@@ -1046,7 +1122,8 @@ static void RLPSettingsCollectViews(NSView *v, NSMutableArray<NSView *> *out) {
     scroll.hasHorizontalScroller = NO;
     scroll.autohidesScrollers = YES;
 
-    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    // 文档视图用**翻转坐标**的实现（RLPSettingsPaneDocView）—— 见类注释里的根因。
+    RLPSettingsPaneDocView *stack = [[RLPSettingsPaneDocView alloc] initWithFrame:NSZeroRect];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
     stack.spacing = 22;                                  // web .sgroup margin-bottom:22px

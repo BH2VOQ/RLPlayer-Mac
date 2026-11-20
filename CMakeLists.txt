@@ -795,6 +795,46 @@ if(APPLE)
   add_test(NAME native_settings_cards COMMAND test_native_settings_cards)
   set_tests_properties(native_settings_cards PROPERTIES TIMEOUT 300)
 
+  # 2026-11-21（用户实测）：「切换设置页的时候会先露出上面的空白页面，然后正常设置页才会跳回去」。
+  # 这条判据量的是**首帧**：不 pump runloop，只同步 layout 一次，断言每个页签
+  # ① 可见区已经在内容顶部（不靠下一轮 runloop 的 syncScrollInsets 补救）；
+  # ② 首帧可见区里第一张卡片可见面积 ≥60%（不是一屏空白）。
+  # 另含反向哨兵：把文档视图换成非 flipped 实现后判据必须变红，证明它抓的是根因而不是恒真。
+  add_executable(test_native_settings_pane_firstframe tests/test_native_settings_pane_firstframe.mm
+    tools/native_ui/RLPSettingsViewController.mm tools/native_ui/RLPSettingsLayout.mm
+    tools/native_ui/RLPServersView.mm tools/native_ui/RLPMetaSourcesView.mm
+    tools/native_ui/RLPLibStatsView.mm tools/native_ui/RLPEqualizerView.mm tools/native_ui/RLPEQFaderView.mm tools/native_ui/RLPEQFaderInspector.mm tools/native_ui/RLPVolumeSliderView.mm tools/native_ui/RLPTargetCurve.mm
+    tools/native_ui/RLPEQGeometry.mm
+    tools/native_ui/RLPInputView.mm tools/native_ui/RLPCastView.mm
+    tools/native_ui/RLPCalibrationView.mm tools/native_ui/RLPUpdateWindowController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm tools/native_ui/RLPPageViewController.mm
+    tools/native_ui/RLPCoreClient.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPTheme.mm tools/native_ui/RLPNativeI18n.mm
+    tools/mac_update.mm)
+  target_compile_options(test_native_settings_pane_firstframe PRIVATE -fobjc-arc)
+  target_include_directories(test_native_settings_pane_firstframe PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_settings_pane_firstframe PRIVATE rlapp_core
+    "-framework AppKit" "-framework Security")
+  add_test(NAME native_settings_pane_firstframe COMMAND test_native_settings_pane_firstframe)
+  set_tests_properties(native_settings_pane_firstframe PROPERTIES TIMEOUT 180)
+
+  # 2026-11-21（用户实测）：「艺术家资料页设计不合格，排版混乱，不够简洁…甚至不如 web 版」。
+  # 判据量结构与几何：hero 三段层次、三张等宽卡片纵向不重叠、字段网格按 web EF_ORDER.person
+  # 排序、空值标签不占位、宽字段独占整行、窄宿主不横向溢出、无数据时安静。
+  # 客户端用本 TU 内覆盖的桩（不链接真实桥、不启动核心、不出声）。
+  add_executable(test_native_artist_profile tests/test_native_artist_profile.mm
+    tools/native_ui/RLPArtistDetailViewController.mm
+    tools/native_ui/RLPPageViewController.mm tools/native_ui/RLPSupport.mm
+    tools/native_ui/RLPModels.mm tools/native_ui/RLPTheme.mm
+    tools/native_ui/RLPNativeI18n.mm tools/native_ui/RLPKnowledgeView.mm)
+  target_compile_options(test_native_artist_profile PRIVATE -fobjc-arc)
+  target_include_directories(test_native_artist_profile PRIVATE src tools tools/native_ui)
+  target_link_libraries(test_native_artist_profile PRIVATE
+    "-framework AppKit" "-framework QuartzCore" "-framework CoreImage"
+    "-framework SystemConfiguration" "-framework Security")
+  add_test(NAME native_artist_profile COMMAND test_native_artist_profile)
+  set_tests_properties(native_artist_profile PROPERTIES TIMEOUT 180)
+
   # task-3 C/D：反馈就地发送（不弹窗、真 POST 到 web 同款端点）+ 诊断摘要只复制不弹面板。
   # 网络层用测试接缝注入：断言的是 feedback_api.h 的端点/六字段/成功判定，不联网。
   add_executable(test_native_feedback_inline tests/test_native_feedback_inline.mm
