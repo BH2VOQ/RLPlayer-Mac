@@ -1,1 +1,7 @@
 波形	Waveform	正在播放页波形条 tooltip 与无障碍标签（U2 包3）
+正在检索设备…	Searching for devices...	正在播放页投放弹窗初始检索态
+已发现 %lu 台可投放设备	Found %lu castable devices	正在播放页投放弹窗多设备状态
+已发现 1 台设备（已自动选中）	Found 1 device (auto-selected)	正在播放页投放弹窗单设备自动选中状态
+正在推送到设备…	Casting to device...	正在播放页投放弹窗发起推送加载态
+网络错误或设备未响应	Network error or device not responding	正在播放页投放弹窗网络/超时错误
+

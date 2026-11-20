@@ -2774,6 +2774,11 @@ NSDictionary *RLPNativeI18nTable(void) {
             @"线性相位：冲激响应对称，峰值前后都有振铃。": @"Linear phase: symmetric impulse response, ringing both before and after the peak.",
             @"最小相位：无前振铃，能量集中在脉冲起始处。": @"Minimum phase: no pre-ringing, energy concentrated at the start of the impulse.",
             @"混合相位：幅频不变，群延迟落在最小与线性之间。": @"Intermediate phase: same magnitude response, group delay between minimum and linear.",
+            @"正在检索设备…": @"Searching for devices...",
+            @"已发现 %lu 台可投放设备": @"Found %lu castable devices",
+            @"已发现 1 台设备（已自动选中）": @"Found 1 device (auto-selected)",
+            @"正在推送到设备…": @"Casting to device...",
+            @"网络错误或设备未响应": @"Network error or device not responding",
         };
     });
     return table;

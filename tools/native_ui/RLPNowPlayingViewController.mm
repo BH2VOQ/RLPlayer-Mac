@@ -2126,7 +2126,13 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
     return [NSString stringWithFormat:@"%@/%ld", sr, (long)bits];
 }
 
-@interface RLPNowPlayingViewController () <NSMenuDelegate>
+@interface RLPCastDialogContentView : NSView
+@end
+@implementation RLPCastDialogContentView
+- (BOOL)isFlipped { return YES; }
+@end
+
+@interface RLPNowPlayingViewController () <NSMenuDelegate, NSWindowDelegate>
 
 @property(nonatomic,strong) RLPNPCanvas *webCanvas;
 @property(nonatomic,strong) NSView *analysisPanel;
@@ -2297,6 +2303,21 @@ static NSString *RLPRailTagText(id srValue, id bitsValue) {
 @property (nonatomic, assign) NSUInteger metaSeq;
 @property (nonatomic, assign) NSUInteger trackReloadSeq;
 @property (nonatomic, assign) BOOL needsTrackReload;
+@property (nonatomic, strong, nullable) NSPanel *castDialogWindow;
+@property (nonatomic, weak, nullable) NSWindow *castDialogHostWindow;
+@property (nonatomic, strong, nullable) NSTextField *castDialogTitleLabel;
+@property (nonatomic, strong, nullable) NSTextField *castDialogStatusLabel;
+@property (nonatomic, strong, nullable) NSProgressIndicator *castDialogSpinner;
+@property (nonatomic, strong, nullable) NSPopUpButton *castDialogDevicePopup;
+@property (nonatomic, strong, nullable) NSButton *castDialogPushButton;
+@property (nonatomic, strong, nullable) NSButton *castDialogRetryButton;
+@property (nonatomic, strong, nullable) NSButton *castDialogCancelButton;
+@property (nonatomic, copy, nullable) NSArray<NSDictionary *> *castDialogDevices;
+@property (nonatomic, assign) NSUInteger castDialogSeq;
+@property (nonatomic, assign) BOOL castDialogOpen;
+@property (nonatomic, assign) BOOL castDialogStarting;
+@property (nonatomic, assign) BOOL castDialogErrorState;
+@property (nonatomic, assign) BOOL castDialogHasResult;
 @end
 
 @implementation RLPNowPlayingViewController
@@ -3553,6 +3574,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 }
 /// web 抽屉的 Esc 关闭（`npDrawerClose`）；没有抽屉时走默认行为。
 - (void)cancelOperation:(id)sender {
+    if (self.castDialogOpen) { [self closeCastDialogWithCode:NSModalResponseCancel]; return; }
     // 先关抽屉（web 的 Esc = npDrawerClose）；没有抽屉时保持原有「Esc 关闭播放页」。
     if (self.dataDrawerOpen) { [self closeDataDrawer]; return; }
     [self onClosePlayback:sender];
@@ -3827,52 +3849,399 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
 }
 
+- (NSPanel *)buildCastDialogPanel {
+    RLPTheme *t = [RLPTheme current];
+    const CGFloat W = 420.0, H = 196.0;
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, W, H)
+                                                styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    panel.releasedWhenClosed = NO;
+    panel.title = RLPTr(@"推送当前曲目到设备");
+    panel.identifier = @"npCastDialog";
+    panel.delegate = self;
+    panel.appearance = [NSAppearance appearanceNamed:(t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua)];
+
+    RLPCastDialogContentView *content = [[RLPCastDialogContentView alloc] initWithFrame:NSMakeRect(0, 0, W, H)];
+    content.identifier = @"npCastDialogContent";
+    panel.contentView = content;
+
+    NSTextField *title = RLPLabel(RLPTr(@"推送当前曲目到设备"), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], t.text);
+    title.identifier = @"npCastDialogTitle";
+    title.frame = NSMakeRect(20, 18, W - 40, 22);
+    [content addSubview:title];
+
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(20, 50, 16, 16)];
+    spinner.identifier = @"npCastDialogSpinner";
+    spinner.style = NSProgressIndicatorStyleSpinning;
+    spinner.controlSize = NSControlSizeSmall;
+    spinner.indeterminate = YES;
+    spinner.displayedWhenStopped = NO;
+    [content addSubview:spinner];
+
+    NSTextField *status = RLPLabel(RLPTr(@"正在检索设备…"), [NSFont systemFontOfSize:12], t.text2);
+    status.identifier = @"npCastDialogStatus";
+    status.maximumNumberOfLines = 0;
+    status.lineBreakMode = NSLineBreakByWordWrapping;
+    status.usesSingleLineMode = NO;
+    status.frame = NSMakeRect(44, 48, W - 64, 44);
+    [content addSubview:status];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(20, 98, W - 40, 28) pullsDown:NO];
+    popup.identifier = @"npCastDialogPopup";
+    popup.hidden = YES;
+    popup.enabled = NO;
+    [content addSubview:popup];
+
+    NSButton *retry = [NSButton buttonWithTitle:RLPTr(@"重试") target:self action:@selector(onCastDialogRetry:)];
+    retry.identifier = @"npCastDialogRetry";
+    retry.bezelStyle = NSBezelStyleRounded;
+    retry.frame = NSMakeRect(20, 144, 84, 30);
+    retry.hidden = YES;
+    retry.enabled = NO;
+    [content addSubview:retry];
+
+    NSButton *cancel = [NSButton buttonWithTitle:RLPTr(@"取消") target:self action:@selector(onCastDialogCancel:)];
+    cancel.identifier = @"npCastDialogCancel";
+    cancel.bezelStyle = NSBezelStyleRounded;
+    cancel.keyEquivalent = @"\033";
+    cancel.frame = NSMakeRect(W - 204, 144, 88, 30);
+    [content addSubview:cancel];
+
+    NSButton *push = [NSButton buttonWithTitle:RLPTr(@"推送") target:self action:@selector(onCastDialogPush:)];
+    push.identifier = @"npCastDialogPush";
+    push.bezelStyle = NSBezelStyleRounded;
+    push.keyEquivalent = @"\r";
+    push.enabled = NO;
+    push.frame = NSMakeRect(W - 108, 144, 88, 30);
+    [content addSubview:push];
+
+    self.castDialogWindow = panel;
+    self.castDialogTitleLabel = title;
+    self.castDialogStatusLabel = status;
+    self.castDialogSpinner = spinner;
+    self.castDialogDevicePopup = popup;
+    self.castDialogPushButton = push;
+    self.castDialogRetryButton = retry;
+    self.castDialogCancelButton = cancel;
+    return panel;
+}
+
+- (void)applyCastDialogSearchingState {
+    RLPTheme *t = [RLPTheme current];
+    self.castDialogStarting = NO;
+    self.castDialogErrorState = NO;
+    self.castDialogHasResult = NO;
+    self.castDialogDevices = @[];
+    self.castDialogStatusLabel.frame = NSMakeRect(44, 48, 356, 44);
+    self.castDialogStatusLabel.textColor = t.text2;
+    self.castDialogStatusLabel.stringValue = RLPTr(@"正在检索设备…");
+    self.castDialogSpinner.hidden = NO;
+    [self.castDialogSpinner startAnimation:nil];
+    [self.castDialogDevicePopup removeAllItems];
+    self.castDialogDevicePopup.hidden = YES;
+    self.castDialogDevicePopup.enabled = NO;
+    self.castDialogPushButton.enabled = NO;
+    self.castDialogRetryButton.hidden = YES;
+    self.castDialogRetryButton.enabled = NO;
+    self.castDialogCancelButton.title = RLPTr(@"取消");
+    self.castDialogCancelButton.enabled = YES;
+}
+
+- (void)applyCastDevicesResponse:(nullable NSDictionary *)j {
+    RLPTheme *t = [RLPTheme current];
+    [self.castDialogSpinner stopAnimation:nil];
+    self.castDialogSpinner.hidden = YES;
+    self.castDialogStatusLabel.frame = NSMakeRect(20, 48, 380, 44);
+    self.castDialogStarting = NO;
+    self.castDialogHasResult = YES;
+
+    const BOOL dictOk = [j isKindOfClass:[NSDictionary class]];
+    NSArray *rawDevs = (dictOk && [j[@"devices"] isKindOfClass:[NSArray class]]) ? j[@"devices"] : @[];
+    NSMutableArray<NSDictionary *> *validDevs = [NSMutableArray array];
+    for (id item in rawDevs) {
+        if ([item isKindOfClass:[NSDictionary class]]) {
+            [validDevs addObject:(NSDictionary *)item];
+        }
+    }
+    const BOOL explicitlyFailed = dictOk &&
+        [j[@"ok"] respondsToSelector:@selector(boolValue)] &&
+        ![j[@"ok"] boolValue] &&
+        validDevs.count == 0;
+
+    if (!dictOk || explicitlyFailed) {
+        NSString *err = nil;
+        if (dictOk) {
+            if ([j[@"error"] isKindOfClass:[NSString class]] && [(NSString *)j[@"error"] length]) {
+                err = (NSString *)j[@"error"];
+            } else if ([j[@"hint"] isKindOfClass:[NSString class]] && [(NSString *)j[@"hint"] length]) {
+                err = (NSString *)j[@"hint"];
+            }
+        }
+        if (!err.length) err = RLPTr(@"设备发现失败（/api/cast/devices 无响应）");
+        self.castDialogErrorState = YES;
+        self.castDialogDevices = @[];
+        [self.castDialogDevicePopup removeAllItems];
+        self.castDialogDevicePopup.hidden = YES;
+        self.castDialogDevicePopup.enabled = NO;
+        self.castDialogPushButton.enabled = NO;
+        self.castDialogStatusLabel.textColor = t.danger;
+        self.castDialogStatusLabel.stringValue = err;
+        self.castDialogRetryButton.hidden = NO;
+        self.castDialogRetryButton.enabled = YES;
+        self.castDialogCancelButton.title = RLPTr(@"关闭");
+        return;
+    }
+
+    if (validDevs.count == 0) {
+        NSString *base = RLPTr(@"未发现可投放设备");
+        NSString *reason = nil;
+        if ([j[@"hint"] isKindOfClass:[NSString class]] && [(NSString *)j[@"hint"] length]) {
+            reason = (NSString *)j[@"hint"];
+        } else if ([j[@"error"] isKindOfClass:[NSString class]] && [(NSString *)j[@"error"] length]) {
+            reason = (NSString *)j[@"error"];
+        } else {
+            reason = RLPTr(@"未发现 UPnP/DLNA 渲染器（确认设备已开机并开启 DLNA/UPnP）");
+        }
+        NSString *msg = [reason containsString:base]
+            ? reason
+            : [NSString stringWithFormat:@"%@\n%@", base, reason];
+        self.castDialogErrorState = NO;
+        self.castDialogDevices = @[];
+        [self.castDialogDevicePopup removeAllItems];
+        self.castDialogDevicePopup.hidden = YES;
+        self.castDialogDevicePopup.enabled = NO;
+        self.castDialogPushButton.enabled = NO;
+        self.castDialogStatusLabel.textColor = t.text2;
+        self.castDialogStatusLabel.stringValue = msg;
+        self.castDialogRetryButton.hidden = NO;
+        self.castDialogRetryButton.enabled = YES;
+        self.castDialogCancelButton.title = RLPTr(@"关闭");
+        return;
+    }
+
+    self.castDialogErrorState = NO;
+    self.castDialogDevices = validDevs;
+    [self.castDialogDevicePopup removeAllItems];
+    for (NSDictionary *d in validDevs) {
+        NSString *name = [d[@"name"] isKindOfClass:[NSString class]] ? (NSString *)d[@"name"] : @"";
+        if (!name.length) {
+            NSString *loc = [d[@"location"] isKindOfClass:[NSString class]] ? (NSString *)d[@"location"] : @"";
+            name = loc.length ? RLPNowPlayingCastDeviceLabel(loc) : @"UPnP";
+        }
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name action:nil keyEquivalent:@""];
+        item.representedObject = d;
+        [self.castDialogDevicePopup.menu addItem:item];
+    }
+    [self.castDialogDevicePopup selectItemAtIndex:0];
+    self.castDialogDevicePopup.hidden = NO;
+    self.castDialogDevicePopup.enabled = YES;
+    self.castDialogPushButton.enabled = YES;
+    self.castDialogRetryButton.hidden = NO;
+    self.castDialogRetryButton.enabled = YES;
+    self.castDialogCancelButton.title = RLPTr(@"取消");
+    self.castDialogStatusLabel.textColor = t.text2;
+    self.castDialogStatusLabel.stringValue = (validDevs.count == 1)
+        ? RLPTr(@"已发现 1 台设备（已自动选中）")
+        : [NSString stringWithFormat:RLPTr(@"已发现 %lu 台可投放设备"), (unsigned long)validDevs.count];
+}
+
+- (void)fetchCastDevicesForDialogSeq:(NSUInteger)seq {
+    __weak __typeof__(self) ws = self;
+    [[RLPCoreClient shared] getJSON:@"/api/cast/devices" completion:^(NSDictionary * _Nullable j) {
+        void (^apply)(void) = ^{
+            __typeof__(self) s = ws;
+            if (!s || !s.castDialogOpen || seq != s.castDialogSeq || !s.castDialogWindow) return;
+            [s applyCastDevicesResponse:j];
+        };
+        if ([NSThread isMainThread]) apply();
+        else dispatch_async(dispatch_get_main_queue(), apply);
+    }];
+}
+
+- (void)closeCastDialogWithCode:(NSModalResponse)code {
+    self.castDialogSeq += 1;
+    self.castDialogOpen = NO;
+    self.castDialogStarting = NO;
+    self.castDialogDevices = @[];
+    [self.castDialogSpinner stopAnimation:nil];
+    NSPanel *panel = self.castDialogWindow;
+    NSWindow *host = self.castDialogHostWindow;
+    self.castDialogWindow = nil;
+    self.castDialogHostWindow = nil;
+    if (!panel) return;
+    panel.delegate = nil;
+    if (host && (host.attachedSheet == panel || [host.sheets containsObject:panel])) {
+        [host endSheet:panel returnCode:code];
+    } else {
+        [panel orderOut:nil];
+    }
+}
+
+- (void)onCastDialogCancel:(id)sender {
+    (void)sender;
+    [self closeCastDialogWithCode:NSModalResponseCancel];
+}
+
+- (void)onCastDialogRetry:(id)sender {
+    (void)sender;
+    if (!self.castDialogOpen || self.castDialogStarting || !self.castDialogWindow) return;
+    self.castDialogSeq += 1;
+    const NSUInteger seq = self.castDialogSeq;
+    [self applyCastDialogSearchingState];
+    [self fetchCastDevicesForDialogSeq:seq];
+}
+
+- (void)onCastDialogPush:(id)sender {
+    (void)sender;
+    if (!self.castDialogOpen || self.castDialogStarting || !self.castDialogWindow) return;
+    NSInteger idx = self.castDialogDevicePopup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)self.castDialogDevices.count) return;
+    NSDictionary *device = self.castDialogDevices[(NSUInteger)idx];
+    self.castDialogStarting = YES;
+    self.castDialogErrorState = NO;
+    self.castDialogPushButton.enabled = NO;
+    self.castDialogDevicePopup.enabled = NO;
+    self.castDialogRetryButton.enabled = NO;
+    self.castDialogStatusLabel.frame = NSMakeRect(44, 48, 356, 44);
+    self.castDialogStatusLabel.textColor = [RLPTheme current].text2;
+    self.castDialogStatusLabel.stringValue = RLPTr(@"正在推送到设备…");
+    self.castDialogSpinner.hidden = NO;
+    [self.castDialogSpinner startAnimation:nil];
+    [self castStartToDevice:device];
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (self.castDialogWindow && notification.object == self.castDialogWindow && self.castDialogOpen) {
+        [self closeCastDialogWithCode:NSModalResponseCancel];
+    }
+}
+
 /// 投放「推送」落库（web castPush(file, dev) → /api/cast/start）。
 /// 成功**立刻**刷一次芯片（不等 2s 的 /api/cast/state 轮询）：否则用户点完推送后
 /// 按钮还是「推送到设备」，要等下一格轮询才变「已推送到 <设备>」（审计 C 项）。
 - (void)castStartToDevice:(NSDictionary *)device {
     NSString *body = [self castBodyForDevice:device];
-    if (!body.length) return;
+    if (!body.length) {
+        if (self.castDialogOpen && self.castDialogWindow) {
+            self.castDialogStarting = NO;
+            self.castDialogErrorState = YES;
+            [self.castDialogSpinner stopAnimation:nil];
+            self.castDialogSpinner.hidden = YES;
+            self.castDialogStatusLabel.frame = NSMakeRect(20, 48, 380, 44);
+            self.castDialogStatusLabel.textColor = [RLPTheme current].danger;
+            self.castDialogStatusLabel.stringValue = RLPTr(@"投放失败");
+            self.castDialogDevicePopup.enabled = (self.castDialogDevices.count > 0);
+            self.castDialogPushButton.enabled = (self.castDialogDevices.count > 0);
+            self.castDialogRetryButton.hidden = NO;
+            self.castDialogRetryButton.enabled = YES;
+            self.castDialogCancelButton.title = RLPTr(@"关闭");
+        }
+        return;
+    }
+    const BOOL fromDialog = self.castDialogOpen && self.castDialogStarting;
+    const NSUInteger dialogSeq = self.castDialogSeq;
     __weak __typeof__(self) ws = self;
     [[RLPCoreClient shared] postJSON:@"/api/cast/start" body:body
                           completion:^(NSDictionary * _Nullable r) {
-        __typeof__(self) s = ws;
-        if (!s) return;
-        if (![r[@"ok"] boolValue]) {
-            NSString *err = [r[@"error"] isKindOfClass:[NSString class]]
-                ? (NSString *)r[@"error"] : RLPTr(@"投放失败");
-            RLPToast(err);
-            return;
-        }
-        NSString *label = [device[@"name"] isKindOfClass:[NSString class]] ? device[@"name"] : nil;
-        if (!label.length) {
-            NSString *loc = [device[@"location"] isKindOfClass:[NSString class]] ? device[@"location"] : @"";
-            label = RLPNowPlayingCastDeviceLabel(loc);
-        }
-        RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), label]);
-        [s refreshCastChipState];   // 芯片立刻变成 on 态（不等轮询）
+        void (^apply)(void) = ^{
+            __typeof__(self) s = ws;
+            if (!s) return;
+            const BOOL ok = [r isKindOfClass:[NSDictionary class]] && [r[@"ok"] boolValue];
+            if (fromDialog) {
+                const BOOL sameOpenDialog = s.castDialogOpen && s.castDialogSeq == dialogSeq && s.castDialogWindow != nil;
+                if (!ok) {
+                    if (!sameOpenDialog) return;
+                    NSString *err = ([r isKindOfClass:[NSDictionary class]] &&
+                                     [r[@"error"] isKindOfClass:[NSString class]] &&
+                                     [(NSString *)r[@"error"] length])
+                        ? (NSString *)r[@"error"]
+                        : RLPTr(@"网络错误或设备未响应");
+                    s.castDialogStarting = NO;
+                    s.castDialogErrorState = YES;
+                    [s.castDialogSpinner stopAnimation:nil];
+                    s.castDialogSpinner.hidden = YES;
+                    s.castDialogStatusLabel.frame = NSMakeRect(20, 48, 380, 44);
+                    s.castDialogStatusLabel.textColor = [RLPTheme current].danger;
+                    s.castDialogStatusLabel.stringValue = err;
+                    s.castDialogDevicePopup.enabled = (s.castDialogDevices.count > 0);
+                    s.castDialogPushButton.enabled = (s.castDialogDevices.count > 0);
+                    s.castDialogRetryButton.hidden = NO;
+                    s.castDialogRetryButton.enabled = YES;
+                    s.castDialogCancelButton.title = RLPTr(@"关闭");
+                    return;
+                }
+                if (sameOpenDialog) {
+                    [s closeCastDialogWithCode:NSModalResponseOK];
+                }
+            } else if (!ok) {
+                NSString *err = ([r isKindOfClass:[NSDictionary class]] &&
+                                 [r[@"error"] isKindOfClass:[NSString class]] &&
+                                 [(NSString *)r[@"error"] length])
+                    ? (NSString *)r[@"error"] : RLPTr(@"投放失败");
+                RLPToast(err);
+                return;
+            }
+            NSString *label = [device[@"name"] isKindOfClass:[NSString class]] ? (NSString *)device[@"name"] : nil;
+            if (!label.length) {
+                NSString *loc = [device[@"location"] isKindOfClass:[NSString class]] ? (NSString *)device[@"location"] : @"";
+                label = RLPNowPlayingCastDeviceLabel(loc);
+            }
+            RLPToast([NSString stringWithFormat:@"%@ %@", RLPTr(@"已推送到"), label]);
+            [s refreshCastChipState];   // 芯片立刻变成 on 态（不等轮询）
+        };
+        if ([NSThread isMainThread]) apply();
+        else dispatch_async(dispatch_get_main_queue(), apply);
     }];
 }
 
 - (void)onCastCurrent:(id)s {
+    (void)s;
     if (self.castRunningState) {
         // web castToggle：投放中点按钮 = 停止（不弹设备列表）。
         __weak __typeof__(self) ws = self;
         [[RLPCoreClient shared] postJSON:@"/api/cast/stop" body:@""
                               completion:^(NSDictionary * _Nullable r) {
-            __typeof__(self) s = ws;
-            if (!s) return;
+            __typeof__(self) s2 = ws;
+            if (!s2) return;
             if (![r[@"ok"] boolValue] && [r[@"error"] isKindOfClass:[NSString class]])
                 RLPToast((NSString *)r[@"error"]);
             else
                 RLPToast(RLPTr(@"已停止投放，输出回到本机"));
-            [s refreshCastChipState];
+            [s2 refreshCastChipState];
         }];
         return;
     }
-    if(!self.currentPath.length)return;__weak __typeof__(self) ws=self;
-    [[RLPCoreClient shared] getJSON:@"/api/cast/devices" completion:^(NSDictionary *j){__typeof__(self) s=ws;if(!s)return;NSArray *devs=[j[@"devices"] isKindOfClass:NSArray.class]?j[@"devices"]:@[];if(!devs.count){RLPToast(j[@"hint"]?:RLPTr(@"未发现可投放设备"));return;}
-        NSAlert *a=[NSAlert new];a.messageText=RLPTr(@"推送当前曲目到设备");NSPopUpButton *p=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(0,0,320,28)];for(NSDictionary *d in devs)[p addItemWithTitle:d[@"name"]?:@"UPnP"];a.accessoryView=p;[a addButtonWithTitle:RLPTr(@"推送")];[a addButtonWithTitle:RLPTr(@"取消")];if([a runModal]!=NSAlertFirstButtonReturn)return;NSDictionary *d=devs[p.indexOfSelectedItem];[s castStartToDevice:d];}];
+    if (!self.currentPath.length) return;
+    if (self.castDialogOpen && self.castDialogWindow) return;
+
+    self.castDialogSeq += 1;
+    const NSUInteger openSeq = self.castDialogSeq;
+    self.castDialogOpen = YES;
+    NSPanel *panel = [self buildCastDialogPanel];
+    [self applyCastDialogSearchingState];
+
+    NSWindow *hostWindow = self.isViewLoaded ? self.view.window : nil;
+    self.castDialogHostWindow = hostWindow;
+    if (hostWindow) {
+        __weak __typeof__(self) wsSheet = self;
+        [hostWindow beginSheet:panel completionHandler:^(NSModalResponse returnCode) {
+            (void)returnCode;
+            __typeof__(self) sSheet = wsSheet;
+            if (!sSheet) return;
+            if (sSheet.castDialogSeq == openSeq && sSheet.castDialogOpen) {
+                sSheet.castDialogSeq += 1;
+                sSheet.castDialogOpen = NO;
+                sSheet.castDialogStarting = NO;
+                sSheet.castDialogDevices = @[];
+                [sSheet.castDialogSpinner stopAnimation:nil];
+                sSheet.castDialogWindow.delegate = nil;
+                sSheet.castDialogWindow = nil;
+                sSheet.castDialogHostWindow = nil;
+            }
+        }];
+    }
+    [self fetchCastDevicesForDialogSeq:openSeq];
 }
 - (void)onRailDensity:(id)s {
     const BOOL detail = (self.railDensity.selectedSegment == 1);
@@ -4691,7 +5060,19 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     return tv;
 }
 
-- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self];[self.poll invalidate];[self.castPoll invalidate];[self.lyricRetryTimer invalidate]; }
+- (void)dealloc {
+    self.castDialogSeq += 1;
+    self.castDialogOpen = NO;
+    if (self.castDialogWindow) {
+        self.castDialogWindow.delegate = nil;
+        [self.castDialogWindow orderOut:nil];
+        self.castDialogWindow = nil;
+    }
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self.poll invalidate];
+    [self.castPoll invalidate];
+    [self.lyricRetryTimer invalidate];
+}
 
 - (void)viewWillLayout {
     [super viewWillLayout];
@@ -4747,6 +5128,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 - (void)viewDidDisappear {
     [self.knowledge cancelLoading];
     [super viewDidDisappear];
+    if (self.castDialogOpen) {
+        [self closeCastDialogWithCode:NSModalResponseCancel];
+    }
     self.anlDisappeared = YES;
     self.anlPendingTickPath = nil;
     self.anlPendingTickPlaying = NO;
@@ -5923,6 +6307,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     self.anlDetail.textColor=t.text;[self.webControls applyTheme];self.webControls.playBtn.layer.backgroundColor=t.accent.CGColor;self.webControls.playBtn.contentTintColor=NSColor.whiteColor;
     self.dataDrawer.layer.backgroundColor=t.bg2.CGColor;
     self.dataDrawer.layer.borderColor=(t.line2 ?: t.line).CGColor;
+    if (self.castDialogOpen && self.castDialogWindow) {
+        self.castDialogWindow.appearance = [NSAppearance appearanceNamed:(t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua)];
+        self.castDialogTitleLabel.textColor = t.text;
+        self.castDialogStatusLabel.textColor = self.castDialogErrorState ? t.danger : t.text2;
+    }
     [self.knowledge applyTheme];[self renderRailMetadata];[self updateLyricPosition:self.webStatus.position];[self updateBlurredCover];
 }
 
@@ -5970,6 +6359,17 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self renderRailMetadata];
     [self.knowledge applyLanguage];
     [self syncOpenDrawerIfNeeded];
+    if (self.castDialogOpen && self.castDialogWindow) {
+        self.castDialogWindow.title = RLPTr(@"推送当前曲目到设备");
+        self.castDialogTitleLabel.stringValue = RLPTr(@"推送当前曲目到设备");
+        self.castDialogPushButton.title = RLPTr(@"推送");
+        self.castDialogRetryButton.title = RLPTr(@"重试");
+        self.castDialogCancelButton.title = (self.castDialogHasResult && self.castDialogDevices.count == 0)
+            ? RLPTr(@"关闭") : RLPTr(@"取消");
+        if (!self.castDialogHasResult && !self.castDialogStarting) {
+            self.castDialogStatusLabel.stringValue = RLPTr(@"正在检索设备…");
+        }
+    }
     if (self.webCanvas.bounds.size.width > 0) [self layoutWebPlayback];
 }
 - (void)updateBlurredCover {
