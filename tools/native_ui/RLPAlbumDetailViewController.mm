@@ -796,6 +796,14 @@
         RLPOtherWorkCard *card = [[RLPOtherWorkCard alloc] initWithFrame:NSZeroRect];
         card.albumKey = a.key;
         card.identifier = @"album.workcard";
+        // 占位底色必须在**建卡时**就上，不能等 applyTheme：
+        // 卡片是异步数据回来后新建的，applyTheme 早已跑过 ⟹ 无封面的那张
+        // 在页面停留期间一直是纯白块、连边框都没有（离屏截图实测）。
+        {
+            RLPTheme *t = [RLPTheme current];
+            card.cover.layer.borderColor = t.line.CGColor;
+            card.cover.layer.backgroundColor = t.cvBg.CGColor;
+        }
         card.target = self;
         card.action = @selector(onOpenOtherWork:);
         card.toolTip = a.name;
