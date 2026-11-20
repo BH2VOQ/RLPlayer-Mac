@@ -44,6 +44,17 @@ static NSString *g_curPath = @"/Music/A.flac";
 @implementation RLPCoreClient
 + (instancetype)shared { static RLPCoreClient *c; if (!c) c = [self new]; return c; }
 - (BOOL)started { return YES; }
+
+- (NSDictionary *)jsonWithMethod:(NSString *)method path:(NSString *)path body:(NSString *)body {
+    __block NSDictionary *out = nil;
+    if ([method isEqualToString:@"GET"]) {
+        [self getJSON:path completion:^(NSDictionary *j) { out = j; }];
+    } else {
+        [self postJSON:path body:body completion:^(NSDictionary *j) { out = j; }];
+    }
+    return out ?: @{ @"ok": @NO };
+}
+
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     [g_gets addObject:@{ @"path": path ?: @"" }];
     if (!done) return;
@@ -60,7 +71,13 @@ static NSString *g_curPath = @"/Music/A.flac";
     if ([path hasPrefix:@"/api/cast/state"]) {
         done(@{ @"ok": @YES, @"running": @(g_castRunning),
                 @"device": (g_castRunning ? @"upnp://192.168.1.10:8200/desc.xml" : @""),
-                @"phase": @"serving" });
+                @"phase": @"serving", @"positionSec": @10, @"durationSec": @100,
+                @"sourceFile": g_curPath ?: @"" });
+        return;
+    }
+    if ([path hasPrefix:@"/api/settings"]) {
+        done(@{ @"ok": @YES, @"kv": @{ @"backend": (g_castRunning ? @"upnp" : @"coreaudio"),
+                                       @"device": @"", @"upnpdev": @"upnp://192.168.1.10:8200/desc.xml" } });
         return;
     }
     done(@{ @"ok": @NO });
@@ -69,11 +86,12 @@ static NSString *g_curPath = @"/Music/A.flac";
 - (void)postJSON:(NSString *)path body:(NSString *)body completion:(RLPJSONCompletion)done {
     [g_posts addObject:@{ @"path": path ?: @"", @"body": body ?: @"" }];
     if (!done) return;
-    if ([path hasPrefix:@"/api/cast/start"]) {
+    if ([path hasPrefix:@"/api/cast/start"] || [path hasPrefix:@"/api/play"]) {
         if (g_castStartOk) { g_castRunning = YES; done(@{ @"ok": @YES }); }   // 后端真的起来了
         else done(@{ @"ok": @NO, @"error": @"设备无响应" });
         return;
     }
+    if ([path hasPrefix:@"/api/seek"]) { done(@{ @"ok": @YES }); return; }
     if ([path hasPrefix:@"/api/cast/stop"]) { g_castRunning = NO; done(@{ @"ok": @YES }); return; }
     done(@{ @"ok": @YES });
 }
@@ -175,17 +193,19 @@ int main() {
         Ck([ChipTitle(chip) isEqualToString:RLPTr(@"推送到设备")],
            "未投放时芯片文案 = 推送到设备", ChipTitle(chip));
 
-        // ---- D3：/api/cast/start 返回 ok ⟹ **不等 2s 轮询**，芯片立刻变「已推送到」----
+        // ---- D3：投送 = /api/settings(backend=upnp) + /api/play；成功 ⟹ **不等 2s 轮询**，芯片立刻变「已推送到」----
         const NSInteger stateBefore = CountPaths(g_gets, @"/api/cast/state");
         Ck(CallSeam(vc, NSSelectorFromString(@"castStartToDevice:"), @{ @"name": @"Living Room",
                                                                       @"location": @"upnp://192.168.1.10:8200/desc.xml" }),
            "生产码把「点推送」抽成 castStartToDevice:（判据可驱动到的落库入口）",
            @"旧码只有内联在 NSAlert 分支里的请求，无法驱动");
         Pump(0.12);      // 远小于 2s 的 /api/cast/state 轮询间隔
-        NSDictionary *startPost = LastPost(@"/api/cast/start");
-        Ck(startPost != nil, "发出 /api/cast/start", [g_posts componentsJoinedByString:@" | "]);
-        Ck(startPost && [startPost[@"body"] containsString:@"192.168.1.10"],
-           "投放请求带设备地址（dev=）", startPost[@"body"] ?: @"");
+        NSDictionary *startPost = LastPost(@"/api/play");
+        NSDictionary *settingsPost = LastPost(@"/api/settings");
+        Ck(startPost != nil, "发出 /api/play（队列保持）", [g_posts componentsJoinedByString:@" | "]);
+        Ck(settingsPost && [settingsPost[@"body"] containsString:@"192.168.1.10"] &&
+           [settingsPost[@"body"] containsString:@"backend=upnp"],
+           "投送前先把输出写成 backend=upnp + upnpdev", settingsPost[@"body"] ?: @"");
         Ck(startPost && [startPost[@"body"] containsString:@"file="],
            "投放请求带当前曲目（file=）", startPost[@"body"] ?: @"");
         Ck(CountPaths(g_gets, @"/api/cast/state") > stateBefore,
@@ -210,7 +230,8 @@ int main() {
         CallSeam(vc, NSSelectorFromString(@"castStartToDevice:"), @{ @"name": @"Living Room",
                                                                     @"location": @"upnp://192.168.1.10:8200/desc.xml" });
         Pump(0.12);
-        Ck(LastPost(@"/api/cast/start") != nil, "拒绝路径也发了 /api/cast/start",
+        Ck(LastPost(@"/api/play") != nil || LastPost(@"/api/settings") != nil,
+           "拒绝路径也真实发出了投送请求（不假装成功）",
            [g_posts componentsJoinedByString:@" | "]);
         Ck([ChipTitle(chip) isEqualToString:RLPTr(@"推送到设备")],
            "投放失败不把芯片画成已推送（不许撒谎）", ChipTitle(chip));

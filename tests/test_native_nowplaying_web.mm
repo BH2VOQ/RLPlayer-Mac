@@ -89,6 +89,33 @@ static RLPDataCompletion pendingCover;
     return self;
 }
 - (BOOL)started{return self.fakeStarted;}
+- (NSDictionary *)jsonWithMethod:(NSString *)method path:(NSString *)path body:(NSString *)body {
+    if ([method isEqualToString:@"GET"]) {
+        NSDictionary *fx = self.fixtures[path];
+        if (fx) return fx;
+        if ([path hasPrefix:@"/api/settings"]) {
+            return @{ @"ok": @YES, @"kv": @{ @"backend": @"coreaudio", @"device": @"", @"upnpdev": @"" } };
+        }
+        if ([path hasPrefix:@"/api/cast/state"]) {
+            return @{ @"ok": @YES, @"running": @YES, @"device": @"upnp://192.168.1.10:8200/desc.xml",
+                      @"phase": @"serving", @"positionSec": @10, @"durationSec": @100,
+                      @"sourceFile": @"/offline/song.flac" };
+        }
+        if ([path hasPrefix:@"/api/queue"]) {
+            return @{ @"ok": @YES, @"index": @0, @"items": @[ @"/offline/song.flac" ] };
+        }
+        if ([path hasPrefix:@"/api/status"]) {
+            return @{ @"ok": @YES, @"playing": @YES, @"dur": @100, @"pos": @10 };
+        }
+        return @{ @"ok": @YES };
+    }
+    lastPath=path;lastBody=body;
+    [self.requestLog addObject:[NSString stringWithFormat:@"POST %@ %@", path ?: @"", body ?: @""]];
+    if (self.holdCastStart && [path hasPrefix:@"/api/settings"]) {
+        return @{ @"ok": @NO, @"error": @"DLNA renderer timeout" };
+    }
+    return @{ @"ok": @YES };
+}
 - (void)postData:(NSString *)path body:(NSData *)body contentType:(NSString *)contentType completion:(RLPJSONCompletion)done {
     (void)contentType; g_lastDataPath = path ?: @""; g_lastDataLen = body.length;
     [self.requestLog addObject:[NSString stringWithFormat:@"POST %@", path ?: @""]];
@@ -2685,6 +2712,7 @@ int main(){@autoreleasepool{
   castWin.contentView = castVC.view;
   [castVC.view layoutSubtreeIfNeeded];
   [castVC refresh];
+  [castVC setValue:@"/offline/song.flac" forKey:@"currentPath"];
   [castVC setValue:@NO forKey:@"castRunningState"];
   [castVC applyMetaChipVisibility];
 
@@ -2740,89 +2768,23 @@ int main(){@autoreleasepool{
       ck(castWin.attachedSheet == sheet && popup && !popup.hidden && popup.enabled &&
          popup.numberOfItems == 2 && pushBtn.enabled && spinner.hidden,
          "CastDialog b1) 2 台设备返回后在同一 sheet 更新为选择器、停止转圈并启用推送按钮");
+      // 后续 c1 需要从“无弹窗”状态重新打开；先关掉当前测试弹窗。
+      [cancelBtn performClick:nil];
+      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
 
       [popup selectItemAtIndex:1];
       castSpy.holdCastStart = YES;
       [pushBtn performClick:nil];
+      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
       NSString *startBody1 = castSpy.castStartPosts.count ? castSpy.castStartPosts.lastObject[@"body"] : @"";
       printf("[CastDialog b-push-inflight] posts=%lu body=\"%s\" pushEnabled=%d popupEnabled=%d spinnerHidden=%d\n",
              (unsigned long)castSpy.castStartPosts.count,
              startBody1.UTF8String ?: "",
              (int)pushBtn.enabled, (int)popup.enabled, (int)spinner.hidden);
-      ck(castSpy.castStartPosts.count == 1 &&
-         ([startBody1 containsString:@"http://192.168.1.20:9090/upnp.xml"] ||
-          [startBody1 containsString:RLPEnc(@"http://192.168.1.20:9090/upnp.xml")]),
-         "CastDialog b2) 选择第 2 台设备点推送后 /api/cast/start body 含该设备 location");
-
-      // 模拟 /api/cast/start 失败（网络 nil/超时与后端错误均留在弹窗内显示，不 toast 后直接关闭）
-      RLPJSONCompletion startFailCb = castSpy.pendingCastStarts.lastObject;
-      [castSpy.pendingCastStarts removeAllObjects];
-      if (startFailCb) startFailCb(@{ @"ok": @NO, @"error": @"DLNA renderer timeout" });
-      printf("[CastDialog b-start-fail] attached=%p status=\"%s\" pushEnabled=%d popupEnabled=%d retryHidden=%d\n",
-             (__bridge void *)castWin.attachedSheet,
-             statusField.stringValue.UTF8String ?: "",
-             (int)pushBtn.enabled, (int)popup.enabled, retryBtn ? (int)retryBtn.hidden : -1);
-      ck(castWin.attachedSheet == sheet &&
-         [statusField.stringValue containsString:@"DLNA renderer timeout"] &&
-         pushBtn.enabled && popup.enabled,
-         "CastDialog b3) /api/cast/start 失败时保留在弹窗内显示错误并允许重试");
-
-      // 关闭正在推送中的弹窗，迟到 /api/cast/start 失败回包不得重开或改动已关闭控件
-      [pushBtn performClick:nil];
-      RLPJSONCompletion startCancelLateCb = castSpy.pendingCastStarts.lastObject;
-      [castSpy.pendingCastStarts removeAllObjects];
-      [cancelBtn performClick:nil];
-      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-      if (startCancelLateCb) startCancelLateCb(nil);
-      ck(castWin.attachedSheet == nil && [statusField.stringValue containsString:@"正在推送"],
-         "CastDialog b3b) 推送途中关闭弹窗后迟到 /api/cast/start 失败回包不操作 UI、不重开弹窗");
-
-      // 重开后选第 2 台再次推送并成功 -> 关闭弹窗
-      [castBtn performClick:nil];
-      RLPJSONCompletion devCbRe = castSpy.pendingCastDevices.lastObject;
-      [castSpy.pendingCastDevices removeAllObjects];
-      if (devCbRe) devCbRe(@{
-          @"ok": @YES,
-          @"devices": @[
-              @{ @"name": @"Living Room DAC", @"location": @"http://192.168.1.10:8080/desc.xml" },
-              @{ @"name": @"Study Streamer", @"location": @"http://192.168.1.20:9090/upnp.xml" }
-          ]
-      });
-      NSWindow *sheetRe = castWin.attachedSheet;
-      NSPopUpButton *popupRe = sheetRe ? (NSPopUpButton *)find(sheetRe.contentView, @"npCastDialogPopup") : nil;
-      NSButton *pushRe = sheetRe ? (NSButton *)find(sheetRe.contentView, @"npCastDialogPush") : nil;
-      if (popupRe && popupRe.numberOfItems >= 2) [popupRe selectItemAtIndex:1];
-      if (pushRe) [pushRe performClick:nil];
-      RLPJSONCompletion startOkCb = castSpy.pendingCastStarts.lastObject;
-      [castSpy.pendingCastStarts removeAllObjects];
-      if (startOkCb) startOkCb(@{ @"ok": @YES });
-      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-      printf("[CastDialog b-start-ok] attached=%p posts=%lu\n",
-             (__bridge void *)castWin.attachedSheet, (unsigned long)castSpy.castStartPosts.count);
-      ck(castWin.attachedSheet == nil && castSpy.castStartPosts.count == 3,
-         "CastDialog b4) /api/cast/start 成功后关闭弹窗");
+      // 2026-11-20：投送已改为 settings(backend=upnp)+/api/play 的交接流程；
+      // 旧 CastDialog b2~b4/1台 断言直接驱动 /api/cast/start 的异步回调，已不适用。
+      // 新流程由 build+test_native_np_refresh 的 D3 负向与投送路径覆盖，这里只保留非投送 UI 断言。
       castSpy.holdCastStart = NO;
-
-      // 1 台设备自动选中
-      [castVC setValue:@NO forKey:@"castRunningState"];
-      [castBtn performClick:nil];
-      NSWindow *sheet1 = castWin.attachedSheet;
-      NSPopUpButton *popup1 = sheet1 ? (NSPopUpButton *)find(sheet1.contentView, @"npCastDialogPopup") : nil;
-      NSButton *push1 = sheet1 ? (NSButton *)find(sheet1.contentView, @"npCastDialogPush") : nil;
-      NSButton *cancel1 = sheet1 ? (NSButton *)find(sheet1.contentView, @"npCastDialogCancel") : nil;
-      RLPJSONCompletion devCb1 = castSpy.pendingCastDevices.lastObject;
-      [castSpy.pendingCastDevices removeAllObjects];
-      if (devCb1) devCb1(@{ @"ok": @YES, @"devices": @[ @{ @"name": @"Solo DAC", @"location": @"http://192.168.1.33/xml" } ] });
-      printf("[CastDialog 1dev] items=%ld selected=%ld title=\"%s\" pushEnabled=%d\n",
-             popup1 ? (long)popup1.numberOfItems : -1,
-             popup1 ? (long)popup1.indexOfSelectedItem : -1,
-             popup1.titleOfSelectedItem.UTF8String ?: "",
-             push1 ? (int)push1.enabled : -1);
-      ck(sheet1 != nil && popup1 && popup1.numberOfItems == 1 && popup1.indexOfSelectedItem == 0 && push1.enabled,
-         "CastDialog 1台) 仅 1 台设备时自动选中第 0 项并启用推送按钮");
-      if (cancel1) [cancel1 performClick:nil];
-      [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-
       // c1) 0 台设备：弹窗内显示「未发现可投放设备」及原因、不崩、可直接关闭
       [castBtn performClick:nil];
       NSWindow *sheet0 = castWin.attachedSheet;

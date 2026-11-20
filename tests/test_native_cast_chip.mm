@@ -43,13 +43,37 @@ static NSMutableArray<NSDictionary *> *g_posts;
 @implementation RLPCoreClient
 + (instancetype)shared { static RLPCoreClient *c; if (!c) c = [self new]; return c; }
 - (BOOL)started { return YES; }
+
+- (NSDictionary *)jsonWithMethod:(NSString *)method path:(NSString *)path body:(NSString *)body {
+    __block NSDictionary *out = nil;
+    if ([method isEqualToString:@"GET"]) {
+        [self getJSON:path completion:^(NSDictionary *j) { out = j; }];
+    } else {
+        [self postJSON:path body:body completion:^(NSDictionary *j) { out = j; }];
+    }
+    return out ?: @{ @"ok": @NO };
+}
+
 - (void)getJSON:(NSString *)path completion:(RLPJSONCompletion)done {
     [g_gets addObject:@{ @"path": path ?: @"" }];
     if (!done) return;
     if ([path isEqualToString:@"/api/cast/state"]) {
         done(@{ @"ok": @YES, @"running": @(g_casting),
                 @"device": (g_casting ? @"upnp://192.168.1.10:8200/desc.xml" : @""),
-                @"phase": @"serving" });
+                @"phase": @"serving", @"positionSec": @10, @"durationSec": @100,
+                @"sourceFile": @"/offline/song.flac" });
+        return;
+    }
+    if ([path hasPrefix:@"/api/settings"]) {
+        done(@{ @"ok": @YES, @"kv": @{ @"backend": @"coreaudio", @"device": @"", @"upnpdev": @"" } });
+        return;
+    }
+    if ([path hasPrefix:@"/api/queue"]) {
+        done(@{ @"ok": @YES, @"index": @0, @"items": @[ @"/offline/song.flac" ] });
+        return;
+    }
+    if ([path hasPrefix:@"/api/status"]) {
+        done(@{ @"ok": @YES, @"playing": @YES, @"dur": @100, @"pos": @10 });
         return;
     }
     done(@{ @"ok": @NO });

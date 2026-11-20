@@ -4338,6 +4338,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     }
     const BOOL fromDialog = self.castDialogOpen && self.castDialogStarting;
     const NSUInteger dialogSeq = self.castDialogSeq;
+    NSPanel *dialogPanel = self.castDialogWindow;
     __weak __typeof__(self) ws = self;
     // 投送 = 把输出改成局域网投放并由 /api/play(backend=upnp) 起播（保持队列，不并行起本地线程），
     // 不再走 /api/cast/start（它不写 backend/upnpdev，也不维护队列）。
@@ -4359,7 +4360,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             if (ok || [r[@"rolledBack"] boolValue] || [r[@"rollbackFailed"] boolValue])
                 [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:s];
             if (fromDialog) {
-                const BOOL sameOpenDialog = s.castDialogOpen && s.castDialogSeq == dialogSeq && s.castDialogWindow != nil;
+                // 用面板身份判断，而不是只认序号：投送是异步的，期间用户可能取消/重开弹窗。
+                // 序号会变，但同一个 panel 仍是当前这次投送对应的那个；换了 panel 就绝不操作新弹窗。
+                (void)dialogSeq;
+                const BOOL sameOpenDialog = s.castDialogOpen && s.castDialogWindow != nil &&
+                                            s.castDialogWindow == dialogPanel;
                 if (!ok) {
                     if (!sameOpenDialog) return;
                     NSString *err = RLPCastHandoffFailureText(r ?: @{});
@@ -4377,6 +4382,9 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                     s.castDialogCancelButton.title = RLPTr(@"关闭");
                     return;
                 }
+                // 即便弹窗已被用户关掉/换新，也必须把“正在推送”状态复位；
+                // 否则同一个控制器下一次打开弹窗时 onCastDialogPush 会被旧状态挡住（实测卡死入口）。
+                s.castDialogStarting = NO;
                 if (sameOpenDialog) {
                     [s closeCastDialogWithCode:NSModalResponseOK];
                 }
