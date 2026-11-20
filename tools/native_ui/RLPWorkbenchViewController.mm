@@ -930,7 +930,13 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         val.translatesAutoresizingMaskIntoConstraints = NO;
         val.lineBreakMode = NSLineBreakByTruncatingTail;
         [val setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-        NSTextField *why = RLPLabel(@"", [NSFont systemFontOfSize:10], t.warn);
+        // 这行显示的是「这个节点为什么在本路径不生效」的**中性说明**
+        // （例如 PCM 输出下 SDM 调制器的「PCM 输出不经过调制器」、跟随源时的
+        //  「跟随源，不做重采样」）。它不是错误、也不是告警。
+        // 旧实现用 t.warn（橙色告警色）⟹ 一整排正常状态被画成"哪里坏了"，
+        // 离屏截图里 SDM/重采样两格都是橙字（用户观感即"页面像在报错"）。
+        // 中性说明用 mut2，与 web 的 var(--mut2) 一致；真告警另有 bpLine/status 承载。
+        NSTextField *why = RLPLabel(@"", [NSFont systemFontOfSize:10], t.mut2);
         why.translatesAutoresizingMaskIntoConstraints = NO;
         why.lineBreakMode = NSLineBreakByTruncatingTail;
         [why setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -4127,8 +4133,20 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     RLPTheme *t = [RLPTheme current];
     NSDictionary *s = self.settings ?: @{};
     NSDictionary *st = self.status ?: @{};
-    NSString *fs = [st[@"inRate"] isKindOfClass:[NSNumber class]] ? [st[@"inRate"] stringValue] : nil;
-    NSString *bits = [st[@"bits"] isKindOfClass:[NSNumber class]] ? [st[@"bits"] stringValue] : [self str:@"bits" def:@"—"];
+    // 未播放时后端仍会带 inRate=0（不是缺字段）⟹ 必须把 0 当成「无数据」，
+    // 否则「源」节点显示成 **"0 Hz / — bit"**，看起来像采样率真的坏成了 0。
+    // （离屏截图实测：空闲工作台左侧第一格就是这串，容易被读成故障。）
+    NSString *fs = nil;
+    if ([st[@"inRate"] isKindOfClass:[NSNumber class]]) {
+        const double fsHz = [st[@"inRate"] doubleValue];
+        if (fsHz > 0.0) fs = [NSString stringWithFormat:@"%g", fsHz];
+    }
+    NSString *bits = nil;
+    if ([st[@"bits"] isKindOfClass:[NSNumber class]] && [st[@"bits"] intValue] > 0) {
+        bits = [st[@"bits"] stringValue];
+    } else {
+        bits = [self str:@"bits" def:@"—"];
+    }
     const NSInteger dsdRate = RLPParseDsdRate(s[@"dsd"]);
     const BOOL dsd = dsdRate > 0;
     NSString *activeFilter = RLPWorkbenchActivePlaybackFilter(s, st, RLPTr(@"默认"));
@@ -4202,8 +4220,11 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         if (hit) { hit.enabled = applies; hit.toolTip = applies ? okTip : why; }
         self.chainValues[key].toolTip = applies ? okTip : why;
         for (NSView *sub in node.subviews) {
-            if ([sub.identifier isEqualToString:[NSString stringWithFormat:@"wb.why.%@", key]])
-                ((NSTextField *)sub).stringValue = why ?: @"";
+            if ([sub.identifier isEqualToString:[NSString stringWithFormat:@"wb.why.%@", key]]) {
+                NSTextField *wtf = (NSTextField *)sub;
+                wtf.stringValue = why ?: @"";
+                wtf.textColor = t.mut2;    // 主题切换后仍保持「中性说明」色，不回到告警色
+            }
         }
     }
     NSString *stage = [st[@"filter"] isKindOfClass:[NSString class]] ? st[@"filter"] : nil;
