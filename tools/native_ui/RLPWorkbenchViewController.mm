@@ -2704,7 +2704,9 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     anlNote.lineBreakMode = NSLineBreakByWordWrapping;
     [anlNote setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    self.monCueNote = RLPLabel(RLPTr(@"当前播放为分轨片段；音质分析针对源文件。"), t.caption, t.warn);
+    // 中性说明，不是告警：它只是解释「分轨片段分析的是源文件」。
+    // 用 warn 会把一句普通解释画成红色提示（与刚才修的信号链节点说明同一类错误）。
+    self.monCueNote = RLPLabel(RLPTr(@"当前播放为分轨片段；音质分析针对源文件。"), t.caption, t.mut2);
     self.monCueNote.identifier = @"wb.mon.cuenote";
     self.monCueNote.hidden = YES;
 
@@ -4331,6 +4333,9 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 - (void)applyTheme {
     [super applyTheme];
     RLPTheme *t = [RLPTheme current];
+    // 主题切换后这两处必须跟着走，否则浅色→深色时它们仍停在旧主题的色值上
+    // （monCueNote 是中性说明 → mut2；filterOverrideLabel 由 refreshChain 每轮重设）。
+    if (self.monCueNote) self.monCueNote.textColor = t.mut2;
     for (NSView *card in @[self.rackPCM ?: [NSView new], self.rackDSD ?: [NSView new], self.rackOutput ?: [NSView new]]) {
         card.layer.backgroundColor = t.bg2.CGColor;
         card.layer.borderColor = t.line.CGColor;
