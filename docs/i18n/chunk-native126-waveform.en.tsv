@@ -12,4 +12,9 @@
 已跟随播放方式：PCM 升频（目标率 %@ · 上限与强制选项生效）	Following playback mode: PCM upsampling (target rate %@ · ceiling and force options apply)	流媒体投放面板升频状态（PCM 升频）
 已跟随播放方式：跟随源采样率（仅滤波器自定义，投放不升频）	Following playback mode: Follow source rate (filter-only custom mode; cast upsampling off)	流媒体投放面板升频状态（仅滤波器自定义）
 已跟随播放方式：原音直通（投放不升频）	Following playback mode: Bit-Perfect passthrough (cast upsampling off)	流媒体投放面板升频状态（原音直通）
+能力未知	Capabilities unknown	聆听室 UPnP 探测失败或未确认时能力栏占位
+未选择网络播放器	No network player selected	聆听室 UPnP 未选择设备时能力栏占位
+能力尚未确认，正在探测 UPnP 渲染器…	Capabilities pending; probing UPnP renderer…	聆听室切到 UPnP 正在探测渲染器能力时的禁用说明
+UPnP 渲染器未声明支持的采样率或能力未知，请在「输出」中选择可用渲染器。	UPnP renderer reported no supported sample rates or capabilities are unknown; select an available renderer in Output.	聆听室 UPnP 无能力时 PCM/DSD 升频禁用原因
+UPnP 渲染器未声明足够高的 PCM 载波率（≥176.4 kHz / 24-bit），不支持 DoP 输出。	UPnP renderer does not advertise a high enough PCM carrier rate (≥176.4 kHz / 24-bit); DoP output is not supported.	聆听室 UPnP 无 DoP 载波率时 DSD 升频禁用原因
 

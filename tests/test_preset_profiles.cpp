@@ -605,6 +605,57 @@ int main() {
         ck(mismatch == 0, "Case 24: 三档 54 组签名与加第 4 档**之前**的基线逐字节一致", firstBad);
     }
 
+    // ---- ㉕ UPnP 远端渲染器 caps：PCM/DSD/DoP 预设目标随渲染器支持率走 ----
+    {
+        DeviceCaps upnp192;
+        upnp192.backend = "upnp";
+        upnp192.deviceName = "Living Room DAC";
+        upnp192.rates = { 44100, 48000, 96000, 176400, 192000 };
+        upnp192.maxRate = 192000;
+        upnp192.dopMax = preset_dop_max_from_rates(upnp192.rates);
+        upnp192.dop = !upnp192.dopMax.empty();
+        upnp192.dsdNative = false;
+        upnp192.exclusive = false;
+
+        ck(upnp192.dopMax == "dsd64" && upnp192.dop,
+           "Case 25a: UPnP 192k + 176.4k 渲染器推出 DoP=dsd64", upnp192.dopMax);
+
+        const PresetSettings pPcm = plan_preset(PresetProfile::Pcm, upnp192, pcm_src(44100, 16));
+        ck(pPcm.rate == "192000" && pPcm.filter == "poly-sinc-tight-lp" && pPcm.shaper == "auto",
+           "Case 25b: UPnP 192k 渲染器下 PCM 升频目标跟随渲染器 192000", pPcm.rate);
+
+        const PresetSettings pPcm2Dsd = plan_preset(PresetProfile::PcmToDsd, upnp192, pcm_src(44100, 16));
+        ck(pPcm2Dsd.dsd == 64 && pPcm2Dsd.modFamily == "ec" && pPcm2Dsd.modOrder == 7,
+           "Case 25c: UPnP 带 176.4k 载波率时 PCM->DSD 选用 dsd=64 DoP",
+           std::to_string(pPcm2Dsd.dsd));
+
+        const PresetSettings pDsdSrc = plan_preset(PresetProfile::Dsd, upnp192, dsd_src(64));
+        ck(pDsdSrc.dsd == 64, "Case 25d: UPnP 渲染器支持 DoP64 时 DSD64 升频档目标为 64",
+           std::to_string(pDsdSrc.dsd));
+
+        DeviceCaps upnpNoDop;
+        upnpNoDop.backend = "upnp";
+        upnpNoDop.deviceName = "Living Room 192 NoDoP";
+        upnpNoDop.rates = { 44100, 48000, 96000, 192000 };
+        upnpNoDop.maxRate = 192000;
+        upnpNoDop.dop = false;
+        upnpNoDop.dopMax.clear();
+        const PresetSettings pNoDop = plan_preset(PresetProfile::PcmToDsd, upnpNoDop, pcm_src(44100, 16));
+        ck(pNoDop.dsd == 0 && pNoDop.rate == "192000",
+           "Case 25e: UPnP 无 DoP 载波时 PCM->DSD 安全降级为渲染器 PCM 192000",
+           "dsd=" + std::to_string(pNoDop.dsd) + " rate=" + pNoDop.rate);
+
+        DeviceCaps upnpUnknown;
+        upnpUnknown.backend = "upnp";
+        upnpUnknown.deviceName = "";
+        upnpUnknown.rates = {};
+        upnpUnknown.maxRate = 0;
+        upnpUnknown.dop = false;
+        const PresetSettings pUnk = plan_preset(PresetProfile::Pcm, upnpUnknown, pcm_src(44100, 16));
+        ck(pUnk.rate == "src" && pUnk.dsd == 0,
+           "Case 25f: UPnP 能力未知（rates 为空）时保守退回 src，不臆造升频率", pUnk.rate);
+    }
+
     if (g_fails == 0) std::printf("\n[ALL PASS] 四档预设决策单测全部通过\n");
     else               std::printf("\n[FAILED] %d 项未通过\n", g_fails);
     return g_fails == 0 ? 0 : 1;

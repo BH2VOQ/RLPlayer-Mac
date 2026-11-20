@@ -2951,6 +2951,35 @@ static std::unique_ptr<OutSink> make_sink(const PlayParams& p) {
 static std::atomic<bool> g_upnpPlayer{false};   // true = 当前"播放器"由投放会话承担
 static std::atomic<bool> g_upnpQueueActive{false}; // true = upnp_queue_thread 正在托管队列推进与切歌过渡
 
+static std::mutex g_activeCastMtx;
+static std::string g_activeCastDev;
+static std::map<std::string, rta::net::UpnpDevice> g_cachedUpnpByKey;
+static std::map<std::string, std::string> g_cachedApNameByLoc;
+
+static void set_active_cast_dev(const std::string& dev) {
+    std::lock_guard<std::mutex> lk(g_activeCastMtx);
+    g_activeCastDev = dev;
+}
+static std::string get_active_cast_dev() {
+    std::lock_guard<std::mutex> lk(g_activeCastMtx);
+    return g_activeCastDev;
+}
+static void cache_discovered_cast_devices(const std::vector<rta::net::UpnpDevice>& devs,
+                                          const std::vector<rta::net::AirPlayDevice>& apDevs) {
+    std::lock_guard<std::mutex> lk(g_activeCastMtx);
+    for (const auto& d : devs) {
+        if (!d.location.empty()) g_cachedUpnpByKey[d.location] = d;
+        if (!d.name.empty()) g_cachedUpnpByKey[d.name] = d;
+        if (!d.udn.empty()) g_cachedUpnpByKey[d.udn] = d;
+        if (!d.host.empty()) g_cachedUpnpByKey[d.host] = d;
+    }
+    for (const auto& a : apDevs) {
+        const std::string endpointHost = a.host.find(':') == std::string::npos ? a.host : "[" + a.host + "]";
+        const std::string loc = "airplay://" + endpointHost + ":" + std::to_string(a.port);
+        if (!a.name.empty()) g_cachedApNameByLoc[loc] = a.name;
+    }
+}
+
 // DSD 源（.dsf/.dff）必须走 DoP 打包：cast_service 对未开 DoP 的 DSD 会明确拒绝，
 // 而不是悄悄转码成 PCM 降质输出（铁律 3）。
 static bool upnp_is_dsd_file(const std::string& file) {
@@ -3052,10 +3081,12 @@ static bool upnp_start_track(const PlayParams& p, const std::string& file, std::
     rta::net::CastManager::instance().stop();
     const auto r = rta::net::CastManager::instance().start(cp);
     if (!r.ok) {
+        set_active_cast_dev("");
         const bool isAp = rta::net::CastManager::is_airplay_dev(p.upnpDev);
         err = (isAp ? "AirPlay 投放启动失败：" : "UPnP 投放启动失败：") + r.error;
         return false;
     }
+    set_active_cast_dev(p.upnpDev);
     return true;
 }
 
@@ -3837,8 +3868,201 @@ static void apply_stream_settings() {
 // ============================================================================
 
 // 探测当前设置下的输出设备能力（只读）。
-// macOS 统一走 CoreAudio 设备能力查询，dsdNative 恒为 false（macOS 没有 ASIO 原生 DSD 驱动通路）。
+// backend=upnp 或正在进行投放会话时，只探测当前选中的 UPnP/DLNA 渲染器（或 AirPlay 目标）能力，
+// 不回落也不调用本地 CoreAudio 端点探测；本地后端才查询 CoreAudio，dsdNative 恒为 false。
 // DSD 支持完全取决于设备是否有足够高的 PCM 采样率以承载 DoP（DSD64: 176.4k, DSD128: 352.8k, DSD256: 705.6k, DSD512: 1.4112M）。
+struct PresetUpnpProbeHook {
+    bool active = false;
+    bool ok = true;
+    std::string friendlyName;
+    std::string sink;
+    std::string error;
+};
+static std::mutex g_presetProbeHookMtx;
+static PresetUpnpProbeHook g_presetUpnpHook;
+static std::atomic<int> g_presetCoreAudioProbeCount{0};
+
+static void apply_upnp_sink_caps(const std::string& sinkStr, rta::engine::DeviceCaps& c) {
+    const auto sinkFormats = rta::net::parse_sink_formats(sinkStr);
+    std::vector<uint32_t> rates;
+    std::vector<uint32_t> dopRates;
+    int maxBits = 0;
+    for (const auto& f : sinkFormats) {
+        if (f.rate == 0) continue;
+        rates.push_back(f.rate);
+        if (f.bits > maxBits) maxBits = f.bits;
+        if (f.bits == 0 || f.bits >= 24) dopRates.push_back(f.rate);
+    }
+    std::sort(rates.begin(), rates.end());
+    rates.erase(std::unique(rates.begin(), rates.end()), rates.end());
+    std::sort(dopRates.begin(), dopRates.end());
+    dopRates.erase(std::unique(dopRates.begin(), dopRates.end()), dopRates.end());
+    c.rates = std::move(rates);
+    c.maxRate = c.rates.empty() ? 0u : c.rates.back();
+    if (maxBits > 0) c.bits = maxBits;
+    c.dopMax = rta::engine::preset_dop_max_from_rates(dopRates);
+    c.dop = !c.dopMax.empty();
+}
+
+static void probe_upnp_renderer_caps(const std::string& upnpDev,
+                                     int defaultBits,
+                                     rta::engine::DeviceCaps& c) {
+    c.backend = "upnp";
+    c.rates.clear();
+    c.maxRate = 0;
+    c.dsdNative = false;
+    c.dsdNativeMax.clear();
+    c.dop = false;
+    c.dopMax.clear();
+    c.exclusive = false;
+    c.bits = defaultBits;
+    c.deviceName.clear();
+    c.probeNote.clear();
+
+    PresetUpnpProbeHook hook;
+    {
+        std::lock_guard<std::mutex> lk(g_presetProbeHookMtx);
+        hook = g_presetUpnpHook;
+    }
+    if (hook.active) {
+        c.deviceName = hook.friendlyName;
+        if (!hook.ok) {
+            c.probeNote = hook.error.empty()
+                ? std::string("UPnP 渲染器探测失败（能力未知）")
+                : hook.error;
+            return;
+        }
+        apply_upnp_sink_caps(hook.sink, c);
+        if (c.rates.empty()) {
+            c.probeNote = hook.error.empty()
+                ? std::string("UPnP 渲染器未声明支持的 WAV/PCM 采样率（能力未知）")
+                : hook.error;
+        } else if (c.deviceName.empty()) {
+            c.deviceName = "UPnP 渲染器";
+        }
+        return;
+    }
+
+    if (rta::net::CastManager::is_airplay_dev(upnpDev)) {
+        c.backend = "airplay";
+        std::string host;
+        uint16_t port = 5000;
+        rta::net::CastManager::parse_airplay_dev(upnpDev, host, port);
+        {
+            std::lock_guard<std::mutex> lk(g_activeCastMtx);
+            const auto it = g_cachedApNameByLoc.find(upnpDev);
+            if (it != g_cachedApNameByLoc.end() && !it->second.empty()) {
+                c.deviceName = it->second;
+            }
+        }
+        if (c.deviceName.empty()) c.deviceName = host.empty() ? std::string("AirPlay") : host;
+        c.rates = {44100u};
+        c.maxRate = 44100u;
+        c.bits = 16;
+        c.dop = false;
+        c.dopMax.clear();
+        c.probeNote = "AirPlay 固定 44.1 kHz / 16 bit ALAC 传输，不支持本机 PCM/DSD 升频";
+        return;
+    }
+
+    if (upnpDev.empty()) {
+        c.probeNote = "未选择 UPnP 渲染器：请在「输出」中选择目标网络播放器";
+        return;
+    }
+
+    rta::net::UpnpDevice targetDev;
+    bool resolved = false;
+    {
+        std::lock_guard<std::mutex> lk(g_activeCastMtx);
+        const auto it = g_cachedUpnpByKey.find(upnpDev);
+        if (it != g_cachedUpnpByKey.end()) {
+            targetDev = it->second;
+            resolved = true;
+        }
+    }
+
+    if (upnpDev.rfind("http://", 0) == 0 || upnpDev.rfind("https://", 0) == 0) {
+        targetDev.location = upnpDev;
+        const size_t sp = upnpDev.find("//");
+        if (sp == std::string::npos) {
+            c.probeNote = "UPnP 渲染器地址格式无效：" + upnpDev;
+            return;
+        }
+        const size_t slash = upnpDev.find('/', sp + 2);
+        const std::string hostport = upnpDev.substr(sp + 2, (slash == std::string::npos ? upnpDev.size() : slash) - (sp + 2));
+        const std::string descPath = (slash == std::string::npos) ? std::string("/") : upnpDev.substr(slash);
+        if (!hostport.empty() && hostport.front() == '[') {
+            const size_t rb = hostport.find(']');
+            if (rb != std::string::npos) {
+                targetDev.host = hostport.substr(1, rb - 1);
+                const size_t colon = hostport.find(':', rb + 1);
+                targetDev.port = (colon == std::string::npos) ? 80 : std::atoi(hostport.substr(colon + 1).c_str());
+            }
+        } else {
+            const size_t colon = hostport.find(':');
+            targetDev.host = (colon == std::string::npos) ? hostport : hostport.substr(0, colon);
+            targetDev.port = (colon == std::string::npos) ? 80 : std::atoi(hostport.substr(colon + 1).c_str());
+        }
+        if (targetDev.port <= 0) targetDev.port = 80;
+        std::string xml;
+        if (!rta::net::upnp_detail::http_get(targetDev.host, targetDev.port, descPath, xml, targetDev.ifindex, 300)) {
+            c.probeNote = "UPnP 渲染器描述文件读取失败（设备离线或不可达）：" + upnpDev;
+            return;
+        }
+        targetDev.name = rta::net::upnp_detail::xml_tag(xml, "friendlyName");
+        if (targetDev.name.empty()) targetDev.name = rta::net::upnp_detail::xml_tag(xml, "modelName");
+        targetDev.model = rta::net::upnp_detail::xml_tag(xml, "modelName");
+        targetDev.udn = rta::net::upnp_detail::xml_tag(xml, "UDN");
+        targetDev.control = rta::net::upnp_detail::extract_service_control_url(xml, "AVTransport");
+        if (targetDev.control.empty()) targetDev.control = rta::net::upnp_detail::xml_tag(xml, "controlURL");
+        targetDev.controlConnection = rta::net::upnp_detail::extract_service_control_url(xml, "ConnectionManager");
+        targetDev.controlRendering = rta::net::upnp_detail::extract_service_control_url(xml, "RenderingControl");
+        resolved = true;
+    } else if (!resolved) {
+        const auto devs = rta::net::CastManager::instance().get_devices(false);
+        cache_discovered_cast_devices(devs, {});
+        const std::string qLow = rta::net::cast_lower_str(upnpDev);
+        for (const auto& d : devs) {
+            if (d.location == upnpDev || d.udn == upnpDev ||
+                rta::net::cast_lower_str(d.name).find(qLow) != std::string::npos ||
+                rta::net::cast_lower_str(d.model).find(qLow) != std::string::npos ||
+                d.host.find(upnpDev) != std::string::npos) {
+                targetDev = d;
+                resolved = true;
+                break;
+            }
+        }
+    }
+
+    if (!resolved) {
+        c.probeNote = "未找到 UPnP 渲染器（请重新发现并选择目标设备）：" + upnpDev;
+        return;
+    }
+
+    c.deviceName = !targetDev.name.empty() ? targetDev.name
+                 : (!targetDev.host.empty() ? targetDev.host : upnpDev);
+    const std::string cmUrl = targetDev.connection_manager_url();
+    if (cmUrl.empty()) {
+        c.probeNote = "UPnP 渲染器未声明 ConnectionManager 服务，无法探测支持格式";
+        return;
+    }
+    rta::net::UpnpControlClient client(targetDev.av_transport_url(),
+                                       cmUrl,
+                                       targetDev.rendering_control_url(),
+                                       targetDev.ifname);
+    const auto proto = client.get_protocol_info();
+    if (!proto.ok) {
+        const std::string errMsg = proto.error.str();
+        c.probeNote = "UPnP 渲染器 GetProtocolInfo 失败" +
+                      (errMsg.empty() ? std::string() : ("：" + errMsg));
+        return;
+    }
+    apply_upnp_sink_caps(proto.sink, c);
+    if (c.rates.empty()) {
+        c.probeNote = "UPnP 渲染器未声明支持的 WAV/PCM 采样率（能力未知）";
+    }
+}
+
 static rta::engine::DeviceCaps preset_probe_caps() {
     using rta::engine::DeviceCaps;
     DeviceCaps c;
@@ -3849,16 +4073,29 @@ static rta::engine::DeviceCaps preset_probe_caps() {
     if (bits <= 0) bits = 24;
     c.channels = ch;
     c.bits = bits;
-    const std::string devId = conf_get("device", "");
 
+    const std::string normBe = normalize_backend_id(savedBackend);
+    const auto castSt = rta::net::CastManager::instance().get_state();
+    const bool castSessionActive = g_upnpPlayer.load() || castSt.running;
+    if (normBe == "upnp" || castSessionActive) {
+        std::string upnpDev = conf_get("upnpdev", "");
+        if (castSessionActive) {
+            const std::string activeDev = get_active_cast_dev();
+            if (!activeDev.empty()) upnpDev = activeDev;
+            else if (upnpDev.empty() && !castSt.device.empty()) upnpDev = castSt.device;
+        }
+        probe_upnp_renderer_caps(upnpDev, bits, c);
+        return c;
+    }
+
+    const std::string devId = conf_get("device", "");
     c.backend = savedBackend.empty() ? "coreaudio" : savedBackend;
+    g_presetCoreAudioProbeCount.fetch_add(1, std::memory_order_relaxed);
     const auto rates = probe_rates_cached(devId, bits, ch, "PRESET_CAPS");
     c.rates = rates;
     c.maxRate = rates.empty() ? 0u : rates.back();
-    const std::string normBe = normalize_backend_id(savedBackend);
-    const bool isSharedOrRemote = (normBe == "coreaudio-shared" || normBe == "upnp" ||
-                                   normBe == "naa" || normBe == "null");
-    c.exclusive = (!isSharedOrRemote && !rates.empty());
+    const bool isSharedOrOffline = (normBe == "coreaudio-shared" || normBe == "naa" || normBe == "null");
+    c.exclusive = (!isSharedOrOffline && !rates.empty());
     c.dopMax = rta::engine::preset_dop_max_from_rates(rates);
     c.dop = !c.dopMax.empty();
     c.dsdNative = false;                       // macOS 没有 ASIO 原生 DSD 驱动通路
@@ -3874,8 +4111,7 @@ static rta::engine::DeviceCaps preset_probe_caps() {
     if (rates.empty()) {
         c.probeNote = "CoreAudio 独占/支持率探测为空（端点被占用/禁用/不支持所选位深）：按能力未知处理";
     }
-    if (!savedBackend.empty() && normalize_backend_id(savedBackend) != "coreaudio" &&
-        normalize_backend_id(savedBackend) != "coreaudio-shared") {
+    if (!savedBackend.empty() && normBe != "coreaudio" && normBe != "coreaudio-shared") {
         c.probeNote += (c.probeNote.empty() ? std::string() : std::string("；")) +
                        "当前后端是「" + savedBackend + "」（非本地独占设备）：能力按 CoreAudio 默认端点报，"
                        "原生 DSD 恒为 false";
@@ -4014,6 +4250,7 @@ static bool preset_write_conf(const std::map<std::string, std::string>& kv, std:
 static std::string preset_caps_json() {
     const rta::engine::DeviceCaps c = preset_probe_caps();
     play_log(preset_caps_line(c));
+    const bool castActive = g_upnpPlayer.load() || rta::net::CastManager::instance().get_state().running;
     std::ostringstream j;
     j << "{\"ok\":true,\"device\":{\"name\":\"" << jesc(c.deviceName) << "\""
       << ",\"backend\":\"" << jesc(c.backend) << "\""
@@ -4031,7 +4268,8 @@ static std::string preset_caps_json() {
       << ",\"exclusive\":" << (c.exclusive ? "true" : "false")
       << ",\"channels\":" << c.channels
       << ",\"bits\":" << c.bits
-      << "},\"readonly\":true,\"notes\":[";
+      << "},\"readonly\":true,\"castActive\":" << (castActive ? "true" : "false")
+      << ",\"probeNote\":\"" << jesc(c.probeNote) << "\",\"notes\":[";
     if (!c.probeNote.empty()) j << "\"" << jesc(c.probeNote) << "\"";
     j << "]}";
     return j.str();
@@ -8108,6 +8346,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
         }
         if (ps.stop.load() || !g_upnpPlayer.load()) return;
         if (!st.endedNaturally) {
+            set_active_cast_dev("");
             if (!st.error.empty()) upnp_mark_player_state(cur.path, false, st.error, pInit.upnpDev);
             play_log("CAST_END natural=0 file=" + cur.path + " error=\"" + st.error + "\"");
             g_upnpQueueActive.store(false);
@@ -8129,6 +8368,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
             else hasNext = false;
         }
         if (!hasNext) {
+            set_active_cast_dev("");
             play_log("CAST_QUEUE_DONE mode=" + std::to_string(modeNow));
             g_upnpQueueActive.store(false);
             g_upnpPlayer.store(false);
@@ -8138,6 +8378,7 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
         }
         queue_save();
         if (nextItem.cs >= 0.0) {
+            set_active_cast_dev("");
             const std::string cerr = "UPnP 投放不支持 CUE 分轨（渲染器只能播整个文件），请切到本地后端";
             upnp_mark_player_state(nextItem.path, false, cerr, pInit.upnpDev);
             play_log("CAST_AUTO_REJECT cue file=" + nextItem.path);
@@ -8147,16 +8388,23 @@ static void upnp_queue_thread(PlayParams pInit, size_t startIdx) {
             ps.paused.store(false);
             return;
         }
-        if (ps.stop.load() || !g_upnpPlayer.load()) return;
+        if (ps.stop.load() || !g_upnpPlayer.load()) {
+            set_active_cast_dev("");
+            return;
+        }
         PlayParams pNext = params_snapshot();
         if (pNext.upnpDev.empty()) pNext.upnpDev = pInit.upnpDev;
         std::string err;
         const bool started = upnp_start_track(pNext, nextItem.path, err);
         if (ps.stop.load() || !g_upnpPlayer.load()) {
-            if (started && !g_upnpPlayer.load()) rta::net::CastManager::instance().stop();
+            if (started && !g_upnpPlayer.load()) {
+                rta::net::CastManager::instance().stop();
+                set_active_cast_dev("");
+            }
             return;
         }
         if (!started) {
+            set_active_cast_dev("");
             upnp_mark_player_state(nextItem.path, false, err, pNext.upnpDev);
             play_log("CAST_AUTO_FAIL index=" + std::to_string(idx) +
                      " file=" + nextItem.path + " error=\"" + err + "\"");
@@ -13540,6 +13788,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 清空队列同时结束投放会话（否则渲染器还会继续播上一首）
         if (rta::net::CastManager::instance().get_state().running)
             rta::net::CastManager::instance().stop();
+        set_active_cast_dev("");
         {
             std::lock_guard<std::mutex> lk(g_lastEndMx);
             g_lastEnd.isPosZeroNoErr = false;
@@ -13651,6 +13900,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         }
         if (rta::net::CastManager::instance().get_state().running) {
             rta::net::CastManager::instance().stop();
+            set_active_cast_dev("");
             play_log("CAST_STOP reason=skip-switch-to-local");
         }
         ps.playing.store(true);
@@ -13670,6 +13920,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             auto devs = rta::net::CastManager::instance().get_devices(forceRescan, &ddiag);
             std::string apDiag;
             const auto apDevs = rta::net::CastManager::instance().get_airplay_devices(forceRescan, &apDiag);
+            cache_discovered_cast_devices(devs, apDevs);
             rta::diag::diag_emit("upnp.discovery",rta::diag::Stage::Upnp,
                 devs.empty()?rta::diag::find_code("upnp.no_renderer"):nullptr,
                 {{"devices",std::to_string(devs.size()),rta::diag::KvKind::Num},
@@ -13873,9 +14124,11 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             rta::net::CastManager::instance().stop();
             auto res = rta::net::CastManager::instance().start(p);
             if (!res.ok) {
+                set_active_cast_dev("");
                 // 铁律：不假装成功 —— 真实原因原样透给前端
                 return "{\"ok\":false,\"error\":\"" + jesc(res.error) + "\"}";
             }
+            set_active_cast_dev(p.dev);
             g_upnpPlayer.store(true);
             g_upnpQueueActive.store(true);
             upnp_note_started(p.file, p.dev);
@@ -13906,6 +14159,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
             g_upnpPlayer.store(false);
             ps.stopJoin();
             rta::net::CastManager::instance().stop();
+            set_active_cast_dev("");
             ps.playing.store(false);
             ps.paused.store(false);
             return "{\"ok\":true,\"stopped\":true}";
@@ -13933,6 +14187,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 2026-10-25：macOS 侧 upnp.h 已 POSIX 移植，走同一份实现。
         rta::net::UpnpDiscoverDiag diag;
         const auto devs = rta::net::upnp_discover(1800, &diag);
+        cache_discovered_cast_devices(devs, {});
         std::ostringstream j;
         j << "{\"ok\":true,\"n\":" << devs.size() << ",\"devices\":[";
         for (size_t i = 0; i < devs.size(); ++i) {
@@ -15578,6 +15833,7 @@ static std::string handle(const rta::net::HttpRequest& rq, std::string& ct) {
         // 投放会话若还在跑（含手动「开始投放」的会话），一并停掉 —— 底栏「停止」只能有一个结果。
         if (wasUpnp || rta::net::CastManager::instance().get_state().running)
             rta::net::CastManager::instance().stop();
+        set_active_cast_dev("");
         // 停止播放后清零 bit-perfect 结论（停播后结论已无对象，不留上次播放的旧结论）
         {
             std::lock_guard<std::mutex> lk(ps.mtx);
@@ -16231,9 +16487,29 @@ std::string rlapp::dispatch(const rta::net::HttpRequest& request, std::string& c
 
 int       rlapp::max_concurrent_dispatches() { return g_peakConcurrent.load(); }
 long long rlapp::dispatch_count()            { return g_dispatchCount.load(); }
-void      rlapp::reset_dispatch_probe() {
+void rlapp::reset_dispatch_probe() {
     g_peakConcurrent.store(g_inFlight.load());
     g_dispatchCount.store(0);
+}
+
+namespace rlapp {
+void set_upnp_caps_probe_override_for_test(bool active, bool ok,
+                                            const std::string& friendlyName,
+                                            const std::string& sink,
+                                            const std::string& error) {
+    std::lock_guard<std::mutex> lk(g_presetProbeHookMtx);
+    g_presetUpnpHook.active = active;
+    g_presetUpnpHook.ok = ok;
+    g_presetUpnpHook.friendlyName = friendlyName;
+    g_presetUpnpHook.sink = sink;
+    g_presetUpnpHook.error = error;
+}
+void reset_preset_probe_counts_for_test() {
+    g_presetCoreAudioProbeCount.store(0, std::memory_order_relaxed);
+}
+int preset_coreaudio_probe_count_for_test() {
+    return g_presetCoreAudioProbeCount.load(std::memory_order_relaxed);
+}
 }
 
 bool rlapp::exit_requested() {

@@ -25,7 +25,23 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <string>
+#include <thread>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+namespace rlapp {
+void set_upnp_caps_probe_override_for_test(bool active, bool ok,
+                                            const std::string& friendlyName,
+                                            const std::string& sink,
+                                            const std::string& error);
+void reset_preset_probe_counts_for_test();
+int  preset_coreaudio_probe_count_for_test();
+}
 
 static int gFail = 0, gPass = 0;
 static void CK(BOOL ok, const char *what, NSString *detail) {
@@ -52,11 +68,21 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @interface RLPQuickStartViewController (ContractTest)
 @property (nonatomic, copy) NSDictionary *settings;
 @property (nonatomic, copy) NSArray<NSDictionary *> *filters;
+@property (nonatomic, copy) NSArray<NSDictionary *> *devices;
+@property (nonatomic, copy, nullable) NSString *defaultDeviceName;
 @property (nonatomic, strong) NSTextField *styleValue;
 @property (nonatomic, strong) NSTextField *styleSub;
 @property (nonatomic, strong) NSView *styleCard;
 @property (nonatomic, strong) NSTextField *outputValue;
+@property (nonatomic, strong) NSTextField *playValue;
+@property (nonatomic, strong) NSTextField *playSub;
+@property (nonatomic, strong) NSTextField *capsInfoLabel;
+@property (nonatomic, strong) NSTextField *capsPcmBadge;
+@property (nonatomic, strong) NSTextField *capsDsdBadge;
 @property (nonatomic, strong) NSTextField *presetNotes;
+@property (nonatomic, copy, nullable) NSDictionary *presetCapsJSON;
+@property (nonatomic, copy, nullable) NSString *presetCapsKey;
+@property (nonatomic, copy, nullable) NSString *presetCapsDevice;
 @property (nonatomic, copy, nullable) NSString *localDevice;
 @property (nonatomic, strong, nullable) NSPopover *popover;
 @property (nonatomic, assign) BOOL playing;
@@ -80,6 +106,9 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, assign) NSInteger queueCurrentIndex;
 + (NSDictionary<NSString *, NSString *> *)playModeFeedbackForNotes:(NSArray * _Nullable)notes
                                                   playbackActive:(BOOL)active;
+- (void)applyPresetCaps:(NSDictionary * _Nullable)json;
+- (void)syncCapabilitiesUI;
+- (void)syncOutputSummary;
 - (void)syncPlayAndStyleCards;
 - (void)onPickStyle:(NSButton *)sender;
 - (void)onPickPlayMode:(NSButton *)sender;
@@ -98,6 +127,136 @@ static NSView *FindById(NSView *root, NSString *ident) {
 - (void)applyLanguage;
 - (void)onOpenCurrentAlbum:(id)sender;
 @end
+
+class TestLoopbackUpnpRenderer {
+public:
+    std::string friendlyName = "Living Room DAC";
+    std::string sink;
+    std::atomic<int> descHits{0};
+    std::atomic<int> cmHits{0};
+
+    TestLoopbackUpnpRenderer(const std::string& name, const std::string& sinkStr)
+        : friendlyName(name), sink(sinkStr) {}
+    ~TestLoopbackUpnpRenderer() { stop(); }
+
+    bool start() {
+        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd_ < 0) return false;
+        int yes = 1;
+        ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (::bind(fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0 ||
+            ::listen(fd_, 16) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return false;
+        }
+        socklen_t len = sizeof(addr);
+        if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return false;
+        }
+        port_ = ntohs(addr.sin_port);
+        stopReq_.store(false);
+        th_ = std::thread([this] { serveLoop(); });
+        return true;
+    }
+
+    void stop() {
+        stopReq_.store(true);
+        if (fd_ >= 0) {
+            ::shutdown(fd_, SHUT_RDWR);
+            ::close(fd_);
+            fd_ = -1;
+        }
+        if (th_.joinable()) th_.join();
+    }
+
+    std::string descURL() const {
+        return "http://127.0.0.1:" + std::to_string(port_) + "/desc.xml";
+    }
+
+private:
+    int fd_ = -1;
+    uint16_t port_ = 0;
+    std::atomic<bool> stopReq_{false};
+    std::thread th_;
+
+    void serveLoop() {
+        while (!stopReq_.load() && fd_ >= 0) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(fd_, &rfds);
+            timeval tv{0, 50000};
+            const int sr = ::select(fd_ + 1, &rfds, nullptr, nullptr, &tv);
+            if (sr <= 0 || !FD_ISSET(fd_, &rfds)) continue;
+            sockaddr_in cli{};
+            socklen_t clen = sizeof(cli);
+            const int cfd = ::accept(fd_, reinterpret_cast<sockaddr*>(&cli), &clen);
+            if (cfd < 0) continue;
+            timeval rtv{0, 400000};
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+            std::string req;
+            char buf[2048];
+            while (true) {
+                const ssize_t n = ::recv(cfd, buf, sizeof(buf), 0);
+                if (n <= 0) break;
+                req.append(buf, (size_t)n);
+                const size_t hdrEnd = req.find("\r\n\r\n");
+                if (hdrEnd != std::string::npos) {
+                    size_t cl = 0;
+                    const size_t pos = req.find("Content-Length:");
+                    const size_t posL = req.find("content-length:");
+                    const size_t p = (pos != std::string::npos) ? pos : posL;
+                    if (p != std::string::npos && p < hdrEnd) {
+                        cl = (size_t)std::strtoul(req.c_str() + p + 15, nullptr, 10);
+                    }
+                    if (req.size() >= hdrEnd + 4 + cl) break;
+                }
+            }
+            std::string body;
+            std::string status = "200 OK";
+            if (req.rfind("GET /desc.xml", 0) == 0) {
+                ++descHits;
+                body = "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\">"
+                       "<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>"
+                       "<friendlyName>" + friendlyName + "</friendlyName>"
+                       "<modelName>MockRenderer 192</modelName>"
+                       "<UDN>uuid:mock-living-room-dac</UDN>"
+                       "<serviceList>"
+                       "<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/upnp/avt</controlURL></service>"
+                       "<service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType><controlURL>/upnp/cm</controlURL></service>"
+                       "</serviceList></device></root>";
+            } else if (req.rfind("POST /upnp/cm", 0) == 0) {
+                ++cmHits;
+                body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                       "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+                       "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+                       "<s:Body><u:GetProtocolInfoResponse xmlns:u=\"urn:schemas-upnp-org:service:ConnectionManager:1\">"
+                       "<Source></Source><Sink>" + sink + "</Sink>"
+                       "</u:GetProtocolInfoResponse></s:Body></s:Envelope>";
+            } else {
+                status = "404 Not Found";
+                body = "not found";
+            }
+            const std::string resp =
+                "HTTP/1.1 " + status + "\r\nContent-Type: text/xml; charset=utf-8\r\n"
+                "Content-Length: " + std::to_string(body.size()) +
+                "\r\nConnection: close\r\n\r\n" + body;
+            size_t off = 0;
+            while (off < resp.size()) {
+                const ssize_t w = ::send(cfd, resp.data() + off, resp.size() - off, 0);
+                if (w <= 0) break;
+                off += (size_t)w;
+            }
+            ::close(cfd);
+        }
+    }
+};
 
 // Keep output selection tests offline: discovery is explicitly stubbed.
 @interface RLPOfflineOutputController : RLPQuickStartViewController
@@ -1246,6 +1405,278 @@ int main(int argc, char **argv) {
            [fbStopped[@"notes"] isEqualToString:@"说明A"],
            "C3g 播放/暂停时反馈明确提示下一首或重新播放生效，停播时提示已应用",
            fbActive.description ?: @"nil");
+
+        // ---------- C3h~C3l UPnP remote caps gating / QuickStart 显示 / /api/preset/caps ----------
+        {
+            NSDictionary *upnp192 = @{
+                @"ok": @YES,
+                @"device": @{
+                    @"name": @"Living Room DAC",
+                    @"backend": @"upnp",
+                    @"rates": @[@44100, @48000, @96000, @192000],
+                    @"maxRate": @192000,
+                    @"dsdNative": @NO,
+                    @"dopMax": @"DSD64",
+                }
+            };
+            NSDictionary *gUpnp = [RLPQuickStartViewController gatingForCapsJSON:upnp192];
+            std::printf("  [CASTCAPS gating upnp192] backend=%s name=%s rates=[44100,48000,96000,192000] dopMax=DSD64 -> known=%d pcmReady=%d dsdReady=%d\n",
+                        "upnp", "Living Room DAC",
+                        [gUpnp[@"known"] boolValue], [gUpnp[@"pcmReady"] boolValue], [gUpnp[@"dsdReady"] boolValue]);
+            CK([gUpnp[@"known"] boolValue] && [gUpnp[@"pcmReady"] boolValue] && [gUpnp[@"dsdReady"] boolValue],
+               "C3h UPnP + rates [44100,48000,96000,192000] + dopMax=DSD64 -> known=1, pcmReady=1, dsdReady=1",
+               gUpnp.description ?: @"nil");
+
+            NSDictionary *stUpnp = [RLPQuickStartViewController presetStatusForCapsJSON:upnp192
+                                                                                settings:@{@"backend": @"upnp"}
+                                                                                 playing:NO paused:NO];
+            CK([stUpnp[@"bitperfect"][@"enabled"] boolValue] &&
+               [stUpnp[@"pcm"][@"enabled"] boolValue] &&
+               [stUpnp[@"dsd"][@"enabled"] boolValue] &&
+               [stUpnp[@"pcm2dsd"][@"enabled"] boolValue] &&
+               [stUpnp[@"pcm"][@"result"] containsString:@"192.0"] &&
+               [stUpnp[@"dsd"][@"result"] containsString:@"DSD64"],
+               "C3i UPnP 192k + DoP64 下 PCM/DSD/PCM->DSD 全部可用且结果跟随渲染器",
+               stUpnp.description ?: @"nil");
+
+            NSDictionary *upnpNoDop = @{
+                @"ok": @YES,
+                @"device": @{
+                    @"name": @"Living Room PCM DAC",
+                    @"backend": @"upnp",
+                    @"rates": @[@44100, @48000, @96000, @192000],
+                    @"maxRate": @192000,
+                    @"dsdNative": @NO,
+                    @"dop": @NO,
+                    @"dopMax": @"",
+                }
+            };
+            NSDictionary *gNoDop = [RLPQuickStartViewController gatingForCapsJSON:upnpNoDop];
+            NSDictionary *stNoDop = [RLPQuickStartViewController presetStatusForCapsJSON:upnpNoDop
+                                                                                  settings:@{@"backend": @"upnp"}
+                                                                                   playing:NO paused:NO];
+            CK([gNoDop[@"known"] boolValue] && [gNoDop[@"pcmReady"] boolValue] && ![gNoDop[@"dsdReady"] boolValue] &&
+               [stNoDop[@"pcm"][@"enabled"] boolValue] && ![stNoDop[@"dsd"][@"enabled"] boolValue] &&
+               [stNoDop[@"dsd"][@"reason"] containsString:@"UPnP 渲染器未声明"] &&
+               ![stNoDop[@"dsd"][@"reason"] containsString:@"不支持本机"],
+               "C3i2 UPnP 仅有 PCM rates 无 DoP 时：PCM 可用、DSD 禁用且原因为 UPnP 渲染器未声明",
+               stNoDop[@"dsd"][@"reason"] ?: @"nil");
+
+            NSDictionary *upnpNoRates = @{
+                @"ok": @YES,
+                @"device": @{
+                    @"name": @"",
+                    @"backend": @"upnp",
+                    @"rates": @[],
+                    @"maxRate": @0,
+                    @"dsdNative": @NO,
+                    @"dop": @NO,
+                },
+                @"notes": @[@"UPnP 渲染器未声明支持的 WAV/PCM 采样率"]
+            };
+            NSDictionary *gUpnpEmpty = [RLPQuickStartViewController gatingForCapsJSON:upnpNoRates];
+            NSDictionary *stUpnpEmpty = [RLPQuickStartViewController presetStatusForCapsJSON:upnpNoRates
+                                                                                    settings:@{@"backend": @"upnp"}
+                                                                                     playing:NO paused:NO];
+            std::printf("  [CASTCAPS gating upnp-empty] known=%d pcmReady=%d dsdReady=%d pcmReason=%s dsdReason=%s\n",
+                        [gUpnpEmpty[@"known"] boolValue], [gUpnpEmpty[@"pcmReady"] boolValue], [gUpnpEmpty[@"dsdReady"] boolValue],
+                        [stUpnpEmpty[@"pcm"][@"reason"] UTF8String] ?: "",
+                        [stUpnpEmpty[@"dsd"][@"reason"] UTF8String] ?: "");
+            CK(![gUpnpEmpty[@"known"] boolValue] && ![gUpnpEmpty[@"pcmReady"] boolValue] && ![gUpnpEmpty[@"dsdReady"] boolValue] &&
+               [stUpnpEmpty[@"bitperfect"][@"enabled"] boolValue] &&
+               ![stUpnpEmpty[@"pcm"][@"enabled"] boolValue] && ![stUpnpEmpty[@"dsd"][@"enabled"] boolValue] &&
+               ![stUpnpEmpty[@"pcm"][@"reason"] containsString:@"不支持本机升频"] &&
+               ![stUpnpEmpty[@"dsd"][@"reason"] containsString:@"不支持本机 DoP 升频"] &&
+               ([stUpnpEmpty[@"pcm"][@"reason"] containsString:@"UPnP 渲染器未声明"] ||
+                [stUpnpEmpty[@"pcm"][@"reason"] containsString:@"能力未知"]),
+               "C3j UPnP 无 rates 时 known=0, PCM/DSD reason 指向 UPnP 渲染器能力未知（非「不支持本机升频」）",
+               stUpnpEmpty.description ?: @"nil");
+
+            // 验证非 upnp 旧行为不变（coreaudio ready / null / airplay）
+            NSDictionary *nullCaps = @{
+                @"ok": @YES,
+                @"device": @{@"name": @"Null", @"backend": @"null", @"rates": @[@44100], @"maxRate": @44100, @"dop": @YES}
+            };
+            NSDictionary *gNull = [RLPQuickStartViewController gatingForCapsJSON:nullCaps];
+            NSDictionary *apCaps = @{
+                @"ok": @YES,
+                @"device": @{@"name": @"HomePod", @"backend": @"airplay", @"rates": @[@44100], @"maxRate": @44100, @"dop": @NO}
+            };
+            NSDictionary *gAp = [RLPQuickStartViewController gatingForCapsJSON:apCaps];
+            CK([stFull[@"pcm"][@"enabled"] boolValue] &&
+               ![gNull[@"known"] boolValue] && ![gNull[@"pcmReady"] boolValue] &&
+               ![gAp[@"pcmReady"] boolValue] && ![gAp[@"dsdReady"] boolValue],
+               "C3j2 非 upnp（CoreAudio/null/AirPlay）旧 gating 行为保持不变", @"");
+
+            // C3k QuickStart 展示跟随 UPnP caps（不回落到本机 CoreAudio 名称）
+            RLPQuickStartViewController *qvc = [[RLPQuickStartViewController alloc] init];
+            qvc.view.frame = NSMakeRect(0, 0, 1100, 760);
+            qvc.filters = items;
+            qvc.defaultDeviceName = @"MacBook Pro Speakers (CoreAudio)";
+            qvc.devices = @[@{@"id": @"101", @"name": @"MacBook Pro Speakers (CoreAudio)", @"default": @YES}];
+            qvc.settings = @{
+                @"backend": @"upnp",
+                @"upnpdev": @"http://127.0.0.1:49999/desc.xml",
+                @"rate": @"max",
+                @"filter": @"poly-sinc-tight-lp",
+                @"dsd": @"0",
+                @"directsdm": @"0",
+            };
+            [qvc applyPresetCaps:@{
+                @"ok": @YES,
+                @"device": @{
+                    @"name": @"Living Room DAC",
+                    @"backend": @"upnp",
+                    @"rates": @[@44100, @48000, @96000, @176400, @192000],
+                    @"maxRate": @192000,
+                    @"dsdNative": @NO,
+                    @"dop": @YES,
+                    @"dopMax": @"dsd64",
+                }
+            }];
+            [qvc syncOutputSummary];
+            std::printf("  [CASTCAPS QuickStart] info=\"%s\" pcmBadge=\"%s\" dsdBadge=\"%s\" playSub=\"%s\" outputValue=\"%s\"\n",
+                        qvc.capsInfoLabel.stringValue.UTF8String ?: "",
+                        qvc.capsPcmBadge.stringValue.UTF8String ?: "",
+                        qvc.capsDsdBadge.stringValue.UTF8String ?: "",
+                        qvc.playSub.stringValue.UTF8String ?: "",
+                        qvc.outputValue.stringValue.UTF8String ?: "");
+            CK([qvc.capsInfoLabel.stringValue containsString:@"Living Room DAC"] &&
+               ![qvc.capsInfoLabel.stringValue containsString:@"MacBook Pro Speakers"] &&
+               [qvc.capsInfoLabel.stringValue containsString:@"192000"] &&
+               [qvc.capsPcmBadge.stringValue containsString:@"192"] &&
+               [qvc.capsDsdBadge.stringValue containsString:@"DSD64"] &&
+               [qvc.playSub.stringValue containsString:@"192"] &&
+               [qvc.outputValue.stringValue containsString:@"Living Room DAC"],
+               "C3k QuickStart 能力行/徽标/播放卡片/输出摘要显示 Living Room DAC 与 192k/DSD64，不显示本机 CoreAudio",
+               [NSString stringWithFormat:@"info=%@ pcm=%@ dsd=%@ playSub=%@ out=%@",
+                qvc.capsInfoLabel.stringValue ?: @"", qvc.capsPcmBadge.stringValue ?: @"",
+                qvc.capsDsdBadge.stringValue ?: @"", qvc.playSub.stringValue ?: @"", qvc.outputValue.stringValue ?: @""]);
+
+            // 探测失败 / 未确认 UPnP caps 不得回落到 defaultDeviceName，并显示「能力未知」
+            [qvc applyPresetCaps:upnpNoRates];
+            [qvc syncOutputSummary];
+            std::printf("  [CASTCAPS QuickStart unknown] info=\"%s\" pcmBadge=\"%s\" dsdBadge=\"%s\"\n",
+                        qvc.capsInfoLabel.stringValue.UTF8String ?: "",
+                        qvc.capsPcmBadge.stringValue.UTF8String ?: "",
+                        qvc.capsDsdBadge.stringValue.UTF8String ?: "");
+            CK(![qvc.capsInfoLabel.stringValue containsString:@"MacBook Pro Speakers"] &&
+               [qvc.capsInfoLabel.stringValue containsString:@"能力未知"] &&
+               [qvc.capsPcmBadge.stringValue isEqualToString:@"PCM —"] &&
+               [qvc.capsDsdBadge.stringValue isEqualToString:@"DSD —"],
+               "C3k2 UPnP 探测失败时不回落到 CoreAudio 默认设备并显示「能力未知」",
+               qvc.capsInfoLabel.stringValue ?: @"nil");
+
+            // C3l 后端 GET /api/preset/caps：真实回环 mock UPnP 渲染器
+            TestLoopbackUpnpRenderer mockRenderer(
+                "Living Room DAC",
+                "http-get:*:audio/L16:rate=44100,http-get:*:audio/L16:rate=48000,"
+                "http-get:*:audio/L24:rate=96000,http-get:*:audio/wav:rate=176400,"
+                "http-get:*:audio/L24:rate=192000");
+            const BOOL startedMock = mockRenderer.start();
+            CK(startedMock, "C3l-precondition 本地回环 UPnP mock 启动成功", @"");
+            if (startedMock) {
+                rlapp::reset_preset_probe_counts_for_test();
+                NSString *descURL = [NSString stringWithUTF8String:mockRenderer.descURL().c_str()];
+                NSString *postBody = [NSString stringWithFormat:@"backend=upnp&upnpdev=%@&volume=-120", RLPEnc(descURL)];
+                [core jsonWithMethod:@"POST" path:@"/api/settings" body:postBody];
+                NSDictionary *capsRes = [core jsonWithMethod:@"GET" path:@"/api/preset/caps" body:nil];
+                const int caProbesL = rlapp::preset_coreaudio_probe_count_for_test();
+                NSDictionary *cdev = [capsRes[@"device"] isKindOfClass:[NSDictionary class]] ? capsRes[@"device"] : @{};
+                NSDictionary *cgate = [RLPQuickStartViewController gatingForCapsJSON:capsRes];
+                std::printf("  [CASTCAPS /api/preset/caps] backend=%s name=%s rates=%s maxRate=%ld dop=%d dopMax=%s caProbes=%d descHits=%d cmHits=%d gating=(known=%d,pcm=%d,dsd=%d)\n",
+                            [cdev[@"backend"] UTF8String] ?: "",
+                            [cdev[@"name"] UTF8String] ?: "",
+                            [[[cdev[@"rates"] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] ?: "",
+                            (long)[cdev[@"maxRate"] integerValue],
+                            [cdev[@"dop"] boolValue],
+                            [cdev[@"dopMax"] UTF8String] ?: "",
+                            caProbesL,
+                            mockRenderer.descHits.load(),
+                            mockRenderer.cmHits.load(),
+                            [cgate[@"known"] boolValue],
+                            [cgate[@"pcmReady"] boolValue],
+                            [cgate[@"dsdReady"] boolValue]);
+                NSArray *wantRates = @[@44100, @48000, @96000, @176400, @192000];
+                CK([capsRes[@"ok"] boolValue] &&
+                   [cdev[@"backend"] isEqualToString:@"upnp"] &&
+                   [cdev[@"name"] isEqualToString:@"Living Room DAC"] &&
+                   [cdev[@"rates"] isEqualToArray:wantRates] &&
+                   [cdev[@"maxRate"] integerValue] == 192000 &&
+                   [cdev[@"dop"] boolValue] &&
+                   [cdev[@"dopMax"] isEqualToString:@"dsd64"] &&
+                   caProbesL == 0 &&
+                   mockRenderer.descHits.load() > 0 && mockRenderer.cmHits.load() > 0,
+                   "C3l /api/preset/caps backend=upnp 探测选中 UPnP 渲染器 ProtocolInfo 且不调用 CoreAudio 探测",
+                   capsRes.description ?: @"nil");
+            }
+
+            // C3m 可注入 UPnP probe hook：caps 与 /api/preset/apply 不走 CoreAudio 且按 UPnP caps 规划
+            rlapp::set_upnp_caps_probe_override_for_test(
+                true, true, "Mock Hook UPnP DAC",
+                "http-get:*:audio/L16:rate=44100,http-get:*:audio/L24:rate=176400,http-get:*:audio/L24:rate=192000", "");
+            rlapp::reset_preset_probe_counts_for_test();
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=upnp&upnpdev=http://127.0.0.1:1/mock&volume=-120"];
+            NSDictionary *hookCaps = [core jsonWithMethod:@"GET" path:@"/api/preset/caps" body:nil];
+            NSDictionary *hdev = [hookCaps[@"device"] isKindOfClass:[NSDictionary class]] ? hookCaps[@"device"] : @{};
+            NSDictionary *applyPcm = [core jsonWithMethod:@"POST" path:@"/api/preset/apply?profile=pcm" body:nil];
+            NSDictionary *applyDsd = [core jsonWithMethod:@"POST" path:@"/api/preset/apply?profile=pcm2dsd" body:nil];
+            const int caProbesM = rlapp::preset_coreaudio_probe_count_for_test();
+            std::printf("  [CASTCAPS hook-apply] backend=%s name=%s caProbes=%d applyPcmRate=%s applyDsd=%s\n",
+                        [hdev[@"backend"] UTF8String] ?: "",
+                        [hdev[@"name"] UTF8String] ?: "",
+                        caProbesM,
+                        [applyPcm[@"applied"][@"rate"] UTF8String] ?: "",
+                        [applyDsd[@"applied"][@"dsd"] UTF8String] ?: "");
+            CK([hookCaps[@"ok"] boolValue] &&
+               [hdev[@"backend"] isEqualToString:@"upnp"] &&
+               [hdev[@"name"] isEqualToString:@"Mock Hook UPnP DAC"] &&
+               [hdev[@"rates"] isEqualToArray:@[@44100, @176400, @192000]] &&
+               [hdev[@"dop"] boolValue] &&
+               [hdev[@"dopMax"] isEqualToString:@"dsd64"] &&
+               [applyPcm[@"ok"] boolValue] &&
+               [applyPcm[@"applied"][@"rate"] isEqualToString:@"192000"] &&
+               [applyPcm[@"applied"][@"filter"] isEqualToString:@"poly-sinc-tight-lp"] &&
+               [applyDsd[@"ok"] boolValue] &&
+               [applyDsd[@"applied"][@"dsd"] isEqualToString:@"64"] &&
+               caProbesM == 0,
+               "C3m UPnP caps hook 验证不调 CoreAudio 并按渲染器 192k/DoP64 执行 /api/preset/apply",
+               [NSString stringWithFormat:@"pcm=%@ dsd=%@", applyPcm.description ?: @"", applyDsd.description ?: @""]);
+
+            // C3n 探测失败与空 Sink 必须给出明确 probeNote 并按能力未知处理
+            rlapp::set_upnp_caps_probe_override_for_test(true, false, "Offline Renderer", "", "SOAP GetProtocolInfo timeout");
+            rlapp::reset_preset_probe_counts_for_test();
+            NSDictionary *failCaps = [core jsonWithMethod:@"GET" path:@"/api/preset/caps" body:nil];
+            NSDictionary *failGate = [RLPQuickStartViewController gatingForCapsJSON:failCaps];
+            const int caProbesN = rlapp::preset_coreaudio_probe_count_for_test();
+            CK([failCaps[@"ok"] boolValue] &&
+               [failCaps[@"device"][@"backend"] isEqualToString:@"upnp"] &&
+               [(NSArray *)failCaps[@"device"][@"rates"] count] == 0 &&
+               [failCaps[@"device"][@"maxRate"] integerValue] == 0 &&
+               [failCaps[@"probeNote"] containsString:@"SOAP GetProtocolInfo timeout"] &&
+               ![failGate[@"known"] boolValue] && ![failGate[@"pcmReady"] boolValue] && ![failGate[@"dsdReady"] boolValue] &&
+               caProbesN == 0,
+               "C3n UPnP 探测失败返回明确 probeNote 且 known=0（不回落 CoreAudio）",
+               failCaps.description ?: @"nil");
+
+            // C3o 未选 upnpdev 时返回能力未知且给出明确选择提示
+            rlapp::set_upnp_caps_probe_override_for_test(false, true, "", "", "");
+            rlapp::reset_preset_probe_counts_for_test();
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=upnp&upnpdev=&volume=-120"];
+            NSDictionary *unselCaps = [core jsonWithMethod:@"GET" path:@"/api/preset/caps" body:nil];
+            NSDictionary *unselGate = [RLPQuickStartViewController gatingForCapsJSON:unselCaps];
+            const int caProbesO = rlapp::preset_coreaudio_probe_count_for_test();
+            CK([unselCaps[@"ok"] boolValue] &&
+               [unselCaps[@"device"][@"backend"] isEqualToString:@"upnp"] &&
+               [(NSArray *)unselCaps[@"device"][@"rates"] count] == 0 &&
+               [unselCaps[@"probeNote"] containsString:@"未选择"] &&
+               ![unselGate[@"known"] boolValue] &&
+               caProbesO == 0,
+               "C3o 未选 upnpdev 返回能力未知与明确 probeNote，不回落 CoreAudio",
+               unselCaps.description ?: @"nil");
+
+            [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&upnpdev=&volume=-120"];
+        }
 
         // ---------- C4 bitperfect 下风格禁用且不破坏直通 ----------
         RLPQuickStartViewController *vc = [[RLPQuickStartViewController alloc] init];

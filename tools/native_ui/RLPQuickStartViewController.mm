@@ -3960,9 +3960,11 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         [self_ syncDeviceSelection];
         NSString *bk = [self_ str:@"backend" def:@"coreaudio"];
         NSString *dev = [self_ str:@"device" def:@""];
-        NSString *capsKey = [NSString stringWithFormat:@"%@|%@", bk, dev];
+        NSString *upnpDev = [self_ str:@"upnpdev" def:@""];
+        NSString *capsKey = [NSString stringWithFormat:@"%@|%@|%@", bk, dev, upnpDev];
         if (![capsKey isEqualToString:self_.presetCapsKey ?: @""]) {
             self_.presetCapsKey = capsKey;
+            self_.hasCustomPresetNote = NO;
             [self_ loadPresetCaps:YES];
         }
         [self_ syncOutputSummary];
@@ -3978,6 +3980,15 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         NSString *devLabel = nil;
         for (NSDictionary<NSString *, NSString *> *d in self.castDevices) {
             if ([d[@"id"] isEqualToString:upnpDev]) { devLabel = d[@"name"]; break; }
+        }
+        if (!devLabel.length) {
+            NSDictionary *capDev = [self.presetCapsJSON[@"device"] isKindOfClass:[NSDictionary class]]
+                ? self.presetCapsJSON[@"device"] : nil;
+            NSString *capBk = [capDev[@"backend"] isKindOfClass:[NSString class]] ? capDev[@"backend"] : @"";
+            NSString *capName = [capDev[@"name"] isKindOfClass:[NSString class]] ? capDev[@"name"] : @"";
+            if (([capBk isEqualToString:@"upnp"] || [capBk isEqualToString:@"airplay"]) && capName.length) {
+                devLabel = capName;
+            }
         }
         if (!devLabel.length && upnpDev.length) devLabel = upnpDev;
         self.outputValue.stringValue = devLabel.length
@@ -4011,6 +4022,15 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     NSString *prof = RLPPlayModeFromSettings(self.settings);
     NSDictionary *dev = [self.presetCapsJSON[@"device"] isKindOfClass:[NSDictionary class]]
         ? self.presetCapsJSON[@"device"] : nil;
+    NSString *kvBackend = [self str:@"backend" def:@""];
+    NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
+    const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
+    const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
+    const BOOL castActive = [self.presetCapsJSON[@"castActive"] respondsToSelector:@selector(boolValue)] &&
+                            [self.presetCapsJSON[@"castActive"] boolValue];
+    const BOOL capsMismatch = (kvBackend.length > 0 && capBackend.length > 0 &&
+                               ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive)));
+    if (capsMismatch) dev = nil;
     if ([prof isEqualToString:@"bitperfect"]) {
         self.playValue.stringValue = RLPTr(@"原音直通");
         self.playSub.stringValue = RLPTr(@"文件是什么就播什么，不做任何加工");
@@ -4757,16 +4777,28 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     NSArray *rates = [dev[@"rates"] isKindOfClass:[NSArray class]] ? dev[@"rates"] : @[];
     double maxRate = [dev[@"maxRate"] respondsToSelector:@selector(doubleValue)]
                      ? [dev[@"maxRate"] doubleValue] : 0.0;
+    if (maxRate <= 0.0 && rates.count > 0) {
+        for (id r in rates) {
+            if ([r respondsToSelector:@selector(doubleValue)] && [r doubleValue] > maxRate) {
+                maxRate = [r doubleValue];
+            }
+        }
+    }
     const BOOL offline = [backend isEqualToString:@"null"];
     const BOOL remote = [backend isEqualToString:@"upnp"];
+    const BOOL airplay = [backend isEqualToString:@"airplay"];
     const BOOL shared = [backend isEqualToString:@"wasapi-shared"] || [backend isEqualToString:@"coreaudio-shared"];
-    const BOOL known = ok && !offline && !remote && name.length > 0 && rates.count > 0 && maxRate > 0;
+    const BOOL known = ok && !offline && !airplay && (remote || name.length > 0) && rates.count > 0 && maxRate > 0;
     const BOOL dsdNative = [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] &&
                            [dev[@"dsdNative"] boolValue];
-    const BOOL dop = [dev[@"dop"] respondsToSelector:@selector(boolValue)] && [dev[@"dop"] boolValue];
+    NSString *dopMax = [dev[@"dopMax"] isKindOfClass:[NSString class]] ? dev[@"dopMax"] : @"";
+    const id dopv = dev[@"dop"];
+    const BOOL hasExplicitDop = (dopv != nil && ![dopv isKindOfClass:[NSNull class]] &&
+                                 [dopv respondsToSelector:@selector(boolValue)]);
+    const BOOL dop = hasExplicitDop ? [dopv boolValue] : (dopMax.length > 0);
     return @{ @"known": @(known),
-              @"pcmReady": @(known && !remote && !shared),
-              @"dsdReady": @(known && !remote && !shared && (dsdNative || dop)) };
+              @"pcmReady": @(known && !shared && !airplay),
+              @"dsdReady": @(known && !shared && !airplay && (dsdNative || dop)) };
 }
 
 + (NSDictionary<NSString *, NSDictionary *> *)presetStatusForCapsJSON:(NSDictionary * _Nullable)json
@@ -4776,36 +4808,98 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     (void)playing;
     (void)paused;
     NSDictionary<NSString *, NSNumber *> *g = [self gatingForCapsJSON:json];
-    const BOOL known = [g[@"known"] boolValue];
-    const BOOL pcmReady = [g[@"pcmReady"] boolValue];
-    const BOOL dsdReady = [g[@"dsdReady"] boolValue];
+    const BOOL rawKnown = [g[@"known"] boolValue];
+    const BOOL rawPcmReady = [g[@"pcmReady"] boolValue];
+    const BOOL rawDsdReady = [g[@"dsdReady"] boolValue];
 
     NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
     NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
     NSString *kvBackend = [kv[@"backend"] isKindOfClass:[NSString class]] ? kv[@"backend"] : @"";
+    NSString *upnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
+    const BOOL castActive = [json[@"castActive"] respondsToSelector:@selector(boolValue)] &&
+                            [json[@"castActive"] boolValue];
     NSString *backend = kvBackend.length ? kvBackend : (capBackend.length ? capBackend : @"coreaudio");
     const BOOL isShared = [backend isEqualToString:@"coreaudio-shared"] || [backend isEqualToString:@"wasapi-shared"];
     const BOOL isOffline = [backend isEqualToString:@"null"];
-    const BOOL isRemote = [backend isEqualToString:@"upnp"];
-    const BOOL isAirPlay = [backend isEqualToString:@"airplay"];
+    const BOOL isAirPlay = [backend isEqualToString:@"airplay"] ||
+                           [capBackend isEqualToString:@"airplay"] ||
+                           ([backend isEqualToString:@"upnp"] && [upnpDev hasPrefix:@"airplay://"]);
+    const BOOL isRemote = !isAirPlay &&
+                          ([backend isEqualToString:@"upnp"] ||
+                           [capBackend isEqualToString:@"upnp"] ||
+                           castActive);
+    const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
+    const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
+    const BOOL capsMismatch = (kvBackend.length > 0 && capBackend.length > 0 &&
+                               ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive)));
+    const BOOL known = rawKnown && !capsMismatch;
+    const BOOL pcmReady = rawPcmReady && !capsMismatch;
+    const BOOL dsdReady = rawDsdReady && !capsMismatch;
 
-    double maxRate = [dev[@"maxRate"] respondsToSelector:@selector(doubleValue)] ? [dev[@"maxRate"] doubleValue] : 0.0;
-    NSString *dopMax = [dev[@"dopMax"] isKindOfClass:[NSString class]] ? dev[@"dopMax"] : @"";
-    const BOOL dsdNative = [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] && [dev[@"dsdNative"] boolValue];
+    double maxRate = (!capsMismatch && [dev[@"maxRate"] respondsToSelector:@selector(doubleValue)])
+        ? [dev[@"maxRate"] doubleValue] : 0.0;
+    if (!capsMismatch && maxRate <= 0.0 && [dev[@"rates"] isKindOfClass:[NSArray class]]) {
+        for (id r in (NSArray *)dev[@"rates"]) {
+            if ([r respondsToSelector:@selector(doubleValue)] && [r doubleValue] > maxRate) {
+                maxRate = [r doubleValue];
+            }
+        }
+    }
+    NSString *dopMax = (!capsMismatch && [dev[@"dopMax"] isKindOfClass:[NSString class]]) ? dev[@"dopMax"] : @"";
+    const BOOL dsdNative = !capsMismatch &&
+                           [dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] &&
+                           [dev[@"dsdNative"] boolValue];
+    NSString *probeNote = @"";
+    if (!capsMismatch) {
+        if ([json[@"probeNote"] isKindOfClass:[NSString class]] && [(NSString *)json[@"probeNote"] length]) {
+            probeNote = json[@"probeNote"];
+        } else if ([json[@"notes"] isKindOfClass:[NSArray class]]) {
+            for (id n in (NSArray *)json[@"notes"]) {
+                if ([n isKindOfClass:[NSString class]] && [(NSString *)n length]) {
+                    probeNote = (NSString *)n;
+                    break;
+                }
+            }
+        }
+    }
 
     NSString *pcmWhy = @"";
-    if (isShared || isAirPlay) pcmWhy = RLPTr(@"共享/隔空播放不支持升频，请在「输出」中开启独占设备。");
-    else if (isOffline) pcmWhy = RLPTr(@"离线处理模式不连接设备，不支持设备升频。");
-    else if (isRemote) pcmWhy = RLPTr(@"网络播放器由远端负责输出，不支持本机升频。");
-    else if (!known) pcmWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
-    else if (!pcmReady) pcmWhy = RLPTr(@"当前设备不支持 PCM 升频。");
+    if (isShared || isAirPlay) {
+        pcmWhy = RLPTr(@"共享/隔空播放不支持升频，请在「输出」中开启独占设备。");
+    } else if (isOffline) {
+        pcmWhy = RLPTr(@"离线处理模式不连接设备，不支持设备升频。");
+    } else if (isRemote) {
+        if (capsMismatch) {
+            pcmWhy = RLPTr(@"能力尚未确认，正在探测 UPnP 渲染器…");
+        } else if (!known || !pcmReady) {
+            pcmWhy = probeNote.length ? probeNote
+                : RLPTr(@"UPnP 渲染器未声明支持的采样率或能力未知，请在「输出」中选择可用渲染器。");
+        }
+    } else if (!known) {
+        pcmWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
+    } else if (!pcmReady) {
+        pcmWhy = RLPTr(@"当前设备不支持 PCM 升频。");
+    }
 
     NSString *dsdWhy = @"";
-    if (isShared || isAirPlay) dsdWhy = RLPTr(@"共享/隔空播放不支持 DSD/DoP，请在「输出」中开启独占设备。");
-    else if (isOffline) dsdWhy = RLPTr(@"离线处理模式不连接设备，不支持 DSD 升频。");
-    else if (isRemote) dsdWhy = RLPTr(@"网络播放器不支持本机 DoP 升频。");
-    else if (!known) dsdWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
-    else if (!dsdReady) dsdWhy = RLPTr(@"当前设备不支持 DoP，无法输出 DSD。");
+    if (isShared || isAirPlay) {
+        dsdWhy = RLPTr(@"共享/隔空播放不支持 DSD/DoP，请在「输出」中开启独占设备。");
+    } else if (isOffline) {
+        dsdWhy = RLPTr(@"离线处理模式不连接设备，不支持 DSD 升频。");
+    } else if (isRemote) {
+        if (capsMismatch) {
+            dsdWhy = RLPTr(@"能力尚未确认，正在探测 UPnP 渲染器…");
+        } else if (!known) {
+            dsdWhy = probeNote.length ? probeNote
+                : RLPTr(@"UPnP 渲染器未声明支持的采样率或能力未知，请在「输出」中选择可用渲染器。");
+        } else if (!dsdReady) {
+            dsdWhy = RLPTr(@"UPnP 渲染器未声明足够高的 PCM 载波率（≥176.4 kHz / 24-bit），不支持 DoP 输出。");
+        }
+    } else if (!known) {
+        dsdWhy = RLPTr(@"能力尚未确认，请先选择输出设备。");
+    } else if (!dsdReady) {
+        dsdWhy = RLPTr(@"当前设备不支持 DoP，无法输出 DSD。");
+    }
 
     NSString *pcmResult = (pcmReady && maxRate > 0)
         ? [NSString stringWithFormat:RLPTr(@"目标采样率最高 %.1f kHz（封顶 384 kHz）"),
@@ -4823,12 +4917,12 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         @"result": RLPTr(@"保持源采样率与原始声音（禁用 EQ/IR 与听音风格）"),
     };
     NSDictionary *pcmEntry = @{
-        @"enabled": @(pcmReady && !isShared && !isOffline && !isRemote && !isAirPlay),
+        @"enabled": @(pcmReady && !isShared && !isOffline && !isAirPlay),
         @"reason": pcmWhy,
         @"result": pcmResult,
     };
     NSDictionary *dsdEntry = @{
-        @"enabled": @(dsdReady && !isShared && !isOffline && !isRemote && !isAirPlay),
+        @"enabled": @(dsdReady && !isShared && !isOffline && !isAirPlay),
         @"reason": dsdWhy,
         @"result": dsdResult,
     };
@@ -4848,6 +4942,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     self.presetDsdReady = [g[@"dsdReady"] boolValue];
     NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
     self.presetCapsDevice = [dev[@"name"] isKindOfClass:[NSString class]] ? dev[@"name"] : nil;
+    [self syncOutputSummary];
     [self syncCapabilitiesUI];
     [self syncPlayAndStyleCards];
 }
@@ -4856,6 +4951,18 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     RLPTheme *t = [RLPTheme current];
     NSDictionary *dev = [self.presetCapsJSON[@"device"] isKindOfClass:[NSDictionary class]]
         ? self.presetCapsJSON[@"device"] : nil;
+    NSString *kvBackend = [self str:@"backend" def:@""];
+    NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
+    NSString *upnpDev = [self str:@"upnpdev" def:@""];
+    const BOOL castActive = [self.presetCapsJSON[@"castActive"] respondsToSelector:@selector(boolValue)] &&
+                            [self.presetCapsJSON[@"castActive"] boolValue];
+    const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
+    const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
+    const BOOL isRemote = kvIsUpnp || capIsRemote || castActive;
+    const BOOL capsMismatch = (kvBackend.length > 0 && capBackend.length > 0 &&
+                               ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive)));
+    if (capsMismatch) dev = nil;
+
     NSDictionary<NSString *, NSDictionary *> *statuses =
         [[self class] presetStatusForCapsJSON:self.presetCapsJSON
                                      settings:self.settings
@@ -4864,21 +4971,47 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     const BOOL pcmEnabled = [statuses[@"pcm"][@"enabled"] boolValue];
     const BOOL dsdEnabled = [statuses[@"dsd"][@"enabled"] boolValue];
 
-    NSString *name = [dev[@"name"] isKindOfClass:[NSString class]] && [dev[@"name"] length]
-        ? dev[@"name"] : (self.defaultDeviceName.length ? self.defaultDeviceName : RLPTr(@"检测中…"));
+    NSArray *rates = [dev[@"rates"] isKindOfClass:[NSArray class]] ? dev[@"rates"] : @[];
     double maxRate = [dev[@"maxRate"] respondsToSelector:@selector(doubleValue)] ? [dev[@"maxRate"] doubleValue] : 0.0;
-    NSString *maxRateStr = maxRate > 0 ? [NSString stringWithFormat:@"%ld Hz", (long)maxRate] : @"—";
-    NSString *dsdStr = @"—";
-    if ([dev[@"dsdNative"] respondsToSelector:@selector(boolValue)]) {
-        if ([dev[@"dsdNative"] boolValue]) {
+    const BOOL ok = [self.presetCapsJSON[@"ok"] respondsToSelector:@selector(boolValue)] &&
+                    [self.presetCapsJSON[@"ok"] boolValue];
+    const BOOL remoteCapsKnown = !isRemote || (ok && !capsMismatch && rates.count > 0 && maxRate > 0);
+
+    NSString *name = nil;
+    if ([dev[@"name"] isKindOfClass:[NSString class]] && [dev[@"name"] length]) {
+        name = dev[@"name"];
+    } else if (isRemote) {
+        for (NSDictionary<NSString *, NSString *> *cd in self.castDevices) {
+            if ([cd[@"id"] isEqualToString:upnpDev] && [cd[@"name"] length]) {
+                name = cd[@"name"];
+                break;
+            }
+        }
+        if (!name.length) {
+            name = (!upnpDev.length && !castActive) ? RLPTr(@"未选择网络播放器") : RLPTr(@"能力未知");
+        }
+    } else {
+        name = self.defaultDeviceName.length ? self.defaultDeviceName : RLPTr(@"检测中…");
+    }
+
+    NSString *maxRateStr = (isRemote && !remoteCapsKnown)
+        ? RLPTr(@"能力未知")
+        : (maxRate > 0 ? [NSString stringWithFormat:@"%ld Hz", (long)maxRate] : @"—");
+    NSString *dsdStr = (isRemote && !remoteCapsKnown) ? RLPTr(@"能力未知") : @"—";
+    if (!isRemote || remoteCapsKnown) {
+        NSString *dopMax = [dev[@"dopMax"] isKindOfClass:[NSString class]] ? dev[@"dopMax"] : @"";
+        const id dopv = dev[@"dop"];
+        const BOOL hasExplicitDop = (dopv != nil && ![dopv isKindOfClass:[NSNull class]] &&
+                                     [dopv respondsToSelector:@selector(boolValue)]);
+        const BOOL dop = hasExplicitDop ? [dopv boolValue] : (dopMax.length > 0);
+        if ([dev[@"dsdNative"] respondsToSelector:@selector(boolValue)] && [dev[@"dsdNative"] boolValue]) {
             NSString *nmax = [dev[@"dsdNativeMax"] isKindOfClass:[NSString class]] && [dev[@"dsdNativeMax"] length]
                 ? dev[@"dsdNativeMax"] : @"dsd256";
             dsdStr = [NSString stringWithFormat:@"%@ (%@)", RLPTr(@"是"), nmax.uppercaseString];
-        } else if ([dev[@"dop"] respondsToSelector:@selector(boolValue)] && [dev[@"dop"] boolValue]) {
-            NSString *dmax = [dev[@"dopMax"] isKindOfClass:[NSString class]] && [dev[@"dopMax"] length]
-                ? dev[@"dopMax"] : @"DoP";
+        } else if (dop) {
+            NSString *dmax = dopMax.length ? dopMax : @"DoP";
             dsdStr = [NSString stringWithFormat:@"%@ · DoP %@", RLPTr(@"否"), dmax.uppercaseString];
-        } else {
+        } else if (dev != nil) {
             dsdStr = RLPTr(@"否");
         }
     }
@@ -4900,6 +5033,29 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         : @"DSD —";
     self.capsDsdBadge.tag = dsdEnabled ? 4 : 1;
     self.capsDsdBadge.textColor = dsdEnabled ? t.accentText : t.mut;
+
+    if (!self.hasCustomPresetNote) {
+        if (isRemote && !remoteCapsKnown) {
+            NSString *noteText = nil;
+            if (capsMismatch) {
+                noteText = RLPTr(@"能力尚未确认，正在探测 UPnP 渲染器…");
+            } else if ([self.presetCapsJSON[@"probeNote"] isKindOfClass:[NSString class]] &&
+                       [(NSString *)self.presetCapsJSON[@"probeNote"] length]) {
+                noteText = self.presetCapsJSON[@"probeNote"];
+            } else if ([self.presetCapsJSON[@"notes"] isKindOfClass:[NSArray class]]) {
+                for (id item in (NSArray *)self.presetCapsJSON[@"notes"]) {
+                    if ([item isKindOfClass:[NSString class]] && [(NSString *)item length]) {
+                        noteText = (NSString *)item;
+                        break;
+                    }
+                }
+            }
+            self.presetNotes.stringValue = noteText.length ? noteText
+                : RLPTr(@"UPnP 渲染器未声明支持的采样率或能力未知，请在「输出」中选择可用渲染器。");
+        } else {
+            self.presetNotes.stringValue = RLPTr(@"不确定就选「原音直通」：文件是什么就播什么。");
+        }
+    }
 }
 
 #pragma mark - 多语言原地切换
