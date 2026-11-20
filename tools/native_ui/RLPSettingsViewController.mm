@@ -2544,7 +2544,6 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.libStatsView.translatesAutoresizingMaskIntoConstraints = NO;
     [gCurrentGroup addFullRow:self.libStatsView];   // 统计块属于这张卡片（旧码是页面并列）
     [[self.libStatsView.heightAnchor constraintGreaterThanOrEqualToConstant:120] setActive:YES];
-    [self.libStatsView reload];
 
     self.rootField = [self textFieldForKey:@"sp_root" action:@selector(onAddRoot:)
                                 placeholder:@"例如 /Volumes/Music"];
@@ -5134,11 +5133,27 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 
     [self reloadPlaymode];
 
-    [self loadUpnpDevicesForce:NO];
-    [self reloadRoots];
-    [self.serversView reload];
-    [self.metaSourcesView reload];
-    [self.libStatsView reload];
+    // 2026-11-20 用户反馈「设置页面加载很慢」。
+    // 旧实现不论当前停在哪个页签，都会把 UPnP 设备发现（缓存空时 SSDP 约 1.2s）、
+    // 音乐库统计、服务器/元数据/校准/LLM 全部拉一遍；在真实曲库与网络设备上，
+    // 这些后台请求会互相排队，用户看到的就是“设置页打开后控件慢慢才填上”。
+    // 现在只刷新当前页签真正需要的只读数据；切到对应页签时 showTab 的
+    // freshlyBuilt 分支会再走一次这里，自然补齐。页签缓存不清空，回看不丢。
+    const RLPSTab visibleTab = self.tab;
+    if (visibleTab == RLPSTabOut || visibleTab == RLPSTabStream) {
+        [self loadUpnpDevicesForce:NO];
+    }
+    if (visibleTab == RLPSTabAdv) {
+        [self reloadRoots];
+        [self.libStatsView reload];
+    }
+    if (visibleTab == RLPSTabStream) {
+        [self.serversView reload];
+    }
+    if (visibleTab == RLPSTabMeta) {
+        [self.metaSourcesView reload];
+        [self loadLlmConfig];
+    }
     // ⚠️ EQ 视图也必须在这一串里。旧实现漏了它：eqView 只在 fillEqualizer 建立时
     // reload 一次，此后再没人刷新 ⟹ 用户在 EQ 页做任何"外部改变"（重置 Flat、
     // 从工作台改预设、OPRA 应用）之后回到设置页，曲线仍停在旧数据上
@@ -5148,8 +5163,9 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         [self.eqView reload];
     }
     // 直通按钮会清空 ir/irgpu：校准视图也必须跟着刷新，否则仍显示旧 IR 路径。
-    [self.calView reload];
-    [self loadLlmConfig];
+    if (visibleTab == RLPSTabCal) {
+        [self.calView reload];
+    }
 }
 
 #pragma mark - 输出页动作

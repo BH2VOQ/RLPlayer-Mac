@@ -1,0 +1,9 @@
+保存输出设置失败，未投送	Could not save output settings; cast not started	投送失败提示
+已恢复投送前输出	Previous output restored	投送回滚提示
+已投送，进度恢复失败	Cast started, but position restore failed	投送结果提示
+恢复投送前输出也失败，请检查输出设置	Also failed to restore previous output; check output settings	投送回滚失败提示
+恢复本机播放失败	Could not resume local playback	投送回滚提示
+投送设备未响应	Cast device did not respond	投送失败提示
+投送起播失败	Cast playback failed to start	投送失败提示
+读取当前输出设置失败，未投送	Could not read current output settings; cast not started	投送失败提示
+进度恢复失败	Position restore failed	投送结果提示
