@@ -138,13 +138,17 @@
     // ---- 投放升频（web cast_up / cast_ceil / cast_force / cast_up_info）----
     self.upSwitch = [[NSSwitch alloc] initWithFrame:NSZeroRect];
     self.upSwitch.identifier = @"cast_up";
+    // 旧实现是只读镜像，所以从来没绑过 target/action。现在它是真开关，
+    // 不绑就等于画一个永远点不动的控件（而 UI 还显示成可点）—— 那是欺骗。
+    self.upSwitch.target = self;
+    self.upSwitch.action = @selector(onCastUpsample:);
     self.upSwitch.enabled = NO;
-    self.upSwitch.toolTip = RLPTr(@"由全局播放方式 / 升频开关自动决定，不可在此单独覆盖");
+    self.upSwitch.toolTip = RLPTr(@"勾选后投放按上限与设备声明能力升频（独立于全局播放方式）");
     NSStackView *upRow = [[NSStackView alloc] init];
     upRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     upRow.spacing = 8;
     [upRow addArrangedSubview:self.upSwitch];
-    self.upLabel = RLPLabel(RLPTr(@"投放升频（跟随播放方式）"), t.small, t.text);
+    self.upLabel = RLPLabel(RLPTr(@"投放升频"), t.small, t.text);
     [upRow addArrangedSubview:self.upLabel];
     [self.stack addArrangedSubview:upRow];
 
@@ -305,8 +309,16 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
 }
 
 - (void)onCastUpsample:(NSSwitch *)s {
-    // cast_up 为跟随全局播放方式的只读镜像，不再向后端 POST cast_upsample 覆盖。
-    (void)s;
+    // 用户显式选择「投放升频」。写 cast_upsample 后由后端
+    // resolve_cast_upsample_from_playback 的 ⓪ 分支接管：目标率取 max，
+    // 再由 cast_upsample_plan 按 ceiling 与渲染器声明能力收口。
+    [RLPCoreClient.shared postJSON:@"/api/settings"
+                              body:[NSString stringWithFormat:@"cast_upsample=%@",
+                                    s.state == NSControlStateValueOn ? @"1" : @"0"]
+                        completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [self refreshState];
+    }];
 }
 - (void)onCastCeiling:(NSPopUpButton *)s {
     [RLPCoreClient.shared postJSON:@"/api/settings"
@@ -364,9 +376,23 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
             ? [(NSString *)filtObj stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
             : @"";
 
+        // 用户在投放区显式勾选「投放升频」→ 独立于全局播放方式（见后端
+        // resolve_cast_upsample_from_playback 的 ⓪ 分支）。
+        id cuObj = kv[@"cast_upsample"];
+        NSString *cuStr = [cuObj isKindOfClass:[NSString class]] ? (NSString *)cuObj
+                        : ([cuObj respondsToSelector:@selector(stringValue)] ? [cuObj stringValue] : @"");
+        const BOOL castOptIn = [cuStr isEqualToString:@"1"] || [cuStr isEqualToString:@"true"];
+
         BOOL followUpsample = NO;
         NSString *infoText = nil;
-        if (directSdm) {
+        if (castOptIn && !directSdm) {
+            // 显式选择优先：目标率取 max（= min(上限, 渲染器声明最高率)）
+            followUpsample = YES;
+            infoText = [NSString stringWithFormat:
+                        RLPTr(@"已按投放设置独立升频：目标率取上限与设备声明的最低者（上限 %@ Hz）"),
+                        ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(description)]
+                         ? [kv[@"cast_upsample_ceiling"] description] : @"192000")];
+        } else if (directSdm) {
             followUpsample = NO;
             infoText = RLPTr(@"已跟随播放方式：DirectSDM / 原音直通（投放不升频）");
         } else if (dsdLevel >= 64) {
@@ -387,7 +413,10 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
             infoText = RLPTr(@"已跟随播放方式：原音直通（投放不升频）");
         }
 
-        self_.upSwitch.enabled = NO;
+        // 开关可点击：它现在真的会写 cast_upsample（旧实现是只读镜像）。
+        // DirectSDM 下仍然禁用 —— 那条路径本来就不经过重采样，勾了也不会生效，
+        // 让可点的控件去做一件不发生的事才是欺骗。
+        self_.upSwitch.enabled = !directSdm;
         self_.upSwitch.state = followUpsample ? NSControlStateValueOn : NSControlStateValueOff;
         self_.upInfo.stringValue = infoText;
 

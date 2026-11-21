@@ -689,8 +689,14 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPageScrollWillStart:)
                                                  name:NSScrollViewWillStartLiveScrollNotification object:nil];
 
-    if (![_sidebar selectKey:@"albums"]) {
-        [self showContentForKey:@"albums"];
+    // 启动默认页 = 侧栏第一项「聆听室 / 数字音乐台」（key = station，随模式自动切名）。
+    //
+    // 2026-11-21 用户要求：「打开软件的默认界面改成聆音室或者专业音乐台入口」。
+    // 旧实现固定进「专辑」，用户每次启动都要先离开资料库列表才能开始听歌。
+    // station 的路由 key 是同一个，页面实例按模式缓存（station:listen / station:pro），
+    // 所以这里只认 "station"，不要写死某一模式的 cacheKey。
+    if (![_sidebar selectKey:@"station"]) {
+        [self showContentForKey:@"station"];
     }
     [self syncDrawerButtons];
     return self;

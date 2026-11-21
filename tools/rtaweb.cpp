@@ -3011,10 +3011,35 @@ static CastPlaybackUpsampleDecision resolve_cast_upsample_from_playback(
     const std::string& rate,
     int dsdLevel,
     bool directSdm,
-    const std::string& filter)
+    const std::string& filter,
+    bool castUpsampleOptIn = false)
 {
     CastPlaybackUpsampleDecision d;
     d.filterName = filter;
+
+    // ⓪ 用户在「投放」里显式勾选「投放升频」（cast_upsample=1）→ 优先按投放自身意图。
+    //
+    // 2026-11-21（用户实测：「设备声明了 192 但一直不升频」）：
+    //   旧实现里投放升频**完全从属于**全局播放方式：只有全局 rate 不是 src/follow/空、
+    //   或 dsd>=64、或非 directsdm 时才升频。而全局输出采样率默认是「跟随系统」，
+    //   于是 applyUpsample 恒为 false，用户在投放区选的 cast_upsample_ceiling=192000
+    //   根本没有机会参与判断（cast_upsample_plan.h 第一句就是 if(!applyUpsample) → "off"）。
+    //   用户看到的「声明了 192 却不升频」就是这么来的：那个 192 是**上限**，不是开关。
+    //
+    // 现在：投放可以独立选择升频；显式勾选时目标取 max（= min(上限, 渲染器声明最高率)），
+    // 由 cast_upsample_plan 的 max 分支按 ceiling 与渲染器能力收口。
+    // 未勾选时行为与以前**完全一致**（仍跟随全局播放方式），所以这是纯增量。
+    // ⚠️ 原音直通必须**跟随源**（用户 2026-11-21 明确要求），勾了投放升频也不许改。
+    // 原音直通在预设里的特征：rate=src（跟随源）+ dsd=0 + 无 filter + 非 directsdm。
+    // 只在 directsdm 上设防是不够的 —— bitperfect 档写的是 rate=src，directsdm=0，
+    // 光看 directsdm 会漏掉它，于是"直通"被静默重采样，正是要避免的事。
+    const bool bitPerfectIntent = (rate == "src") && dsdLevel == 0 && filter.empty();
+    if (castUpsampleOptIn && !directSdm && !bitPerfectIntent) {
+        d.applyUpsample = true;
+        d.requestedRate = is_src_or_follow_rate(rate) ? std::string("max") : rate;
+        return d;
+    }
+
     if (directSdm) {
         d.applyUpsample = false;
         d.requestedRate = rate;
@@ -3041,7 +3066,10 @@ static CastPlaybackUpsampleDecision current_cast_upsample_from_conf() {
     const std::string dir = conf_get("directsdm", "0");
     const bool directSdm = (dir == "1" || dir == "true");
     const std::string filter = conf_get("filter", "");
-    auto d = resolve_cast_upsample_from_playback(rate, dsd.level, directSdm, filter);
+    // cast_upsample=1 表示用户在投放区显式要求升频（独立于全局播放方式）。
+    const std::string castUp = conf_get("cast_upsample", "0");
+    const bool castOptIn = (castUp == "1" || castUp == "true");
+    auto d = resolve_cast_upsample_from_playback(rate, dsd.level, directSdm, filter, castOptIn);
     const std::string pol = conf_get("rateFamilyPolicy", "compatible");
     d.policyName = rta::audio::valid_rate_family_policy(pol) ? pol : std::string("prefer");
     return d;

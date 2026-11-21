@@ -670,19 +670,21 @@ int main(void) {
             NSPopUpButton *ceilPop = (NSPopUpButton *)FindId(v, @"cast_ceil");
             NSSwitch *forceSw = (NSSwitch *)FindId(v, @"cast_force");
             NSTextField *upInfoLabel = (NSTextField *)FindId(v, @"sp_cast_up_info");
+            // 2026-11-21 用户要求「投放也要能实现升频」：cast_up 不再是禁用只读镜像，
+            // 它可以被点击并写 cast_upsample。这里验的是**新**语义：
+            // cast_upsample=1 → 开关 On；并且 ceiling 回显正确。
             WaitUntil(1.5, ^BOOL {
-                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
+                return upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
                        ceilPop && [ceilPop.titleOfSelectedItem isEqualToString:@"384000"] &&
-                       forceSw && forceSw.state == NSControlStateValueOn &&
-                       upInfoLabel && [upInfoLabel.stringValue containsString:@"原音直通"];
+                       forceSw && forceSw.state == NSControlStateValueOn;
             });
             NSDictionary *csBP = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
             NSDictionary *stBP = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
             std::printf("  [cast-follow] profile=bitperfect rate=src dsd=0 cast_upsample=1 -> cast_up.state=%ld cast_up.enabled=%d state.castUpsample=%d status.castUpsample=%d\n",
                         (long)(upSw ? upSw.state : -1), upSw ? (int)upSw.enabled : -1,
                         [csBP[@"castUpsample"] boolValue], [stBP[@"castUpsample"] boolValue]);
-            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOff,
-               @"12a RLPCastView cast_up 为禁用只读镜像且 rate=src/dsd=0 时忽略 cast_upsample=1 保持 Off",
+            Ck(upSw && upSw.enabled && upSw.state == NSControlStateValueOn,
+               @"12a RLPCastView cast_up 可操作，且 cast_upsample=1 时显示为 On（投放可独立升频）",
                [NSString stringWithFormat:@"enabled=%d state=%ld info=%@",
                 upSw ? (int)upSw.enabled : -1, (long)(upSw ? upSw.state : -1),
                 upInfoLabel ? upInfoLabel.stringValue : @"nil"]);
@@ -692,12 +694,12 @@ int main(void) {
             Ck(forceSw && forceSw.state == NSControlStateValueOn,
                @"12c RLPCastView reload 回显 cast_upsample_force=1",
                [NSString stringWithFormat:@"state=%ld", (long)(forceSw ? forceSw.state : -1)]);
-            Ck(![csBP[@"castUpsample"] boolValue] &&
-               [csBP[@"castUpsampleFollowsPlayback"] boolValue] &&
-               ![csBP[@"castUpsampleForce"] boolValue] &&
-               ![stBP[@"castUpsample"] boolValue] &&
-               [stBP[@"castUpsampleFollowsPlayback"] boolValue],
-               @"12a2 bitperfect + cast_upsample=1 时 /api/cast/state 与 /api/status 有效 castUpsample=false",
+            // 原音直通档的语义不变：**原音直通必须跟随源**（用户 2026-11-21 明确要求），
+            // 所以即便 cast_upsample=1，bitperfect 档下的有效 castUpsample 仍须为 false，
+            // 不把源数据重采样掉。这里只保留这条真正要守的语义，
+            // 不再要求 castUpsampleFollowsPlayback（那是旧只读镜像的元数据）。
+            Ck(![csBP[@"castUpsample"] boolValue] && ![stBP[@"castUpsample"] boolValue],
+               @"12a2 原音直通（rate=src）下即使 cast_upsample=1，有效 castUpsample 仍为 false（直通必须跟随源）",
                [NSString stringWithFormat:@"state=%@ status=%@", csBP, stBP]);
 
             // 12g: PCM 升频 (rate=192000, dsd=0, cast_upsample=0) → cast_up=On (仍禁用), 后端有效值 true
@@ -707,16 +709,16 @@ int main(void) {
                 [castView performSelector:NSSelectorFromString(@"reloadSettings")];
             }
             WaitUntil(1.5, ^BOOL {
-                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+                return upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
                        upInfoLabel && [upInfoLabel.stringValue containsString:@"192000"];
             });
             NSDictionary *csPcm = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
             NSDictionary *stPcm = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
             std::printf("  [cast-follow] profile=pcm rate=192000 dsd=0 cast_upsample=0 -> cast_up.state=%ld state.castUpsample=%d status.castUpsample=%d\n",
                         (long)(upSw ? upSw.state : -1), [csPcm[@"castUpsample"] boolValue], [stPcm[@"castUpsample"] boolValue]);
-            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+            Ck(upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
                upInfoLabel && [upInfoLabel.stringValue containsString:@"192000"],
-               @"12g rate=192000 且 cast_upsample=0 时 cast_up 跟随为 On 且仍禁用",
+               @"12g rate=192000 且 cast_upsample=0 时 cast_up 跟随为 On（可操作）",
                [NSString stringWithFormat:@"enabled=%d state=%ld info=%@",
                 upSw ? (int)upSw.enabled : -1, (long)(upSw ? upSw.state : -1),
                 upInfoLabel ? upInfoLabel.stringValue : @"nil"]);
@@ -741,7 +743,7 @@ int main(void) {
             NSDictionary *csMax = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
             std::printf("  [cast-follow] profile=pcm rate=max dsd=0 cast_upsample=0 -> cast_up.state=%ld state.castUpsample=%d\n",
                         (long)(upSw ? upSw.state : -1), [csMax[@"castUpsample"] boolValue]);
-            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+            Ck(upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
                [csMax[@"castUpsample"] boolValue],
                @"12h rate=max 且 cast_upsample=0 时 cast_up=On 且 /api/cast/state castUpsample=true",
                [NSString stringWithFormat:@"state=%ld castUpsample=%@", (long)upSw.state, csMax[@"castUpsample"]]);
@@ -753,14 +755,14 @@ int main(void) {
                 [castView performSelector:NSSelectorFromString(@"reloadSettings")];
             }
             WaitUntil(1.5, ^BOOL {
-                return upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+                return upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
                        upInfoLabel && [upInfoLabel.stringValue containsString:@"DSD128"];
             });
             NSDictionary *csDsd = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
             NSDictionary *stDsd = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
             std::printf("  [cast-follow] profile=dsd rate=src dsd=128 cast_upsample=0 -> cast_up.state=%ld state.castUpsample=%d status.castUpsample=%d\n",
                         (long)(upSw ? upSw.state : -1), [csDsd[@"castUpsample"] boolValue], [stDsd[@"castUpsample"] boolValue]);
-            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOn &&
+            Ck(upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
                upInfoLabel && [upInfoLabel.stringValue containsString:@"DSD128"] &&
                [csDsd[@"castUpsample"] boolValue] && [stDsd[@"castUpsample"] boolValue],
                @"12i dsd=128 + rate=src + cast_upsample=0 时 cast_up=On 且 /api/cast/state castUpsample=true",
@@ -775,15 +777,18 @@ int main(void) {
             }
             WaitUntil(1.5, ^BOOL {
                 return upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
-                       upInfoLabel && [upInfoLabel.stringValue containsString:@"滤波器"];
+                       upInfoLabel && [upInfoLabel.stringValue containsString:@"独立升频"];
             });
             NSDictionary *csCustom = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
             NSDictionary *stCustom = [core jsonWithMethod:@"GET" path:@"/api/status" body:nil];
             std::printf("  [cast-follow] profile=custom(filter-only) rate=src dsd=0 cast_upsample=1 -> cast_up.state=%ld state.castUpsample=%d\n",
                         (long)(upSw ? upSw.state : -1), [csCustom[@"castUpsample"] boolValue]);
-            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
-               ![csCustom[@"castUpsample"] boolValue] && ![stCustom[@"castUpsample"] boolValue],
-               @"12j rate=src + filter + cast_upsample=1 按直通处理：cast_up=Off 且 castUpsample=false",
+            // 2026-11-21 语义更新：`rate=src + 有 filter` **不是**原音直通（直通要求无 filter）。
+            // 用户已显式勾选 cast_upsample=1 ⟹ 投放按独立升频处理，目标率取 max。
+            // 直通保护仍由 `rate=src && dsd=0 && 无 filter` 那条兜住（见 12a2）。
+            Ck(upSw && upSw.enabled && upSw.state == NSControlStateValueOn &&
+               [csCustom[@"castUpsample"] boolValue] && [stCustom[@"castUpsample"] boolValue],
+               @"12j rate=src + 有 filter + cast_upsample=1 时投放独立升频生效（非直通意图）",
                [NSString stringWithFormat:@"state=%ld info=%@ cs=%@",
                 (long)upSw.state, upInfoLabel ? upInfoLabel.stringValue : @"nil", csCustom[@"castUpsample"]]);
 
@@ -803,7 +808,7 @@ int main(void) {
             NSDictionary *csDirDsd = [core jsonWithMethod:@"GET" path:@"/api/cast/state" body:nil];
             std::printf("  [cast-follow] profile=directsdm directsdm=1 cast_upsample=1 -> pcm.castUpsample=%d dsd.castUpsample=%d\n",
                         [csDirPcm[@"castUpsample"] boolValue], [csDirDsd[@"castUpsample"] boolValue]);
-            Ck(upSw && !upSw.enabled && upSw.state == NSControlStateValueOff &&
+            Ck(upSw && upSw.state == NSControlStateValueOff &&
                ![csDirPcm[@"castUpsample"] boolValue] && ![csDirDsd[@"castUpsample"] boolValue],
                @"12k directsdm=1 时即使 rate=192000/dsd=128 且 cast_upsample=1 仍为 Off/false",
                [NSString stringWithFormat:@"dirPcm=%@ dirDsd=%@", csDirPcm[@"castUpsample"], csDirDsd[@"castUpsample"]]);
@@ -827,8 +832,8 @@ int main(void) {
                 }
                 Pump(0.1);
                 method_setImplementation(postM, origPostCast);
-                Ck(upSw && upSw.target == nil && upSw.action == NULL && !postedCastUpsample,
-                   @"12l RLPCastView cast_up 无 target/action 且绝不 POST cast_upsample 覆盖",
+                Ck(upSw && upSw.action != NULL && postedCastUpsample,
+                   @"12l RLPCastView cast_up 有 target/action 且会 POST cast_upsample（投放可独立升频）",
                    [NSString stringWithFormat:@"target=%p action=%s posted=%d",
                     (__bridge void *)upSw.target, upSw.action ? sel_getName(upSw.action) : "NULL", (int)postedCastUpsample]);
             }

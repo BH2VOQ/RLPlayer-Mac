@@ -166,6 +166,12 @@ int main() {
         wc.window.contentView.frame = NSMakeRect(0, 0, 1280, 900);
         [wc.window.contentView layoutSubtreeIfNeeded];
         Pump(0.3);
+        // 2026-11-21：启动默认页已改成 station（聆听室 / 数字音乐台），
+        // 所以专辑页不再在窗口构造时被自动加载。本测试验的是「顶栏搜索按当前视图分派」，
+        // 需要专辑页作为载体 ⟹ 这里显式进一次专辑页（判据意图不变，只补上被启动页改动
+        // 拿掉的那个前提）。
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.3);
         NSSearchField *search = (NSSearchField *)[wc valueForKey:@"search"];
         Ck(search != nil, "顶栏存在搜索框", @"缺搜索框");
         Ck(wc.albums.albumCount == 3, "专辑页拿到 fixture 的 3 张专辑（前提）",
@@ -227,10 +233,20 @@ int main() {
                "不按回车也会在 350ms 后自动发起过滤请求（web oninput 防抖）",
                [NSString stringWithFormat:@"before=%ld now=%ld", (long)albumsBefore,
                 (long)CountAlbumsQueries()]);
-            Ck([spy.paths.lastObject isEqualToString:@"/api/lib/albums?q=bee"] ||
-               [[spy.paths.lastObject substringToIndex:MIN(24, spy.paths.lastObject.length)]
-                  isEqualToString:@"/api/lib/albums?q=bee"],
-               "请求带上了用户输入的过滤词 q=bee", spy.paths.lastObject ?: @"");
+            // 判据改成「本次搜索确实发出过带 q=bee 的专辑查询」，而不是取 lastObject。
+            // 为什么：切页/激活会顺带发出其它请求（如 /api/queue?meta=1），
+            // lastObject 是否恰为搜索请求取决于时序，与本条要证明的事
+            // 「过滤词有没有真的传给后端」无关 —— 那是判据写错，不是实现错。
+            BOOL sawQ = NO;
+            for (NSString *p2 in spy.paths) {
+                if ([p2 isEqualToString:@"/api/lib/albums?q=bee"]) { sawQ = YES; break; }
+                if (p2.length >= 24 && [[p2 substringToIndex:24] isEqualToString:@"/api/lib/albums?q=bee"]) {
+                    sawQ = YES; break;
+                }
+            }
+            Ck(sawQ, "请求带上了用户输入的过滤词 q=bee",
+               [NSString stringWithFormat:@"last=%@ total=%lu",
+                spy.paths.lastObject ?: @"", (unsigned long)spy.paths.count]);
             Ck([wc.sidebar.selectedKey isEqualToString:@"albums"], "仍然停在专辑页（不跳页）",
                wc.sidebar.selectedKey ?: @"(nil)");
             Ck(wc.currentContent == (id)wc.albums, "当前内容仍是专辑页控制器", @"已被切走");

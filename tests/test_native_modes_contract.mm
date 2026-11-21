@@ -493,6 +493,17 @@ int main() {
         [wc setUiMode:@"listen" persist:NO];
         g_spy.heldSettingsCompletion = nil;
 
+        // 2026-11-21：启动默认页已改为 station（聆听室 / 数字音乐台）。
+        // 所以进入这里时**已经在 station 上**，selectKey 不会再触发一次换页 ⟹
+        // 旧写法（先量 before，再 selectKey 期望产生一次布局调用）的前提不成立。
+        // 仍然要验的是同一件事：**已挂载的** station 页按「页面宽 - 48」的断点排卡片。
+        // 先切去资料库再切回 station，制造一次真实的重新挂载，判据含义不变。
+        if ([wc.currentContent isKindOfClass:[RLPQuickStartViewController class]] ||
+            [wc.currentContent isKindOfClass:[RLPWorkbenchViewController class]]) {
+            Ck(YES, "C1c 启动默认页就是 station（聆听室 / 数字音乐台）", @"");
+        }
+        [wc.sidebar selectKey:@"albums"];
+        Pump(0.1);
         const auto beforeListen = TraceGeometry(wc, "before first listen station entry");
         Ck(beforeListen.page.width > 148 && beforeListen.page.width - 48 <= 750 && beforeListen.page.width < 900,
            "G0 compact fixture distinguishes station breakpoints from wide defaults",

@@ -17,7 +17,10 @@
 //
 // 四档口径（字段名就是 /api/play 的请求键名，也是 /api/preset/apply 的 applied 字段）：
 //   bitperfect（原音直通）：完全不动数据
-//       rate=follow（跟随源，不重采样）· volume=0 dB · shaper=none · 无 EQ/IR/等响度/每声道增益/ISP 预衰减
+//       rate=src（**跟随源**，不重采样）· volume=0 dB · shaper=none · 无 EQ/IR/等响度/每声道增益/ISP 预衰减
+//       ⚠️ 2026-11-21：这里曾误写成 rate=follow。follow 在 src/audio/rate_pick.h:113 的语义是
+//       「跟随**系统混音**采样率」，源 48k + 声卡默认 44.1k 时会被重采样、永远不 bit-perfect。
+//       代码一直是对的（用 src），但注释写错的代价是下一个人照着注释改回去 —— 故一并订正。
 //       源是 PCM ⟹ dsd=0；源是 DSD 且设备能承载 ⟹ dsd=<源位率>，同速率 ⟹ directSdm=1（1-bit 直通）
 //   pcm（PCM 升频）：
 //       rate = 设备当前后端支持的最高档（**不超过 384000**）· filter=poly-sinc-tight-lp · tapsPerInput=1600
@@ -27,7 +30,7 @@
 //       （见 docs/PCM回放质量-实测与改进.md §4.1）—— 不能靠模糊“标称 taps”隐式满足。
 //   dsd（DSD 升频）：
 //       dsd = 设备原生支持的最高 DSD 档（没有原生则退 DoP 的最高档）· modfamily=ec · modorder=7
-//       filter=poly-sinc-tight-lp · tapsPerInput=1600 · rate=follow · shaper=none（DoP 强制无抖动）
+//       filter=poly-sinc-tight-lp · tapsPerInput=1600 · rate=src · shaper=none（DoP 强制无抖动）
 //       源 DSD 与目标同速率 ⟹ directSdm=1
 //   pcm2dsd（PCM → DSD，2026-10-26 第 4 档）：
 //       **mac 口径：只走 DoP**。macOS 没有 ASIO 原生 DSD 驱动通路，rtaweb 的 c.dsdNative
@@ -35,7 +38,7 @@
 //       「设备原生支持 DSD / 1-bit 直送」这类虚构通路（2026-10-26 A-5 事故的教训：
 //       虚构公共 API + 测虚构语义 = 假通过）。notes 只写「走 DoP，载波 X Hz」。
 //       dsd = DoP 能承载的最高档 · modfamily=ec · modorder=7
-//       filter=poly-sinc-tight-lp · tapsPerInput=1600 · rate=follow · shaper=none · directSdm=0
+//       filter=poly-sinc-tight-lp · tapsPerInput=1600 · rate=src · shaper=none · directSdm=0
 //       无 DoP 能力 ⟹ 明确降级为 PCM 升频并在 notes 里说明原因（与 dsd 档同口径）。
 //
 // 为什么 shaper 在 dsd 档写 none：DoP 路径在 rtaweb 里是 `cfg.shaper = Shaper::None`
