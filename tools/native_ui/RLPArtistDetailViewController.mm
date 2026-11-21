@@ -49,7 +49,11 @@ static const CGFloat kArtistCardPadX   = 18.0;   // .sec-card padding:14px 18px
 static const CGFloat kArtistCardPadY   = 14.0;
 static const CGFloat kArtistCardGap    = 20.0;   // 卡片之间
 static const CGFloat kArtistAvatarSide = 168.0;  // .ahead .cv 168×168
-static const CGFloat kArtistFieldMinW  = 260.0;  // .efields minmax(260px,1fr)
+// web .efields{grid-template-columns:repeat(auto-fill,minmax(178px,1fr))}
+// —— 是 178，不是 260。写成 260 会让宽窗口只肯开两列、每列 700pt，
+// 而字段值多是「摇滚」「日本」这种短词，文字后面拖出一大片空白，
+// 看上去就是"排版乱"（用户 2026-11-21 截图反馈的实际观感）。
+static const CGFloat kArtistFieldMinW  = 178.0;  // .efields minmax(178px,1fr)
 static const CGFloat kArtistFieldColGap = 22.0;  // .efields gap:13px 22px
 static const CGFloat kArtistFieldRowGap = 13.0;
 
@@ -340,10 +344,11 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     const CGFloat w = MAX(1.0, width);
     const CGFloat colGap = kArtistFieldColGap;
     const CGFloat rowGap = kArtistFieldRowGap;
-    // 列宽 = max(260, 可用宽/2) ⟹ 宽窗口两列、窄窗口一列（任务书给定的规格，
-    // 不是 CSS auto-fill 的多列口径：这里的字段值多为中文短句，三列会把每列压到 270pt 以下）。
-    const BOOL twoCols = ((w - colGap) / 2.0) >= kArtistFieldMinW;
-    const NSInteger cols = twoCols ? 2 : 1;
+    // 与 web 的 `repeat(auto-fill, minmax(178px, 1fr))` 同口径：
+    // 列数 = 能塞下多少个「不小于 178pt 的等宽列」，而不是写死两列。
+    // 宽窗口因此自然变成 3–4 列，短字段不再拖出一大片空白。
+    NSInteger cols = (NSInteger)floor((w + colGap) / (kArtistFieldMinW + colGap));
+    cols = MAX(1, MIN(cols, 6));                 // 上限 6 列，避免超宽屏把字段挤成一条缝
     _columnCount = cols;
     const CGFloat colW = MAX(1.0, (w - colGap * (CGFloat)(cols - 1)) / (CGFloat)MAX(1, cols));
 
@@ -858,7 +863,27 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (void)viewDidLayout {
     [super viewDidLayout];
+    [self syncDocWidthToScroll];
     [self relayoutPage];
+}
+
+/// 把文档视图的宽度**同步到滚动容器**。
+///
+/// 这就是用户 2026-11-21 截图里「卡片只占半屏、右边一大片空白」的根因：
+/// relayoutPage 用 `_doc.bounds.size.width` 当可用宽度，而把文档视图写回
+/// `NSMakeRect(0,0,W,totalH)` 用的又是同一个 W —— 自我循环，**没有任何地方**
+/// 把文档宽度改成滚动容器的宽度。于是它永远停在 buildContent 里的初始值 954，
+/// 窗口放大到 1518 宽后，所有卡片仍按 954 排版，右侧留空。
+/// （web 版文档是流式的，天然随容器变宽，所以看不出这个问题。）
+- (void)syncDocWidthToScroll {
+    if (!_pageScroll || !_doc) return;
+    const CGFloat clipW = _pageScroll.contentView.bounds.size.width;
+    if (clipW < 40.0) return;
+    if (fabs(_doc.frame.size.width - clipW) > 0.5) {
+        NSSize sz = _doc.frame.size;
+        sz.width = clipW;
+        _doc.frame = NSMakeRect(0, 0, clipW, MAX(sz.height, _doc.frame.size.height));
+    }
 }
 
 - (void)viewDidAppear {
@@ -868,6 +893,9 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (void)relayoutPage {
     if (!_doc || _inLayout) return;
+    // 所有排版入口（数据到达 / 主题 / 语言 / 尺寸变化）都会走到这里，
+    // 所以在这里兜底同步一次文档宽度，不依赖某一处回调恰好被调用。
+    [self syncDocWidthToScroll];
     const CGFloat W = _doc.bounds.size.width;
     if (W < 40.0) return;
     _inLayout = YES;
