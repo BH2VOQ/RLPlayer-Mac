@@ -1,8 +1,0 @@
-Internal ctest changing into directory: /Users/august/Downloads/DQ/RLPlayer/build-mac
-Test project /Users/august/Downloads/DQ/RLPlayer/build-mac
-    Start 10: native_queue_sort
-1/1 Test #10: native_queue_sort ................   Passed    1.89 sec
-
-100% tests passed, 0 tests failed out of 1
-
-Total Test time (real) =   1.90 sec

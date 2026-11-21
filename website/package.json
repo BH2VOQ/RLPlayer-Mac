@@ -1,0 +1,12 @@
+{
+  "name": "rlplayer-website",
+  "version": "1.1.4",
+  "private": true,
+  "description": "RLPlayer for macOS 官方中文网站（纯静态，无框架、无远程运行时依赖）",
+  "scripts": {
+    "start": "python3 -m http.server 8080",
+    "check": "node --check app.js && node --check motion.js && node tools/check-static.js",
+    "sync-latest": "node tools/sync-latest.js"
+  }
+}
+

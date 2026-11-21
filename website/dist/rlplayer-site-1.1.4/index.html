@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLPlayer for macOS — 原生母带级 Hi-Fi 音频播放与数字信号处理引擎</title>
+<meta name="description" content="RLPlayer for macOS：全链路 C++ 自研 64-bit DSP、52 款多相 Sinc 升频滤波器、四族 ΔΣ 调制器、20 段 RBJ 参数均衡、CoreAudio Hog 物理独占与多协议无损投放。原生 Apple Silicon (arm64) 架构。">
+<meta name="theme-color" content="#ffffff">
+<meta name="color-scheme" content="light">
+<meta property="og:type" content="website">
+<meta property="og:title" content="RLPlayer for macOS — 原生母带级 Hi-Fi 音频播放与数字信号处理引擎">
+<meta property="og:description" content="全链路自研 DSP · CoreAudio 物理独占 · UPnP 流式升频与 AirPlay 直推 · 6,230+ OPRA 耳机校准。macOS 13.0+ · Apple Silicon 原生 arm64。">
+<meta property="og:image" content="assets/ui-library.webp">
+<link rel="icon" href="assets/logo.png" type="image/png">
+<link rel="apple-touch-icon" href="assets/logo.png">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="art-direction.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<div class="scroll-progress" aria-hidden="true"><span id="scrollProgress"></span></div>
+
+<header class="site-header" id="siteHeader">
+  <div class="header-inner">
+    <a class="brand" href="#top" aria-label="RLPlayer 首页">
+      <img class="brand__logo" src="assets/logo.png" width="26" height="26" alt="">
+      <span class="brand__name">RLPlayer</span>
+      <span class="brand__sub">for macOS</span>
+    </a>
+
+    <nav class="site-nav" id="siteNav" aria-label="主导航">
+      <a class="site-nav__link" href="#metrics">实测指标</a>
+      <a class="site-nav__link" href="#signal">信号链</a>
+      <a class="site-nav__link" href="#now">核心功能</a>
+      <a class="site-nav__link" href="#stack">技术栈</a>
+      <a class="site-nav__link" href="#vision">演进路线</a>
+      <a class="site-nav__link" href="#download">下载</a>
+    </nav>
+
+    <div class="header-actions">
+      <a class="btn btn--star btn--compact" href="https://github.com/BH2VOQ/RLPlayer-Mac" target="_blank" rel="noopener" aria-label="在 GitHub 上为 RLPlayer 点亮 Star">
+        <svg class="icon icon--star" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+        <span>Star on GitHub</span>
+      </a>
+      <a class="btn btn--primary btn--compact" data-download href="https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg">
+        下载<span class="btn__version" data-version>v1.1.4</span>
+      </a>
+      <button class="nav-toggle" id="navToggle" type="button" aria-expanded="false" aria-controls="mobileNav" aria-label="打开菜单">
+        <span class="nav-toggle__bars" aria-hidden="true"><span></span><span></span></span>
+      </button>
+    </div>
+  </div>
+
+  <div class="mobile-nav" id="mobileNav" hidden>
+    <nav aria-label="移动端导航">
+      <a href="#metrics">实测指标<span aria-hidden="true">01</span></a>
+      <a href="#signal">信号链<span aria-hidden="true">02</span></a>
+      <a href="#now">核心功能<span aria-hidden="true">03</span></a>
+      <a href="#stack">技术栈<span aria-hidden="true">04</span></a>
+      <a href="#vision">演进路线<span aria-hidden="true">05</span></a>
+      <a href="#download">下载<span aria-hidden="true">06</span></a>
+    </nav>
+    <div class="mobile-nav__secondary">
+      <a href="https://github.com/BH2VOQ/RLPlayer-Mac" target="_blank" rel="noopener">macOS 版源码</a>
+      <a href="https://github.com/okhuoyanyan/RLPlayer2" target="_blank" rel="noopener">Windows 版源码</a>
+      <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases" target="_blank" rel="noopener">Releases 更新日志</a>
+      <a href="https://github.com/BH2VOQ/RLPlayer-Mac/issues" target="_blank" rel="noopener">Issues 反馈</a>
+      <a href="https://github.com/BH2VOQ/RLPlayer-Mac/blob/main/LICENSE" target="_blank" rel="noopener">GPL-3.0-or-later</a>
+    </div>
+    <a class="btn btn--primary btn--large mobile-nav__download" data-download href="https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg">下载 DMG · <span data-size>8.1 MB</span></a>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero" id="top">
+    <div class="hero__glow" aria-hidden="true"></div>
+    <div class="hero__aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+    <canvas class="hero__wave" id="heroWave" aria-hidden="true"></canvas>
+    <div class="hero__grid" aria-hidden="true"></div>
+    <div class="wrap hero__inner">
+      <p class="eyebrow eyebrow--hero" data-reveal>
+        <span class="status-dot" aria-hidden="true"></span>
+        RLPlayer <span data-version>v1.1.4</span> · macOS Native Hi-Fi Audio Engine
+      </p>
+      <h1 class="hero__title" data-reveal>母带级数字信号处理，<br><span class="hero__title-accent">原生构建于 Apple Silicon。</span></h1>
+      <p class="hero__lede" data-reveal>将 52 款多相有理数 Sinc 升频器、四族高阶 ΔΣ 调制器、零延迟均匀分块 FFT 卷积、20 段 RBJ 参数均衡与 CoreAudio Hog 物理独占整合于单一原生进程。全链路 C++ 自研算法，每一项声学指标均可独立复算与验证。</p>
+      <div class="hero__cta" data-reveal>
+        <a class="btn btn--primary btn--large" data-download href="https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg">
+          下载 macOS 版<span class="btn__meta" data-size>8.1 MB</span>
+        </a>
+        <a class="btn btn--star btn--large" href="https://github.com/BH2VOQ/RLPlayer-Mac" target="_blank" rel="noopener">
+          <svg class="icon icon--star" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+          <span>在 GitHub 点亮 Star</span>
+        </a>
+      </div>
+      <ul class="hero__specs" data-reveal>
+        <li>macOS 13.0+</li>
+        <li>Apple Silicon 原生 arm64</li>
+        <li>内置 arm64 FFmpeg · 开箱即用</li>
+        <li>GPL-3.0-or-later 开源</li>
+      </ul>
+
+      <dl class="hero__stats" data-reveal>
+        <div>
+          <dt>多相升频阻带抑制</dt>
+          <dd>−189.1 <span>dB</span></dd>
+        </div>
+        <div>
+          <dt>DirectSDM 逐位一致</dt>
+          <dd>1,058,400 <span>字节</span></dd>
+        </div>
+        <div>
+          <dt>OPRA 耳机校准曲线</dt>
+          <dd>6,230<span>+</span></dd>
+        </div>
+      </dl>
+    </div>
+
+    <div class="hero-stage wrap" data-shot-frame>
+      <div class="hero-shot__tabs" role="tablist" aria-label="实机界面视图切换" data-reveal>
+        <button class="hero-shot__tab is-active" type="button" role="tab" aria-selected="true" data-hero-src="assets/ui-library.webp" data-hero-caption="主界面与专辑资料库 · 574 张专辑目录指纹秒开与 96 kHz / 24-bit 播放底栏">
+          <span>主界面 · 专辑资料库</span>
+        </button>
+        <button class="hero-shot__tab" type="button" role="tab" aria-selected="false" data-hero-src="assets/ui-hero.webp" data-hero-caption="正在播放沉浸视图 · 96 kHz / 24-bit 无损解码与带时间轴滚动歌词">
+          <span>正在播放 · 时间轴歌词</span>
+        </button>
+        <button class="hero-shot__tab" type="button" role="tab" aria-selected="false" data-hero-src="assets/ui-dsp.webp" data-hero-caption="20 段 RBJ 双二阶参数均衡工作台 · float64 系数设计与 128 样本交叉淡入热更新">
+          <span>20 段 PEQ 工作台</span>
+        </button>
+        <button class="hero-shot__tab" type="button" role="tab" aria-selected="false" data-hero-src="assets/ui-works.webp" data-hero-caption="古典作品多演绎版本视图 · Discogs 指挥 / 乐团 / 年代 / 厂牌结构化比对">
+          <span>古典作品 · 演绎版本</span>
+        </button>
+      </div>
+      <figure class="hero-shot" data-hero-scene>
+        <div class="hero-shot__light" aria-hidden="true"></div>
+        <div class="hero-shot__window">
+          <img id="heroMainImg" src="assets/ui-library.webp" alt="RLPlayer for macOS 应用界面" loading="eager" decoding="async" data-shot>
+        </div>
+        <figcaption><span id="heroShotCaption">主界面与专辑资料库 · 574 张专辑目录指纹秒开与 96 kHz / 24-bit 播放底栏</span></figcaption>
+      </figure>
+    </div>
+
+    <div class="hero__scroll" aria-hidden="true"><span>向下浏览</span><span class="hero__scroll-line"></span></div>
+  </section>
+
+  <section class="metrics section" id="metrics">
+    <div class="wrap">
+      <header class="section-head" data-reveal>
+        <p class="eyebrow">Objective Benchmarks</p>
+        <h2>客观实测声学指标</h2>
+        <p class="section-lede">基于 Apple M4 实机与 132 项自动化测试套件测得，覆盖多相重采样阻带衰减、ΔΣ 调制带内信噪比、分块卷积数学精度与端到端位流一致性。</p>
+      </header>
+
+      <div class="metrics__grid">
+        <article class="metric metric--wide" data-reveal>
+          <p class="metric__num">−189.1<span class="metric__unit">dB</span></p>
+          <h3 class="metric__label">多相升频阻带抑制</h3>
+          <p class="metric__note">44.1k → 384k 实测。内置 52 款命名滤波器预设，通带纹波 0.0000 dB，最差谐波 −134.54 dBc。</p>
+        </article>
+
+        <article class="metric" data-reveal>
+          <p class="metric__num">113.5<span class="metric__unit">dB</span></p>
+          <h3 class="metric__label">EC-5 带内 SNR</h3>
+          <p class="metric__note">DSD256 实测。涵盖 Butterworth、7 阶 Chebyshev、EC 误差反馈与 AHM 多电平四族调制器。</p>
+        </article>
+
+        <article class="metric" data-reveal>
+          <p class="metric__num metric__num--compact">1,058,400<span class="metric__unit">字节</span></p>
+          <h3 class="metric__label">DirectSDM 端到端逐位一致</h3>
+          <p class="metric__note">同速率、无 DSP 介入时 1-bit 原始位流直通封装 DoP，百万字节逐位比对零偏差。</p>
+        </article>
+
+        <article class="metric" data-reveal>
+          <p class="metric__num metric__num--compact">≤ 6.1e−14</p>
+          <h3 class="metric__label">分块 FFT 卷积相对误差</h3>
+          <p class="metric__note">零延迟均匀分块 overlap-save 卷积对比直接卷积，达到双精度浮点数学精度极限。</p>
+        </article>
+
+        <article class="metric" data-reveal>
+          <p class="metric__num">20<span class="metric__unit">段</span></p>
+          <h3 class="metric__label">RBJ 双二阶参数均衡</h3>
+          <p class="metric__note">ISO 1/3 倍频程中心频率网格，±24 dB 量程。单段 +6 dB 在 44.1 / 48 / 96 / 192 kHz 实测 6.0000 dB。</p>
+        </article>
+
+        <article class="metric" data-reveal>
+          <p class="metric__num">6,230<span class="metric__unit">+</span></p>
+          <h3 class="metric__label">OPRA 耳机目标曲线</h3>
+          <p class="metric__note">完整内置 OPRA 开放声学数据库，按品牌与型号毫秒级检索，一键载入参数均衡器。</p>
+        </article>
+
+        <article class="metric" data-reveal>
+          <p class="metric__num" aria-label="19 项">19 <span class="metric__unit">项</span></p>
+          <h3 class="metric__label">单曲音质体检指标</h3>
+          <p class="metric__note">扫描 THD+N、本底噪声、动态范围、LRA、峰值因子、声道相关性与高频滚降截止点，识别有损转码文件。</p>
+        </article>
+
+        <article class="metric metric--wide metric--quiet" data-reveal>
+          <div>
+            <p class="metric__num metric__num--small">LNS15<span class="metric__unit"> / 5–15 阶心理声学噪声整形</span></p>
+            <h3 class="metric__label">高频段量化噪声整形与概率抖动</h3>
+            <p class="metric__note">提供 NS1 / NS4 / NS5 / NS9 / LNS15 五档噪声整形与 RPDF / TPDF / Gauss1 / Shaped 四种抖动；44.1k → 705.6k 带内信噪比收益达 +86.5 dB。</p>
+          </div>
+          <div class="metric__aside">
+            <p class="metric__aside-num">132</p>
+            <p class="metric__aside-label">项自动化回归测试<br>覆盖 DSP 精度、0 dBFS 满幅过载恢复与位流一致性</p>
+          </div>
+        </article>
+      </div>
+      <div class="metrics__more" data-reveal>
+        <div><span>DSD 原生抽取 THD+N</span><strong>99.37 dB</strong></div>
+        <div><span>AHM-8bit 带内 SNR</span><strong>131.6 dB</strong></div>
+        <div><span>升频最差谐波</span><strong>−134.54 dBc</strong></div>
+        <div><span>共享输出回环偏差</span><strong>0 LSB</strong></div>
+      </div>
+
+      <p class="metrics__foot" data-reveal>测试基准：Apple M4 · macOS · CTest 全量自动化门禁与离线信号分析器（<code>--analyze</code>）实测复核。</p>
+    </div>
+  </section>
+
+  <section class="chain section" id="signal">
+    <div class="wrap">
+      <header class="section-head section-head--left" data-reveal>
+        <p class="eyebrow">Signal Architecture</p>
+        <h2>四级全自研信号链</h2>
+        <p class="section-lede">从音频容器字节解析、DirectSDM 位流直通、双精度浮点 DSP 管线到 CoreAudio 物理独占与局域网无损投放，每一级状态与耗时均可实时透视。</p>
+      </header>
+
+      <div class="chain__layout">
+        <div class="chain__sticky">
+          <div class="chain-panel" data-reveal>
+            <div class="chain-panel__head">
+              <span class="mono">SIGNAL PATH TELEMETRY</span>
+              <span class="chain-panel__state" id="chainState">01 · 源解析</span>
+            </div>
+
+            <svg class="chain-svg" viewBox="0 0 440 500" role="img" aria-label="信号链架构图：原生位流经 DirectSDM 位流直通或 64-bit DSP 处理，最终输出到 CoreAudio、UPnP 与 AirPlay">
+              <defs>
+                <linearGradient id="edgeStroke" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#18181b" stop-opacity="0.65"/>
+                  <stop offset="1" stop-color="#d92d3e" stop-opacity="0.88"/>
+                </linearGradient>
+                <radialGradient id="pulseGlow">
+                  <stop offset="0" stop-color="#d92d3e" stop-opacity="0.42"/>
+                  <stop offset="1" stop-color="#d92d3e" stop-opacity="0"/>
+                </radialGradient>
+                <filter id="dotBlur" x="-200%" y="-200%" width="400%" height="400%">
+                  <feGaussianBlur stdDeviation="6"/>
+                </filter>
+              </defs>
+
+              <g class="chain-svg__grid" aria-hidden="true">
+                <line x1="0" y1="120" x2="440" y2="120"/>
+                <line x1="0" y1="240" x2="440" y2="240"/>
+                <line x1="0" y1="360" x2="440" y2="360"/>
+                <line x1="124" y1="0" x2="124" y2="500"/>
+                <line x1="316" y1="0" x2="316" y2="500"/>
+              </g>
+
+              <g class="chain-edge" data-node="route">
+                <path d="M220 84 C220 102 316 96 316 120 L316 148"/>
+                <path d="M220 84 C220 102 124 96 124 120 L124 148"/>
+                <path d="M124 206 L124 372 C124 384 180 388 220 396"/>
+                <path d="M316 330 L316 372 C316 384 260 388 220 396"/>
+              </g>
+
+              <g class="chain-node" data-node="source">
+                <rect x="80" y="20" width="280" height="64" rx="18"/>
+                <text class="chain-node__title" x="220" y="46" text-anchor="middle">原生音频流输入</text>
+                <text class="chain-node__sub" x="220" y="66" text-anchor="middle">DSF · DFF · FLAC · WAV · CUE · Subsonic / Emby</text>
+              </g>
+
+              <g class="chain-node" data-node="direct">
+                <rect x="48" y="148" width="152" height="58" rx="16"/>
+                <text class="chain-node__title" x="124" y="173" text-anchor="middle">DirectSDM</text>
+                <text class="chain-node__sub" x="124" y="191" text-anchor="middle">1-bit 逐位直通</text>
+              </g>
+
+              <text class="chain-lane" x="316" y="138" text-anchor="middle">双精度 DSP 处理管线</text>
+
+              <g class="chain-node chain-node--chip" data-node="dsp">
+                <rect x="240" y="148" width="152" height="38" rx="12"/>
+                <text class="chain-node__chip" x="316" y="172" text-anchor="middle">20 段 PEQ + OPRA</text>
+                <rect x="240" y="196" width="152" height="38" rx="12"/>
+                <text class="chain-node__chip" x="316" y="220" text-anchor="middle">零延迟 FFT 卷积</text>
+                <rect x="240" y="244" width="152" height="38" rx="12"/>
+                <text class="chain-node__chip" x="316" y="268" text-anchor="middle">多相 Sinc 升频</text>
+                <rect x="240" y="292" width="152" height="38" rx="12"/>
+                <text class="chain-node__chip" x="316" y="316" text-anchor="middle">噪声整形 / ΔΣ 调制</text>
+              </g>
+
+              <text class="chain-lane" x="124" y="250" text-anchor="middle">同速率 · 0 增益改动</text>
+              <text class="chain-lane" x="124" y="268" text-anchor="middle">绕过浮点转换</text>
+
+              <g class="chain-node" data-node="output">
+                <rect x="70" y="396" width="300" height="80" rx="18"/>
+                <text class="chain-node__title" x="220" y="424" text-anchor="middle">CoreAudio Hog · DoP</text>
+                <text class="chain-node__sub" x="220" y="444" text-anchor="middle">UPnP 流式升频 · AirPlay RAOP</text>
+                <text class="chain-node__sub chain-node__sub--dim" x="220" y="462" text-anchor="middle">六态位完美徽标 · 全链路信号透视</text>
+              </g>
+
+              <path id="chainPulsePath" d="M220 84 C220 102 316 96 316 120 L316 330 L316 372 C316 384 260 388 220 396" fill="none" stroke="none"/>
+              <circle id="chainPulseGlow" cx="220" cy="84" r="16" fill="url(#pulseGlow)" filter="url(#dotBlur)" opacity="0"/>
+              <circle id="chainPulse" cx="220" cy="84" r="4.5" fill="#d92d3e" opacity="0"/>
+            </svg>
+
+            <div class="chain-progress" aria-hidden="true"><span class="chain-progress__fill"></span></div>
+            <ul class="chain-legend">
+              <li><span class="legend-dot legend-dot--a"></span>位流直通</li>
+              <li><span class="legend-dot legend-dot--b"></span>DSP 处理链</li>
+              <li><span class="legend-dot legend-dot--c"></span>硬件与网络出口</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="chain__stages">
+          <article class="chain-stage" data-stage="0" data-stage-name="01 · 源解析">
+            <p class="chain-stage__index">01</p>
+            <h3>原生容器解析与高速曲库索引</h3>
+            <p>C++ 原生解析 <code>.dsf</code>（LSB-first 块交错）与 <code>.dff</code>（MSB-first 连续帧）1-bit 音频流；FLAC / WAV / MP3 / OGG 采用自研容器头直读解析器，标签扫描速度达外部 <code>ffprobe</code> 调用的 60× 至 250×。</p>
+            <ul class="ticks">
+              <li>CUE 整轨分轨：支持 UTF-8 / UTF-16 / GBK 编码识别与 1/75 秒 CD 帧级索引，分轨曲目可独立入队与持久化。</li>
+              <li>纳秒级目录指纹缓存：启动时比对目录树指纹，6,000 首 SMB 网络曲库未变动时 3.3 秒完成校验秒开。</li>
+              <li>单文件探测超时保护与 5 分钟退避隔离机制，保障大型 NAS 曲库流畅浏览。</li>
+            </ul>
+            <ul class="chips" aria-label="支持的输入格式">
+              <li>DSF</li><li>DFF</li><li>FLAC</li><li>WAV</li><li>CUE</li><li>Subsonic</li><li>Emby</li>
+            </ul>
+          </article>
+
+          <article class="chain-stage" data-stage="1" data-stage-name="02 · 直通路由">
+            <p class="chain-stage__index">02</p>
+            <h3>DirectSDM 1-bit 逐位直通</h3>
+            <p>当 DSD 音源与目标输出速率匹配、且未启用任何均衡、卷积或增益调节时，1-bit 原始位流不经浮点转换，直接封装为 DoP 位流输出，端到端实测 1,058,400 字节逐位一致。</p>
+            <ul class="ticks">
+              <li>严格直通门禁：一旦启用 PEQ、卷积、音量调节、等响度、ReplayGain 或声道微调，自动切入浮点 DSP 管线并同步更新状态徽标。</li>
+              <li>两级高速 DSD 抽取：采用 6 级无乘法 CIC 4× 预抽取 + 短 FIR + 解析补偿架构，DSD256 解码吞吐提速 2.30×。</li>
+              <li>同族整数倍 DSD64 ↔ DSD128 ↔ DSD256 纯 DSD 域速率转换，实时重算载波率与帧范围。</li>
+            </ul>
+            <div class="callout callout--inline">
+              <p><strong>六态 Bit-Perfect 徽标：</strong>底栏实时指示「直通 / PCM→PCM / PCM→DSD / DSD→DSD × 是否逐位保真」，点击即可展开全链路信号透视面板。</p>
+            </div>
+          </article>
+
+          <article class="chain-stage" data-stage="2" data-stage-name="03 · DSP 处理">
+            <p class="chain-stage__index">03</p>
+            <h3>双精度浮点 DSP 管线与 Metal 加速</h3>
+            <p>进入处理管线后，音频流依次通过响度与过采样峰值保护、20 段参数均衡、零延迟分块 FFT 卷积、多相有理数 Sinc 重采样及输出噪声整形 / ΔΣ 调制。</p>
+            <ul class="ticks">
+              <li>响度与防削波：支持 ReplayGain 2.0、等响度补偿、8 声道独立微调（0 dB 完全旁路）及 4× 过采样真峰值（ISP）扫描预衰减。</li>
+              <li>20 段 RBJ 双二阶参数均衡（<code>float64</code> 系数计算 + 128 样本交叉淡入热更新）与零延迟均匀分块 FFT 卷积（支持 Apple Metal GPU 加速）。</li>
+              <li>多相有理数 Sinc 升频：内置 52 款命名滤波器（Kaiser / Gaussian / Blackman-Harris 窗，线性 / 最小 / 混合相位），支持 1x 与 Nx 音源独立指定滤波器。</li>
+              <li>输出调制：PCM 出口提供 NS1–LNS15 噪声整形与四种概率抖动；DSD 出口提供四族高阶 ΔΣ 调制器（EC-5 在 DSD256 下带内 SNR 达 113.5 dB）。</li>
+            </ul>
+            <ul class="chips" aria-label="处理链模块">
+              <li>FP64 Resampler</li><li>20-Band RBJ PEQ</li><li>Partitioned FFT IR</li><li>Polyphase Sinc</li><li>LNS15 Shaper</li><li>EC-5 / AHM SDM</li>
+            </ul>
+          </article>
+
+          <article class="chain-stage" data-stage="3" data-stage-name="04 · 硬件与网络出口">
+            <p class="chain-stage__index">04</p>
+            <h3>CoreAudio 物理独占与多协议无损投放</h3>
+            <p>基于 macOS <code>AUHAL</code> 开启 Hog Mode 独占声卡并直接锁定硬件物理采样率与位深，彻底绕开系统混音器重采样；同时原生集成 UPnP 流式升频供源与应用内 AirPlay 直推。</p>
+            <ul class="ticks">
+              <li>硬件独占与热插拔守护：精确识别占用进程 PID（<code>DeviceBusy</code>），USB 声卡拔出或端点掉线时 2 秒内触发 <code>DEVICE_LOST</code> 安全停机。</li>
+              <li>相位连续 DoP 封装：24-bit 载波（<code>0x05 / 0xFA</code> 交替标记），跨分块、暂停恢复与曲目结尾自动填充合法相位接力的 DoP 静音帧。</li>
+              <li>UPnP / DLNA 投放：支持原文件直供与本机 52 款滤波器分块流式升频推送（含 4 GiB RIFF 边界预检与强制目标率模式）。</li>
+              <li>应用内 AirPlay (RAOP)：mDNS 自动发现接收器，内置 <code>AudioToolbox</code> ALAC（44.1 kHz / 16-bit）实时无损编码与 RTP 时钟同步。</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+
+      <figure class="shot shot--wide" data-shot-frame data-reveal>
+        <img src="assets/ui-dsp.webp" alt="RLPlayer for macOS 20 段参数均衡器实机界面" loading="lazy" decoding="async" data-shot>
+        <figcaption>20 段 RBJ 双二阶参数均衡工作台 · 96 kHz 实时频响曲线与自动前级防削波（RLPlayer <span data-version>v1.1.4</span> 实机界面）</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="now section" id="now">
+    <div class="wrap">
+      <header class="section-head" data-reveal>
+        <p class="eyebrow eyebrow--now"><span class="status-dot status-dot--now" aria-hidden="true"></span>Available in <span data-version>v1.1.4</span></p>
+        <h2>核心功能与声学工具集</h2>
+        <p class="section-lede">集母带级本地播放、多协议局域网无损投放、免驱动系统内录、耳机声学校准、音质鉴定与古典曲库管理于一体。</p>
+      </header>
+
+      <div class="bento">
+        <article class="card card--a" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">CoreAudio · Bit-Perfect</span>
+          </div>
+          <h3>AUHAL 物理独占与智能硬件探测</h3>
+          <p>通过 CoreAudio <code>AUHAL</code> 底层单元抢占 Hog Mode 并锁定硬件物理流格式（<code>kAudioStreamPropertyPhysicalFormat</code>），自动探测当前 DAC 支持的全部采样率与位深矩阵。</p>
+          <ul class="ticks">
+            <li>官方四档模式：一键切换「原音直通」「PCM 升频」「DSD 升频」与「PCM→DSD 实时调制」。</li>
+            <li>六态 Bit-Perfect 徽标：实时呈现直通与处理链路明细、滤波器抽头数、调制阶数及硬件缓冲状态。</li>
+            <li>设备占用诊断与 2 秒端点存活探针，杜绝热插拔爆音或意外回退系统扬声器。</li>
+          </ul>
+          <p class="card__foot mono">CoreAudio AUHAL · Hog Mode · Physical Format Lock</p>
+        </article>
+
+        <article class="card card--b" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">DSD · Native Pipeline</span>
+          </div>
+          <h3>DirectSDM 直通与两级高速抽取</h3>
+          <p>原生解析 DSF / DFF 容器，支持 DirectSDM 1-bit 逐位直通、同族整数倍 DSD64 ↔ 128 ↔ 256 纯 DSD 域变速，以及 FIR / IIR / CIC 三种高精度抽取器。</p>
+          <p class="card__stat"><span>1,058,400</span> 字节端到端逐位一致</p>
+          <div class="bitstream" aria-hidden="true"></div>
+          <ul class="ticks">
+            <li>6 级无乘法 CIC 4× 预抽取 + 短 FIR 补偿：DSD256 抽取吞吐提速 2.30×，THD+N 达 99.37 dB。</li>
+            <li>只读载波前置预检与全生命周期 DoP 相位接力静音帧填充，保护后端解码器锁相稳定。</li>
+          </ul>
+        </article>
+
+        <article class="card card--c" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">UPnP · AirPlay RAOP</span>
+          </div>
+          <h3>UPnP 流式升频投放与应用内 AirPlay</h3>
+          <p>SSDP 跨多网卡发现局域网数播渲染器（自动绕过代理虚拟网卡），支持原文件 HTTP Range 206 直供，或调用本机 52 款多相滤波器分块流式升频后推送高采样率 WAV。</p>
+          <svg class="topology" viewBox="0 0 340 116" aria-hidden="true" focusable="false">
+            <g class="topology__lines">
+              <path d="M96 58 C120 58 120 30 148 30 L212 30"/>
+              <path d="M96 58 C120 58 120 86 148 86 L212 86"/>
+            </g>
+            <g class="topology__node">
+              <rect x="16" y="38" width="80" height="40" rx="12"/>
+              <text x="56" y="62" text-anchor="middle">本机 DSP</text>
+            </g>
+            <g class="topology__node topology__node--accent">
+              <rect x="212" y="10" width="112" height="40" rx="12"/>
+              <text x="268" y="34" text-anchor="middle">UPnP 渲染器</text>
+            </g>
+            <g class="topology__node topology__node--accent">
+              <rect x="212" y="66" width="112" height="40" rx="12"/>
+              <text x="268" y="90" text-anchor="middle">AirPlay 接收器</text>
+            </g>
+            <circle class="topology__dot" cx="120" cy="58" r="3"/>
+          </svg>
+          <ul class="ticks">
+            <li>内置 4 GiB RIFF 边界预检、RenderingControl 硬件音量同步与「强制目标率」高阶开关。</li>
+            <li>应用内 AirPlay (RAOP) 直推：无需更改 macOS 系统声音输出，内置 ALAC 实时无损编码与 RTP 时钟同步。</li>
+          </ul>
+        </article>
+
+        <article class="card card--d" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">Capture · macOS 14.2+</span>
+          </div>
+          <h3>免驱动系统混音内录与物理输入采集</h3>
+          <p>基于 Apple <code>CATapDescription</code> 与 <code>AudioHardwareCreateProcessTap</code> 私有聚合设备机制，无需安装 BlackHole 等第三方虚拟声卡、无需申请屏幕录制权限，即可在后台无损抓取系统混音流。</p>
+          <ul class="ticks">
+            <li>AUHAL 物理输入采集：支持麦克风、专业声卡 Line-In 与数字输入接口枚举、实时电平监控、低延迟监听与无损 WAV 录音落盘。</li>
+            <li>后台内录同时保持本机扬声器与耳机正常发声，实测连续采集 10 分钟 0 缓冲溢出。</li>
+          </ul>
+          <div class="callout callout--inline">
+            <p><strong>零内核驱动侵入：</strong>完全基于 macOS 14.2+ 原生 CoreAudio Process Tap API 实现，即开即用。</p>
+          </div>
+        </article>
+
+        <article class="card card--e" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">Calibration · OPRA &amp; PEQ</span>
+          </div>
+          <h3>6,230+ 款 OPRA 耳机校准与 20 段 PEQ</h3>
+          <p>完整内置 Open Product Research Audio (OPRA) 数据库，支持按品牌与型号毫秒级检索，提供 Harman 等 11 类调音目标曲线原理说明与 SVG 频响预览，一键应用至 20 段参数均衡器。</p>
+          <ul class="ticks">
+            <li>SVG 曲线实时交互拖拽（默认纵向调增益，按住 <code>⌥ Option</code> 横向微调频率防手抖）与自动前级负增益防削波。</li>
+            <li>支持直接导入 REW / AutoEq 滤波配置文本，修改即时交叉淡入生效。</li>
+          </ul>
+        </article>
+
+        <article class="card card--f" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">Analysis · Lab Tools</span>
+          </div>
+          <h3>19 项单曲音质体检与多版本母带 PK</h3>
+          <p>一键扫描曲目的 THD+N、本底噪声、动态范围（DR）、响度范围（LRA）、峰值因子、左右声道相关性、单声道折叠损失及高频谱滚降截止点，精准识别有损升频的「假无损」曲目。</p>
+          <ul class="ticks">
+            <li>多版本母带客观比对：针对初版 CD、Remaster 与 Hi-Res 等不同发行版，提取 200 Hz RMS 包络并通过 FFT 互相关自动对齐公共音乐段落。</li>
+            <li>按动态范围、削波率、信噪比等 7 个维度量化评分，跨位深与跨采样率指标自动隔离展示。</li>
+          </ul>
+        </article>
+
+        <article class="card card--g" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">Classical · Metadata &amp; AI</span>
+          </div>
+          <h3>古典四层作品模型、Discogs 版本推荐与五源补全</h3>
+          <p>原生构建 <code>COMPOSER → Work（作品）→ Movement（乐章）→ Performance（演绎版本）</code> 四层古典实体模型，支持按作品名与作曲家实时检索 Discogs 全球录音版本（指挥 / 乐团 / 独奏 / 厂牌 / 年代）并按演绎智能去重。</p>
+          <ul class="ticks">
+            <li>五源自动元数据补全：聚合 QQ 音乐、网易云音乐、iTunes、lrclib、dizzylab，自动补全缺失标签、封面与带 <code>[mm:ss.xxx]</code> 时间轴的滚动歌词。</li>
+            <li>Roon 级多实体百科导览：整合 Wikipedia 权威词条与 Discogs 发行记录，在艺术家、专辑、单曲与古典作品页生成结构化导览（7 天持久缓存，支持 <code>/api/llm/models</code> 模型自动发现）。</li>
+            <li>八格式逐位校验写回：支持 FLAC / MP3 / OGG / Opus / M4A / WMA / WAV / WV 标签写回，内置畸形封面保护门与 remux 前后 PCM 音频流逐位一致性比对。</li>
+          </ul>
+          <figure class="card__shot" data-shot-frame>
+            <img src="assets/ui-works.webp" alt="RLPlayer for macOS 古典作品演绎版本推荐实机界面" loading="lazy" decoding="async" data-shot>
+            <figcaption>古典作品演绎版本视图 · 检索拉威尔《Boléro》的不同指挥、乐团、年代与厂牌发行记录（RLPlayer <span data-version>v1.1.4</span> 实机界面）</figcaption>
+          </figure>
+        </article>
+
+        <article class="card card--h" data-reveal>
+          <div class="card__head">
+            <span class="pill pill--now">已实现</span>
+            <span class="card__kicker">Native · Craftsmanship</span>
+          </div>
+          <h3>单进程零常驻端口架构与 Apple Silicon 硬件加速</h3>
+          <p>采用纯正 Cocoa <code>NSWindow</code> + <code>WKWebView</code> 单进程宿主，前后端通过进程内 <code>rlplayer://app/</code> 自定义 Scheme 直接内存通信，主进程不监听任何本地网络端口。</p>
+          <div class="card__facts">
+            <div><span class="card__fact-num">29×</span><span class="card__fact-label">Metal 升频加速<br>（44.1k → 352.8k）</span></div>
+            <div><span class="card__fact-num">8.3<small>ms</small></span><span class="card__fact-label">首屏 60 张封面<br>热缓存加载 (p50)</span></div>
+            <div><span class="card__fact-num">1,513</span><span class="card__fact-label">条专业声学术语<br>中英即时切换</span></div>
+          </div>
+          <ul class="ticks">
+            <li>内置 <code>librtagpu.dylib</code>：运行时编译 Metal Shading Language (MSL) 内核，加速多相 Sinc 升频与长脉冲响应 FFT 卷积。</li>
+            <li>内置 Subsonic 与 Emby 流媒体客户端，远端曲库与本地专辑共享统一网格视图、收藏与播放队列。</li>
+            <li>双风格 × 三主题工作台：支持深色 / 白色 / 浅蓝三套配色，以及 Apple Music 现代流媒体风与经典 Hi-Fi 专业工作台布局。</li>
+            <li>60fps 指针捕获 1:1 跟手进度条，音量支持 0.5 dB 标准步进与 <code>Shift</code> + 0.1 dB 母带级微调（双击归零）。</li>
+            <li>全链路结构化 JSONL 诊断包（自动隐私脱敏）与 GitHub Release SHA-256 自动校验热更新。</li>
+          </ul>
+          <ul class="chips" aria-label="原生平台架构特性">
+            <li>Cocoa NSWindow</li><li>WKURLSchemeHandler</li><li>Metal MSL</li><li>arm64 FFmpeg 8.1.2</li><li>Subsonic &amp; Emby</li><li>0.1 dB 精密音量</li>
+          </ul>
+          <p class="card__foot mono">Apple Silicon arm64 · Single-Process In-Memory IPC · Zero Open Ports</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="why section" id="stack">
+    <div class="wrap">
+      <header class="section-head section-head--left" data-reveal>
+        <p class="eyebrow">Engineering Stack</p>
+        <h2>底层技术栈与系统架构</h2>
+        <p class="section-lede">不依赖 Electron、Python 或外部后台服务进程。从 macOS 窗口宿主、数字信号处理算子到局域网推流协议，全部基于 C++17 与 Objective-C++ 原生构建。</p>
+      </header>
+
+      <div class="why__grid">
+        <article class="why__item" data-reveal>
+          <p class="why__index mono">01 · HOST &amp; RUNTIME</p>
+          <h3>Cocoa + WKWebView 单进程内存桥接</h3>
+          <p>宿主层（<code>tools/mac_host.mm</code>）使用原生 <code>AppKit</code> 与 <code>WebKit</code>，将核心引擎 <code>librlapp_core</code> 直接静态链接入同一进程。通过 <code>WKURLSchemeHandler</code> 拦截 <code>rlplayer://app/</code> 请求并在 GCD 并发队列分发二进制安全的 <code>NSData</code> 响应；配合 <code>WKScriptMessageHandlerWithReply</code> 传输通道与随包内置的自编译 <code>arm64</code> 精简版 <code>FFmpeg 8.1.2</code>（<code>ffmpeg / ffprobe</code>），无需用户额外安装命令行解码环境。</p>
+        </article>
+        <article class="why__item" data-reveal>
+          <p class="why__index mono">02 · DSP &amp; METAL KERNELS</p>
+          <h3>双精度浮点 DSP 与 Metal 运行时编译</h3>
+          <p>多相有理数 Sinc 重采样（<code>resampler.h</code>）、均匀分块 overlap-save FFT 卷积（<code>convolution.h</code>）、5–15 阶噪声整形（<code>dither.h</code>）与四族 ΔΣ 调制器（<code>modulator.h</code>）全程采用 64-bit <code>double</code> 双精度浮点运算；20 段 RBJ 双二阶 PEQ（<code>peq.h</code>）采用 <code>float64</code> 系数计算与 128 样本交叉淡入热更新；<code>librtagpu.dylib</code> 按需编译 Metal Shading Language 内核加速重负载运算。</p>
+        </article>
+        <article class="why__item" data-reveal>
+          <p class="why__index mono">03 · AUDIO I/O &amp; PROTOCOLS</p>
+          <h3>CoreAudio 底层接口与自研网络协议栈</h3>
+          <p>音频输出直接操作 <code>AudioUnit (AUHAL)</code>、<code>kAudioDevicePropertyHogMode</code> 与 <code>kAudioStreamPropertyPhysicalFormat</code>；系统回环基于 macOS 14.2+ <code>CATapDescription</code> 与 <code>AudioHardwareCreateProcessTap</code> 构建私有聚合设备；网络投放与资料中心基于 <code>libcurl</code>、<code>AudioToolbox</code>（实时 ALAC 编码）、原生 <code>SSDP</code>、<code>mDNS (_raop._tcp)</code> 及 <code>RTP</code> 协议栈实现。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="vision section" id="vision">
+    <div class="wrap">
+      <header class="section-head section-head--left" data-reveal>
+        <p class="eyebrow eyebrow--vision">Roadmap &amp; Research</p>
+        <h2>技术演进路线与未来愿景</h2>
+        <p class="section-lede">在现有自研信号链与 Apple Silicon 原生架构之上，持续向用户态 USB Audio 2.0 硬件直通、多声道房间声学测量、参考级 DSP 2.0 与采样级无缝播放演进。</p>
+      </header>
+
+      <div class="vision__banner" role="note" data-reveal>
+        <strong>Future Vision · 研发路线图</strong>
+        <span>涵盖近期迭代（v1.1.5 – v1.1.9）、中期突破（v1.2.0 – v1.3.0）与远期旗舰（v1.4.0+ 自研 UAC2 驱动栈）六大工程方向。</span>
+      </div>
+
+      <div class="vision__grid">
+        <article class="vcard vcard--wide vcard--usb" data-reveal>
+          <div class="vcard__top"><span class="pill pill--future">远期旗舰 · v1.4.0+</span><span class="vcard__tag">User-Space UAC2</span></div>
+          <h3>自研用户态 UAC2 USB 音频驱动栈 —— 真 Native DSD64–1024 直通与升频直出</h3>
+          <p>在应用进程内自研完整的 macOS 用户态 USB Audio Class 2.0 (UAC2) 协议栈：通过官方公开的 <code>IOUSBHost / IOKit</code> 接口直接独占接管 USB DAC 音频流接口，彻底绕开 CoreAudio 的 PCM 壁垒。<strong>无需安装内核扩展（No kext）、无需关闭 SIP（系统完整性保护）</strong>，停止播放或退出软件时平滑释放接口归还系统。</p>
+          <ul class="ticks">
+            <li>硬件异步时钟闭环：完整实现 USB 异步等时传输端点（Isochronous Pipe）与 Explicit / Implicit Feedback 显隐式反馈闭环，由外部 USB DAC 的高精度飞秒晶振主导数据拉取节奏。</li>
+            <li>通用 UAC2 描述符解析 + 设备特征库（Quirk Table）：自动解析 <code>CS_INTERFACE</code>、独立时钟域与 DSD AltSetting，兼容 XMOS、Thesycon、Comtrue (CT7601)、Amanero 等原生位打包（<code>DSD_U32_BE / LE / U16</code>）。</li>
+            <li>双模式 Native DSD 与超高清 PCM：同时支持 <strong>DirectSDM 原盘 1-bit 位流直通</strong>、<strong>SDM 高阶调制实时升频直出 Native DSD512 / DSD1024（45.1584 / 49.152 MHz）</strong> 以及 <strong>PCM 1411.2 / 1536 kHz</strong> 极高频传输。</li>
+          </ul>
+          <div class="native-bits" role="img" aria-label="DoP 与 Native DSD 带宽效率对比">
+            <div class="native-bits__row native-bits__row--dop"><span>DoP</span><div><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><b></b><b></b><b></b><b></b></div><em>16-bit DSD + 8-bit 标记（损耗 33% 带宽）</em></div>
+            <div class="native-bits__row native-bits__row--native"><span>Native</span><div><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><em>100% 原始 1-bit 位流全带宽直达 DAC</em></div>
+          </div>
+          <p class="vcard__why"><strong>突破 macOS 音频上限：</strong>消除 DoP 伪装封装带来的 33% USB 带宽浪费与采样率折半限制，在 PCM 上限 768 kHz 的旗舰解码器上完整解锁硬件原生 DSD512 / DSD1024 实力。</p>
+        </article>
+
+        <article class="vcard" data-reveal>
+          <div class="vcard__top"><span class="pill pill--future">中期突破 · v1.2.0</span><span class="vcard__tag">Room &amp; Live Rack</span></div>
+          <h3>系统全局实时 DSP 机架与 2.0–7.1.4 房间声学测量向导</h3>
+          <p>打通「Process Tap 系统内录 / 物理采集 → 64-bit 自研 DSP → 独占输出」实时闭环，让整台 Mac 的流媒体、视频伴音乃至外置黑胶唱放输入实时流经 20 段 PEQ、OPRA 耳机校准、房间 FIR 卷积与多相升频器。</p>
+          <ul class="ticks">
+            <li>七步交互式房间测量向导（底层 <code>room_correction</code> 与 <code>CoreAudioRoomTransport</code> 已就位）：Farina 对数扫频 → 测量麦同步采集 → 频域反卷积 → 心理声学平滑 → 自动生成每声道 32-bit Float 最小相位校正 FIR。</li>
+            <li>覆盖 <code>2.0 / 2.1 / 5.1 / 7.1 / 5.1.2 / 7.1.4</code> 六种扬声器布局（含 80 Hz LFE 低音管理），支持一键 A/B 盲听与按输出布局自动挂载。</li>
+          </ul>
+        </article>
+
+        <article class="vcard" data-reveal>
+          <div class="vcard__top"><span class="pill pill--future">中期突破 · v1.2.1–1.2.5</span><span class="vcard__tag">DSP Engine 2.0</span></div>
+          <h3>参考级 DSP 引擎 2.0：64-bit DSD 调制专线与 79+ 滤波器矩阵</h3>
+          <p>升级 DSD 管线出口架构：PEQ、卷积与多相升频后的 64-bit 双精度浮点平面数据不再经过中间 24-bit PCM 量化中转，直接送入 ΔΣ 调制器，并按插值后真实信号包络动态计算调制余量。</p>
+          <ul class="ticks">
+            <li>DSD 多级级联插值（Multi-Stage Cascaded Interpolation）：独立 Stage Plan 与小分块实时流式调制，让 DSD256 / DSD512 / DSD1024 实现秒级起播与低内存占用。</li>
+            <li>79+ 款命名滤波器全景矩阵（新增 <code>poly-sinc-ext2</code>、<code>poly-sinc-xtr</code>、<code>sinc-MGa / Lh</code>、<code>minringFIR-lp</code> 等 27 款高阶预设）与自适应抽头预算反解。</li>
+            <li>ARM64 NEON 与 Accelerate (<code>vDSP</code>) 深度向量化，新增运行期计算后端与浮点精度自证报告（CPU FP64 / Metal FP32）。</li>
+          </ul>
+        </article>
+
+        <article class="vcard" data-reveal>
+          <div class="vcard__top"><span class="pill pill--now">已发布 · v1.1.4</span><span class="vcard__tag">Track Lab</span></div>
+          <h3>单曲页三级实时分析、ITU 真峰值 dBTP 与第 8 维带宽鉴定</h3>
+          <p>在正在播放页内嵌 L0 / L1 / L2 三级折叠实时分析仪（支持按曲去重、并发受控与切歌立即取消），并引入独立 4× / 8× 过采样真峰值（True Peak dBTP）测定。</p>
+          <ul class="ticks">
+            <li>第 8 维「有效频谱带宽 / 有损转码鉴定」：结合长期平均功率谱密度（PSD）断崖特征，精准识别由 MP3 / AAC 升频伪装的假 Hi-Res 文件。</li>
+            <li>母带版本对比升级 11 点包络平滑 + 3 点抛物线峰值细化互相关对齐算法，实现亚毫秒级段落锁定。</li>
+          </ul>
+        </article>
+
+        <article class="vcard" data-reveal>
+          <div class="vcard__top"><span class="pill pill--future">近期迭代 · v1.1.5–1.1.8</span><span class="vcard__tag">AI &amp; Library</span></div>
+          <h3>SSE 流式 AI 导览、反幻觉检索与五重门禁安全封面内嵌</h3>
+          <p>升级 Server-Sent Events (SSE) 流式解析器，实时展示「权威百科抓取 → 发行版本核对 → 深度导览生成」阶段进度并以流式打字机效果呈现内容；引入专辑上下文（Album Context）与引用归属校验。</p>
+          <ul class="ticks">
+            <li>全库补图批处理工作台：支持多源并发抓取、逐源命中率统计、断点续跑与默认剪影占位图指纹拒收。</li>
+            <li>五重门禁安全封面内嵌（FLAC / MP3 <code>Front Cover, Type 3</code>）：临时文件构建 → PCM 音频流逐位比对与 MP3 Gapless Delay 边界校验 → 原文件备份 → 原子替换 → 异常无损回滚。</li>
+          </ul>
+        </article>
+
+        <article class="vcard" data-reveal>
+          <div class="vcard__top"><span class="pill pill--future">平台打磨 · v1.1.9 &amp; v1.4.0</span><span class="vcard__tag">Gapless &amp; macOS</span></div>
+          <h3>采样级 0 间隙无缝播放（Gapless）与 macOS 系统生态集成</h3>
+          <p>构建跨曲目后台预解码槽与 DSP 滤波器历史状态无缝桥接，让现场音乐会、歌剧与古典交响乐专辑在切歌时实现 0 采样点静音间隙。</p>
+          <ul class="ticks">
+            <li>DoP 跨曲目相位锁（<code>0x05 / 0xFA</code> 严格连续）与 10–20 ms 余弦平滑音量斜坡（0 dB 自动旁路），彻底消除切歌爆音与增益调节拉链声。</li>
+            <li>实时音频线程 QoS 调度与 macOS App Nap 后台防节流保护，锁屏或高负载编译期间音频流依旧稳定输出。</li>
+            <li>完整集成系统媒体键与控制中心（<code>MPNowPlayingInfoCenter / MPRemoteCommandCenter</code>）、多显示器窗口坐标记忆、封面缓存 LRU 容量管理及 Apple Developer ID 签名公证。</li>
+          </ul>
+          <ul class="chips" aria-label="无缝播放与平台特性">
+            <li>0 采样间隙</li><li>DoP 相位锁</li><li>余弦音量斜坡</li><li>Real-Time QoS</li><li>MPNowPlayingInfoCenter</li><li>Developer ID 公证</li>
+          </ul>
+        </article>
+
+        <article class="vcard vcard--roadmap" data-reveal>
+          <div class="vcard__top"><span class="pill pill--now">演进全景</span><span class="vcard__tag">Three-Horizon</span></div>
+          <h3>四阶段版本演进里程碑</h3>
+          <p>从已落地的自研 DSP 基座出发，按明确的技术依赖与工程门禁逐级推进。</p>
+          <ol class="horizon-list">
+            <li>
+              <div class="horizon-list__head"><strong>v1.1.0 – v1.1.4</strong><span class="horizon-badge horizon-badge--done">已发布</span></div>
+              <p>52 款多相 Sinc 升频、4 族 SDM、DirectSDM 直通、CoreAudio Hog 独占、UPnP 流式升频、应用内 AirPlay、6,230+ OPRA、古典四层模型与单曲页三级实时分析／dBTP 真峰值。</p>
+            </li>
+            <li>
+              <div class="horizon-list__head"><strong>v1.1.5 – v1.1.9</strong><span class="horizon-badge">近期迭代</span></div>
+              <p>SSE 流式 AI 导览、全库补图工作台、五重门禁封面内嵌与 macOS 平台 QoS 打磨。</p>
+            </li>
+            <li>
+              <div class="horizon-list__head"><strong>v1.2.0 – v1.3.0</strong><span class="horizon-badge">中期突破</span></div>
+              <p>2.0–7.1.4 房间声学测量向导、系统全局实时 DSP 机架、79+ 命名滤波器全景矩阵、64-bit Float DSD 调制专线与多级级联插值。</p>
+            </li>
+            <li>
+              <div class="horizon-list__head"><strong>v1.4.0+</strong><span class="horizon-badge">远期旗舰</span></div>
+              <p>自研用户态 UAC2 USB 异步驱动栈（真 Native DSD64–1024 直通与升频直出）及采样级 0 间隙无缝播放引擎。</p>
+            </li>
+          </ol>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="download section" id="download">
+    <div class="wrap">
+      <header class="section-head" data-reveal>
+        <p class="eyebrow eyebrow--now"><span class="status-dot status-dot--now" aria-hidden="true"></span>Download &amp; Open Source</p>
+        <h2>获取 RLPlayer for macOS</h2>
+        <p class="section-lede">原生 Apple Silicon (arm64) 独立安装包，内置全部解码与 Metal 计算组件，拖入 Applications 即可运行。</p>
+      </header>
+
+      <div class="download__panel" data-reveal>
+        <div class="download__orb" aria-hidden="true"><img src="assets/logo.png" width="112" height="112" alt=""></div>
+        <div class="download__main">
+          <div class="download__version">
+            <p class="download__version-num"><span data-version>v1.1.4</span><span class="pill pill--now">最新正式版</span></p>
+            <p class="download__meta">发布于 <span data-date>2026-11-08</span> · <span data-size>8.1 MB</span>（<span data-bytes>8,073,906</span> 字节）</p>
+            <p class="download__notes">macOS 13.0+ · Apple Silicon 原生 arm64。应用包内已完整内置自编译 <code>ffmpeg / ffprobe</code> 解码组件、<code>librtagpu.dylib</code>（Metal 内核）与离线诊断工具，无需单独配置外部依赖环境。</p>
+          </div>
+
+          <div class="download__cta-group">
+            <div class="download__cta-primary">
+              <a class="btn btn--primary btn--large" data-download href="https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg">
+                下载 RLPlayer <span data-version>v1.1.4</span> (.dmg)
+              </a>
+              <a class="btn btn--ghost btn--large" href="https://github.com/BH2VOQ/RLPlayer-Mac/releases" target="_blank" rel="noopener">
+                <span>Releases 更新日志</span>
+              </a>
+            </div>
+          </div>
+
+          <ul class="download__req">
+            <li><span>系统要求</span>macOS 13.0+</li>
+            <li><span>处理器架构</span>Apple Silicon 原生 arm64</li>
+            <li><span>内置依赖组件</span>内置 arm64 FFmpeg 8.1.2 · Metal 内核</li>
+            <li><span>开源许可</span>GPL-3.0-or-later</li>
+          </ul>
+        </div>
+
+        <div class="download__verify">
+          <div class="verify-block">
+            <div class="verify-block__head">
+              <span class="verify-block__label">SHA-256 校验值</span>
+              <button class="copy-btn" type="button" data-copy-target="shaValue" aria-label="复制 SHA-256 校验值">
+                <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5 2a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V2Zm2 0v9h5V2H7Z"/><path fill="currentColor" d="M2 5a2 2 0 0 1 2-2v2H3v9h5V9h2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V5Z"/></svg>
+                <span>复制</span>
+              </button>
+            </div>
+            <code class="code code--hash" id="shaValue" data-sha>34b9305bf597228c2181f7e1ca3fc29675c8a774b88e976442acc1f0c7568761</code>
+            <p class="verify-block__hint">终端核对命令：<code>shasum -a 256 RLPlayer-1.1.4-macOS-arm64.dmg</code></p>
+          </div>
+
+          <div class="verify-block">
+            <div class="verify-block__head">
+              <span class="verify-block__label">首次安装放行命令</span>
+              <button class="copy-btn" type="button" data-copy-target="xattrCommand" aria-label="复制 xattr 命令">
+                <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5 2a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V2Zm2 0v9h5V2H7Z"/><path fill="currentColor" d="M2 5a2 2 0 0 1 2-2v2H3v9h5V9h2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V5Z"/></svg>
+                <span>复制</span>
+              </button>
+            </div>
+            <code class="code" id="xattrCommand">xattr -cr /Applications/RLPlayer.app</code>
+            <p class="verify-block__hint">将 RLPlayer 拖入「应用程序」后，在终端执行一次即可清除隔离属性并正常打开。</p>
+          </div>
+
+          <div class="verify-links">
+            <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases" target="_blank" rel="noopener">Releases 历史版本</a>
+            <a href="https://github.com/BH2VOQ/RLPlayer-Mac/issues" target="_blank" rel="noopener">Issues 问题反馈</a>
+            <a href="https://github.com/BH2VOQ/RLPlayer-Mac/blob/main/LICENSE" target="_blank" rel="noopener">GPL-3.0-or-later 开源协议</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <section class="credits section" id="credits">
+    <div class="wrap">
+      <header class="section-head" data-reveal>
+        <p class="eyebrow">Credits &amp; Community</p>
+        <h2>开发团队与鸣谢</h2>
+        <p class="section-lede">感谢每一位参与 RLPlayer 研发、视觉设计、实机测试与社区共建的伙伴。</p>
+      </header>
+
+      <div class="credits__grid" data-reveal>
+        <article class="credit-card">
+          <span class="credit-card__role">项目开发者</span>
+          <div class="credit-card__list">
+            <div class="credit-card__person">
+              <strong class="credit-card__names">RainLain</strong>
+              <span class="credit-card__duty">Windows 版开发 · 上游库作者</span>
+            </div>
+            <div class="credit-card__person">
+              <strong class="credit-card__names">猫与小行星</strong>
+              <span class="credit-card__duty">macOS 版开发与原生架构</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="credit-card">
+          <span class="credit-card__role">协助开发者</span>
+          <strong class="credit-card__names">聆听风暴</strong>
+          <p class="credit-card__desc">功能研发协作、工程联调与模块改进</p>
+        </article>
+
+        <article class="credit-card">
+          <span class="credit-card__role">媒体与美术</span>
+          <strong class="credit-card__names">Gosed</strong>
+          <p class="credit-card__desc">品牌视觉识别、产品图标与媒体美术设计</p>
+        </article>
+
+        <article class="credit-card">
+          <span class="credit-card__role">测试鸣谢</span>
+          <strong class="credit-card__names"><span>Miyu</span> · <span>正在下载99%</span></strong>
+          <p class="credit-card__desc">多设备实机听音测试、边界场景排查与反馈</p>
+        </article>
+      </div>
+
+      <div class="community-bar" data-reveal>
+        <div class="community-bar__main">
+          <span class="pill pill--now">社区交流</span>
+          <div class="community-bar__text">
+            <h3>加入交流群</h3>
+            <p>讨论 DAC 硬件搭配、滤波器与调制器听感、OPRA 耳机校准及新版本特性建议。</p>
+          </div>
+        </div>
+        <div class="community-bar__action">
+          <div class="community-bar__qq">
+            <span class="community-bar__label">官方 QQ 群</span>
+            <code class="code" id="qqGroupNum">895816505</code>
+            <button class="copy-btn" type="button" data-copy-target="qqGroupNum" aria-label="复制 QQ 群号 895816505">
+              <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M5 2a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V2Zm2 0v9h5V2H7Z"/><path fill="currentColor" d="M2 5a2 2 0 0 1 2-2v2H3v9h5V9h2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V5Z"/></svg>
+              <span>复制群号</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer__top">
+      <div class="footer__brand">
+        <a class="brand" href="#top" aria-label="回到顶部">
+          <img class="brand__logo" src="assets/logo.png" width="26" height="26" alt="">
+          <span class="brand__name">RLPlayer</span>
+          <span class="brand__sub">for macOS</span>
+        </a>
+        <p>原生 macOS 母带级 Hi-Fi 音频播放与数字信号处理引擎。</p>
+      </div>
+      <nav class="footer__nav" aria-label="页脚导航">
+        <div>
+          <h3>产品</h3>
+          <a href="#metrics">实测指标</a>
+          <a href="#signal">四级信号链</a>
+          <a href="#now">核心功能</a>
+          <a href="#stack">技术栈</a>
+          <a href="#vision">演进路线</a>
+        </div>
+        <div>
+          <h3>开源社区</h3>
+          <a href="https://github.com/BH2VOQ/RLPlayer-Mac" target="_blank" rel="noopener">macOS 版源码 (Star)</a>
+          <a href="https://github.com/okhuoyanyan/RLPlayer2" target="_blank" rel="noopener">Windows 版源码</a>
+          <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases" target="_blank" rel="noopener">Releases 更新日志</a>
+          <a href="https://github.com/BH2VOQ/RLPlayer-Mac/issues" target="_blank" rel="noopener">Issues 问题反馈</a>
+          <a href="#credits">开发团队与鸣谢</a>
+          <a href="#credits">QQ 群 895816505</a>
+          <a href="https://github.com/BH2VOQ/RLPlayer-Mac/blob/main/LICENSE" target="_blank" rel="noopener">GPL-3.0-or-later</a>
+        </div>
+        <div>
+          <h3>下载安装</h3>
+          <a data-download href="https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.4/RLPlayer-1.1.4-macOS-arm64.dmg">下载 DMG · <span data-version>v1.1.4</span></a>
+          <a href="#download">SHA-256 校验与安装指南</a>
+        </div>
+      </nav>
+    </div>
+    <div class="footer__bottom">
+      <p>© <span id="year">2026</span> RLPlayer (<a href="https://github.com/BH2VOQ/RLPlayer-Mac" target="_blank" rel="noopener">BH2VOQ/RLPlayer-Mac</a>) · 基于 GPL-3.0-or-later 开源发布</p>
+      <p><a href="https://github.com/BH2VOQ/RLPlayer-Mac" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases" target="_blank" rel="noopener">Releases</a> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/issues" target="_blank" rel="noopener">Issues</a></p>
+    </div>
+  </div>
+</footer>
+
+<div class="sr-only" aria-live="polite" id="copyStatus"></div>
+<script src="app.js" defer></script>
+<script src="motion.js" defer></script>
+</body>
+</html>
