@@ -398,8 +398,28 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
         const std::string fam = cast_plan_detail::family_label(sourceRate);
         if (!rendererRates.empty()) {
             const std::string ratesStr = cast_plan_detail::join_rates(rendererRates);
-            d.noteZh = "渲染器未声明 " + fam + " 族的更高速率（声明：" + ratesStr + " Hz），已保持源直供";
-            d.noteEn = "Renderer does not declare higher " + fam + " family rates (declared: " + ratesStr + " Hz); serving at source rate.";
+            // 2026-11-21（用户实测）：设备**声明了** 48k 族的 192000，但因为把「投放升频上限」
+            // 放在 96000，cap 被压到 96k ⟹ 192k 不满足 r <= cap ⟹ 候选为空。
+            // 旧文案一律说「渲染器未声明 48 kHz 族的更高速率」，把责任推给设备 ——
+            // 用户因此一直以为是自己设备不支持。这是**归因错误**，比没提示更坏：
+            // 设备明明声明了 192000，真正该改的是上限。
+            // 现在：上限确实压掉了设备更高档时，如实说「被上限约束」，并点出设备的声明值。
+            // 注意不能依赖 d.capped：它的语义是「声明/请求值被压到本机上限之下」，
+            // 而这里的情形是「本机上限本来就低于设备声明」（ceiling=96k, 声明=192k），
+            // 此时 cap == ceiling ⟹ d.capped 为 false。必须直接比 cap 与 rendererMax。
+            if (rendererMax > cap && cap >= sourceRate) {
+                d.noteZh = "投放升频上限 " + std::to_string(cap) + " Hz 低于渲染器声明的 " +
+                           std::to_string(rendererMax) + " Hz（声明：" + ratesStr +
+                           " Hz），已保持源直供；把上限调到 " + std::to_string(rendererMax) +
+                           " Hz 即可升频";
+                d.noteEn = "Cast ceiling " + std::to_string(cap) + " Hz is below the renderer's declared " +
+                           std::to_string(rendererMax) + " Hz (declared: " + ratesStr +
+                           " Hz); serving at source rate. Raise the ceiling to " +
+                           std::to_string(rendererMax) + " Hz to upsample.";
+            } else {
+                d.noteZh = "渲染器未声明 " + fam + " 族的更高速率（声明：" + ratesStr + " Hz），已保持源直供";
+                d.noteEn = "Renderer does not declare higher " + fam + " family rates (declared: " + ratesStr + " Hz); serving at source rate.";
+            }
         } else {
             d.noteZh = "渲染器未声明速率且上限 " + std::to_string(cap) + " Hz 非源采样率 " + std::to_string(sourceRate) + " Hz 的整数倍（跨族），已保持源直供";
             d.noteEn = "Renderer rates undeclared and cap " + std::to_string(cap) + " Hz is not an integer multiple of source rate " + std::to_string(sourceRate) + " Hz (cross-family); serving at source rate.";

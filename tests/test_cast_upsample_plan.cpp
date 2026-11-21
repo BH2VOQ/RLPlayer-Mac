@@ -507,6 +507,35 @@ int main() {
            "Compatible: 渲染器未声明 → 仍按同族整数倍规则，跨族上限不启用", std::to_string(d7.targetRate));
     }
 
+    // 2026-11-21 用户实测回归：设备**声明了** 192000，但把投放升频上限放在 96000，
+    // 48k 源因此升不上去。旧文案一律说「渲染器未声明 48 kHz 族的更高速率」，
+    // 把责任推给设备 —— 用户照这句话去查设备，永远查不到原因（真凶是上限）。
+    {
+        auto a = decide_cast_target_rate(48000, "max", {192000}, 96000, true, false,
+                                         RateFamilyPolicy::Compatible);
+        ck(!a.upsample && a.targetRate == 48000,
+           "上限压过设备声明：48k 源 + 声明 192k + 上限 96k → 不升频",
+           std::to_string(a.targetRate));
+        ck(a.noteZh.find("上限") != std::string::npos,
+           "上限压过设备声明：note 必须归因到「上限」而不是「渲染器未声明」", a.noteZh);
+        ck(a.noteZh.find("192000") != std::string::npos,
+           "上限压过设备声明：note 要点出设备实际声明的 192000", a.noteZh);
+
+        // 对照组：上限放开到 192000 就必须真的升上去（证明上面那条不是恒真）。
+        auto b = decide_cast_target_rate(48000, "max", {192000}, 192000, true, false,
+                                         RateFamilyPolicy::Compatible);
+        ck(b.upsample && b.targetRate == 192000,
+           "上限放开到 192000 → 同一组输入立刻升频（对照，证明上一条非恒真）",
+           std::to_string(b.targetRate));
+
+        // 对照组的另一半：设备真的只声明到源率时，仍应保持旧的「未声明同族更高速率」文案，
+        // 不能被新分支误吞。
+        auto c = decide_cast_target_rate(48000, "max", {48000}, 192000, true, false,
+                                         RateFamilyPolicy::Compatible);
+        ck(!c.upsample && c.noteZh.find("渲染器未声明") != std::string::npos,
+           "设备只声明源率时仍走「渲染器未声明」文案（新分支不得误吞）", c.noteZh);
+    }
+
     std::printf("\n=======================================================\n");
     std::printf("test_cast_upsample_plan 结果: PASS=%d, FAIL=%d\n", g_pass, g_fail);
     std::printf("=======================================================\n");
