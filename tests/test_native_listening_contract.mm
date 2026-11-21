@@ -1685,7 +1685,10 @@ int main(int argc, char **argv) {
                    [capsRes[@"probeKey"] containsString:descURL] &&
                    [capsRes[@"probeBackend"] isEqualToString:@"upnp"] &&
                    [capsRes[@"probeUpnpDev"] isEqualToString:descURL] &&
-                   [capsRes[@"castCeiling"] unsignedIntegerValue] > 0 &&
+                   // 2026-11-21：castCeiling 默认改为 `auto`（内部哨兵 0 = 跟随渲染器声明）。
+                   // 所以这里不能再断言 > 0 —— 0 是**合法且默认**的取值。
+                   // 仍要保证该字段存在且是数值（不是 null/缺失），并单独验「显式设了上限时如实回显」。
+                   [capsRes[@"castCeiling"] respondsToSelector:@selector(unsignedIntegerValue)] &&
                    ![capsRes[@"refresh"] boolValue] &&
                    [capsRef[@"refresh"] boolValue] &&
                    [capsRef[@"probeKey"] isEqualToString:capsRes[@"probeKey"]] &&

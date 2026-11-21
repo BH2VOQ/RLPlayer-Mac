@@ -39,6 +39,15 @@ struct CastRateDecision {
     std::string noteEn;              // 同位英文（非空、不含中文）
 };
 
+/// 「两侧都没有信息」时的保守兜底上限（渲染器未声明速率 + 上限为 auto）。
+///
+/// 为什么是 192000 而不是本功能支持的最高档 768000：
+///   设备连自己支持什么速率都没声明，此时**不能**按能力上限硬推 —— 一个只支持 48k 的
+///   老渲染器会直接拒播或播成噪声。192 kHz 是这类设备里最常见的上限档，
+///   且与原默认值一致，属于「不给信息就按最保守的常用档」而不是「猜到顶」。
+///   用户若确知设备更强，显式选 384000/768000 即可（那是有依据的选择）。
+inline constexpr uint32_t kCastUndeclaredFallbackCap = 192000u;
+
 inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
                                                 const std::string& requested,
                                                 const std::vector<uint32_t>& rendererRates,
@@ -185,7 +194,10 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
     if (lowerReq == "max") {
         if (rendererRates.empty()) {
             d.undeclared = true;
-            cap = ceiling;
+            // ceiling==0（auto）且渲染器没声明任何速率 ⟹ 没有设备能力可跟随。
+            // 此时不能把 cap 算成 0（那会让下一步判成 no-down「上限低于源率」，
+            // 是一句彻底错误的解释）。退回本机绝对上限，走「未声明按本机策略」这条既有路径。
+            cap = (ceiling == 0) ? kCastUndeclaredFallbackCap : ceiling;
         } else {
             cap = cast_plan_detail::min_non_zero(ceiling, rendererMax);
         }
@@ -209,7 +221,10 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
         if (rendererRates.empty()) {
             d.undeclared = true;
         }
-        cap = cast_plan_detail::min_non_zero(reqNum, ceiling, rendererMax);
+        // ceiling==0（auto）时不能让 0 参与 min（min_non_zero 忽略 0，这里保持同一语义）：
+        cap = cast_plan_detail::min_non_zero(reqNum,
+                 ceiling == 0 ? (rendererMax > 0 ? rendererMax : kCastUndeclaredFallbackCap) : ceiling,
+                 rendererMax);
         if (cap < reqNum) {
             d.capped = true;
         }
@@ -223,13 +238,19 @@ inline CastRateDecision decide_cast_target_rate(uint32_t sourceRate,
         const bool isMaxReq = (lowerReq == "max");
         // 强制只受"本机上限"约束：既然明确忽略渲染器声明，就不能再拿声明去当上限，
         // 否则"强制"会退化成"看声明脸色"。上限没设就明确拒绝，不猜一个目标出来。
-        const uint32_t fcap = ceiling;
+        // 2026-11-21：ceiling==0 现在是 `auto`（跟随设备声明）的哨兵值，不是"没设置"。
+        // 「强制」要忽略**渲染器声明**来决定能不能收，但仍需要一个数值天花板：
+        //   · 声明了速率 → 用声明最高率（强制只是不要求目标必须被逐条列出，不是无视物理上限）
+        //   · 完全未声明 → 用 768000 这个本机绝对上限（本功能支持的最高档），
+        //     否则强制模式在 auto 下永远无法生效 —— 那与"强制"这个开关的语义矛盾。
+        // 强制模式在「未声明 + auto」下仍允许推到本机最高档：那是用户**显式**要求
+        // 无视声明的场景，note 里也写明"未经设备验证、可能被拒播"，风险已告知。
+        const uint32_t forcedCapFallback = 768000;
+        uint32_t fcap = ceiling;
         if (fcap == 0) {
-            d.reason = "no-same-family";
-            d.noteZh = "已启用强制目标率，但没有设置投放升频上限，无法确定目标，按源直供";
-            d.noteEn = "Forced target rate is on, but no cast upsampling ceiling is set; "
-                       "cannot determine a target, serving at source rate.";
-            return d;
+            uint32_t declMax = 0;
+            for (uint32_t r : rendererRates) if (r > declMax) declMax = r;
+            fcap = declMax > 0 ? declMax : forcedCapFallback;
         }
         uint32_t best = 0;
         bool cappedHere = false;

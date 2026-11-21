@@ -3075,13 +3075,26 @@ static CastPlaybackUpsampleDecision current_cast_upsample_from_conf() {
     return d;
 }
 
+/// 投放升频上限（用户设置的「本机天花板」）。
+///
+/// 2026-11-21（用户实测）：这个值原本是一个**与设备无关的固定数**。
+/// 用户设备声明 192k、源 48k，但上限停在 96000，于是 cap=min(96000,192000)=96000、
+/// 设备声明的 192k 被 `r <= cap` 过滤掉 ⟹ 明明能升频却一直按源直供。
+/// 用户的原话是「那个数值不应该根据 UPnP 的源自动变动吗」—— 对，设备声明本来就该是
+/// 能力上限的第一来源，不该让一个手填的固定数把它压住。
+///
+/// 现在新增 `auto`（默认值）：表示「不设额外天花板，按渲染器声明与本机策略取」。
+/// 返回 0 就是 auto 的哨兵值 —— cast_upsample_plan 里 `min_non_zero` 把 0 当作
+/// 「该侧没有约束」，于是 cap 直接等于渲染器声明最高率，正是想要的行为。
+/// 显式选了具体档位（96k/192k/384k/768k）仍按用户意愿当硬天花板，行为不变。
 static uint32_t get_cast_upsample_ceiling() {
-    const std::string c = conf_get("cast_upsample_ceiling", "192000");
+    const std::string c = conf_get("cast_upsample_ceiling", "auto");
+    if (c == "auto" || c.empty()) return 0;      // 0 = 跟随设备声明，不额外设限
     if (c == "96000") return 96000;
     if (c == "192000") return 192000;
     if (c == "384000") return 384000;
     if (c == "768000") return 768000;
-    return 192000;
+    return 0;                                    // 无法识别的历史值 → 回到跟随设备，不猜
 }
 
 // 把一条曲目交给投放会话。切歌 / 重播都走这里：先停旧会话再起新会话

@@ -313,8 +313,26 @@ int main() {
         auto declared = decide_cast_target_rate(96000, "192000", {44100, 192000}, 192000, true, true);
         ck(declared.upsample && declared.targetRate == 192000 && !declared.forced, "强制开但声明里本来就有：forced=false（不冒充强制）", declared.reason);
 
+        // 2026-11-21 语义变更：ceiling==0 不再是「没设置上限」，而是 `auto`
+        // （跟随渲染器声明）。旧断言要求「0 + 强制 ⟹ 拒绝」，那会让强制开关在默认设置下
+        // 永远无效 —— 与「强制」这个开关的语义自相矛盾。
+        // 新语义：强制 + auto 时，若无声明则按本机最高档兜底，并在 note 里明说未经设备验证。
+        // 注意这一条的源是 96000、声明只有 44100 ⟹ 设备上限**低于源率**，
+        // 「只升不降」必然拒绝（no-down）。这与 auto 无关，是既有且正确的行为。
         auto nocap = decide_cast_target_rate(96000, "max", {44100}, 0, true, true);
-        ck(!nocap.upsample && nocap.reason == "no-same-family", "强制开+无上限：无法确定目标，按源直供", nocap.reason);
+        ck(!nocap.upsample && nocap.reason == "no-down",
+           "强制开+auto+声明低于源率：仍走 no-down（只升不降，不被 auto/强制绕过）", nocap.noteZh);
+
+        // 真正该验的「强制 + auto 不被误拒」：源 48k、声明 96k。
+        auto forcedOk = decide_cast_target_rate(48000, "max", {96000}, 0, true, true);
+        ck(forcedOk.upsample && forcedOk.targetRate == 96000,
+           "强制开+auto+声明96k：按声明最高率升频（auto 不再误判为「没设上限」）",
+           std::to_string(forcedOk.targetRate));
+
+        // 对照：完全未声明时，强制 + auto 按本机最高档兜底（且 note 说明风险）。
+        auto nocap2 = decide_cast_target_rate(48000, "max", {}, 0, true, true);
+        ck(nocap2.upsample && nocap2.targetRate == 768000,
+           "强制开+auto+未声明：按本机最高档 768000 兜底", std::to_string(nocap2.targetRate));
 
         auto offsw = decide_cast_target_rate(96000, "max", {44100}, 192000, /*apply=*/false, /*force=*/true);
         ck(!offsw.upsample && offsw.reason == "off", "强制开但总开关关：仍然直供（强制不能绕过总开关）", offsw.reason);

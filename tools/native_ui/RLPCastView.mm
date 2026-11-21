@@ -154,8 +154,18 @@
 
     self.upCeilPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.upCeilPopup.identifier = @"cast_ceil";
-    for (NSString *v in @[ @"96000", @"192000", @"384000", @"768000" ])
+    // 第一项 `auto` = 不设额外天花板，直接跟随 UPnP 渲染器声明的最高速率。
+    // 2026-11-21（用户原话：「那个数值不应该根据 UPnP 的源自动变动吗」）：
+    // 旧版只有四个写死的绝对档位（默认 96000/192000），设备明明声明到 192k，
+    // 手填的上限却可能把它压住，导致"能升却不升"。现在默认 auto。
+    // 选具体档位时仍当硬天花板（用户显式意愿优先）。
+    [self.upCeilPopup removeAllItems];
+    [self.upCeilPopup addItemWithTitle:RLPTr(@"自动（跟随设备）")];
+    [[self.upCeilPopup lastItem] setRepresentedObject:@"auto"];
+    for (NSString *v in @[ @"96000", @"192000", @"384000", @"768000" ]) {
         [self.upCeilPopup addItemWithTitle:v];
+        [[self.upCeilPopup lastItem] setRepresentedObject:v];
+    }
     self.upCeilPopup.target = self;
     self.upCeilPopup.action = @selector(onCastCeiling:);
     [[self.upCeilPopup.widthAnchor constraintEqualToConstant:160] setActive:YES];
@@ -321,9 +331,13 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     }];
 }
 - (void)onCastCeiling:(NSPopUpButton *)s {
+    // 提交的是 representedObject（auto / 96000 / …），不是显示文案：
+    // 「自动（跟随设备）」这四个字写进 conf 会被后端当成无法识别的值。
+    NSString *v = [s.selectedItem.representedObject isKindOfClass:[NSString class]]
+        ? (NSString *)s.selectedItem.representedObject
+        : (s.titleOfSelectedItem ?: @"auto");
     [RLPCoreClient.shared postJSON:@"/api/settings"
-                              body:[NSString stringWithFormat:@"cast_upsample_ceiling=%@",
-                                    s.titleOfSelectedItem ?: @"192000"]
+                              body:[NSString stringWithFormat:@"cast_upsample_ceiling=%@", v]
                         completion:nil];
 }
 - (void)onCastForce:(NSSwitch *)s {
@@ -422,10 +436,15 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
 
         NSString *ceilVal = [kv[@"cast_upsample_ceiling"] isKindOfClass:[NSString class]]
             ? kv[@"cast_upsample_ceiling"]
-            : ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(stringValue)] ? [kv[@"cast_upsample_ceiling"] stringValue] : @"192000");
-        if (!ceilVal.length) ceilVal = @"192000";
-        if ([self_.upCeilPopup itemWithTitle:ceilVal]) [self_.upCeilPopup selectItemWithTitle:ceilVal];
-        else [self_.upCeilPopup selectItemWithTitle:@"192000"];
+            : ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(stringValue)] ? [kv[@"cast_upsample_ceiling"] stringValue] : @"auto");
+        if (!ceilVal.length || [ceilVal isEqualToString:@"0"]) ceilVal = @"auto";
+        // 按 representedObject 选，不是按显示文案（auto 的文案是可翻译的）。
+        NSInteger wantIdx = 0;
+        for (NSInteger i = 0; i < (NSInteger)self_.upCeilPopup.numberOfItems; ++i) {
+            id ro = [self_.upCeilPopup itemAtIndex:i].representedObject;
+            if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:ceilVal]) { wantIdx = i; break; }
+        }
+        [self_.upCeilPopup selectItemAtIndex:wantIdx];
         NSString *force = [kv[@"cast_upsample_force"] respondsToSelector:@selector(description)] ? [kv[@"cast_upsample_force"] description] : @"0";
         self_.upForceSwitch.state = [force isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
         NSString *upnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
