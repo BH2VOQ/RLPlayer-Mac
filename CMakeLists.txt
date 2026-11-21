@@ -796,6 +796,7 @@ if(APPLE)
   set_tests_properties(native_settings_cards PROPERTIES TIMEOUT 300)
 
 
+
   # 2026-11-21（用户实测）：「切换设置页的时候会先露出上面的空白页面，然后正常设置页才会跳回去」。
   # 这条判据量的是**首帧**：不 pump runloop，只同步 layout 一次，断言每个页签
   # ① 可见区已经在内容顶部（不靠下一轮 runloop 的 syncScrollInsets 补救）；
@@ -835,6 +836,7 @@ if(APPLE)
     "-framework SystemConfiguration" "-framework Security")
   add_test(NAME native_artist_profile COMMAND test_native_artist_profile)
   set_tests_properties(native_artist_profile PROPERTIES TIMEOUT 180)
+
 
 
 

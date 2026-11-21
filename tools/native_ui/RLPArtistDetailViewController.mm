@@ -349,6 +349,15 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     // 宽窗口因此自然变成 3–4 列，短字段不再拖出一大片空白。
     NSInteger cols = (NSInteger)floor((w + colGap) / (kArtistFieldMinW + colGap));
     cols = MAX(1, MIN(cols, 6));                 // 上限 6 列，避免超宽屏把字段挤成一条缝
+    // 列数不得超过**实际要显示的字段数**：只有 2 个字段时按 6 列排，
+    // 内容会全挤在左边、右边整片空着 —— 用户 2026-11-21 截图里
+    // 「风格 / 代表作品」两项之间空出巨大间隔就是这个。
+    // （web 的 auto-fill 有同样的收缩行为：空轨道不占列宽。）
+    {
+        NSInteger visible = 0;
+        for (NSUInteger i = 0; i < _items.count; ++i) if (!_items[i].hidden) ++visible;
+        if (visible > 0) cols = MIN(cols, MAX(1, visible));
+    }
     _columnCount = cols;
     const CGFloat colW = MAX(1.0, (w - colGap * (CGFloat)(cols - 1)) / (CGFloat)MAX(1, cols));
 
