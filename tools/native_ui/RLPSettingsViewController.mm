@@ -2862,9 +2862,18 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     // 旧实现直接摆 `global` / `cn`，用户在设置页看到的是技术标识（截图实测）。
     // 读回与提交都按**索引**（read_update_channel_value + indexOfSelectedItem），
     // 所以只换显示标题不会影响落盘值。
+    // 显示可读文案，但**把内部 key 挂在 representedObject 上**：
+    // 这样界面不再暴露 `global` / `cn`，而程序侧（判据、回读、提交）仍拿到稳定值，
+    // 不依赖"标题恰好等于 key"这种脆弱假设。
     self.updChannelPopup = [self popupForKey:@"sp_updchannel"
                                        items:@[ RLPTr(@"全球（GitHub）"), RLPTr(@"中国大陆（国内后台）") ]
                                       action:@selector(onUpdateChannel:)];
+    {
+        NSArray<NSString *> *keys = @[ @"global", @"cn" ];
+        for (NSInteger i = 0; i < (NSInteger)keys.count && i < self.updChannelPopup.numberOfItems; ++i) {
+            self.updChannelPopup.itemArray[i].representedObject = keys[i];
+        }
+    }
     [stack addArrangedSubview:RLPSRow(RLPTr(@"更新通道"), self.updChannelPopup,
         RLPTr(@"全球 = GitHub 通道；中国大陆 = 国内后台通道"), t)];
 
