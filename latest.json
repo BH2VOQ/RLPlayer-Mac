@@ -1,8 +1,8 @@
 {
-  "version": "1.1.6",
-  "notes": "Added an update channel switch in Settings > Diagnostics: Global keeps the GitHub path unchanged, China mainland fetches the signed manifest from the domestic backend and verifies its PS256 signature before installing the full DMG. Fixed album names that stayed as question marks when the tail kept ASCII letters (e.g. DISC 1) while track titles were already correct; the library index is bumped to v6 and re-reads tags once without touching your folder structure. Fixed the new-version badge doing nothing on a fresh launch until the Settings page had been opened once. · 设置 → 诊断 新增更新通道切换：全球保持原有 GitHub 路径不变，中国大陆从国内后台拉取签名清单并验证 PS256 签名后安装完整 DMG。修复专辑名尾部保留 ASCII 字母（如 DISC 1）时仍显示问号、而曲目名已正常的问题，索引升级到 v6 会重读一次标签且不改动目录结构。修复刚启动时「发现新版本」徽标点击无反应（原先要打开过一次设置页才绑上事件）。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v1.1.6/RLPlayer-1.1.6-macOS-arm64.dmg",
-  "sha256": "13d212335abcc435c801d0bd8a35ff63b3a34367862151d90fc7f7781d917e7f",
-  "size": 8123797,
-  "published_at": "2026-11-11T01:25:00Z"
+  "version": "2.0.14-beta1",
+  "notes": "Fixed window-close stalls while playing by hiding the window immediately, closing the core gate before queue drain, stopping page polling, SIGKILLing active FFmpeg decode pipes, making metadata/artwork throttles interruptible, and bounding shutdown waits to 2.5s; added NEON SIMD resampling, persistent parallel DSP thread pool, UPnP renderer capability alignment, and AppKit UI refinements. · 修复播放中点击关闭会卡住的问题：关窗即刻隐藏并提前关闸请求核心停机、停止各页轮询、立即终止解码管道并中断元数据/封面限流等待，同时收紧收尾等待上限至 2.5 秒；同步包含 NEON SIMD 重采样、常驻多核 DSP 线程池、UPnP 渲染器能力适配及原生界面细节修复。",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v2.0.14-beta1/RLPlayer-2.0.14-beta1-macOS-arm64.dmg",
+  "sha256": "a864db5d96cb1303f6aea7988a90a2eed0e8e168d67920d2a4812a5ec5b3c4af",
+  "size": 10224663,
+  "published_at": "2026-11-24T11:18:00Z"
 }
