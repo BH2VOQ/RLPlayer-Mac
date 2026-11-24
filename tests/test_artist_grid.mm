@@ -61,9 +61,44 @@ int main() {
                [NSString stringWithFormat:@"h=%.1f", fl.itemSize.height]);
             CK(fl.itemSize.width >= 150,
                "A1d 卡片宽度 ≥150pt", [NSString stringWithFormat:@"w=%.1f", fl.itemSize.width]);
+            CK(fl.itemSize.height >= fl.itemSize.width + 44.0,
+               "A1f 卡片文字区留白 ≥44pt（姓名+专辑数不贴底裁切）",
+               [NSString stringWithFormat:@"w=%.1f h=%.1f", fl.itemSize.width, fl.itemSize.height]);
             CK(fl.minimumInteritemSpacing >= 12,
                "A1e 卡间距 ≥12pt（留白呼吸）",
                [NSString stringWithFormat:@"gap=%.1f", fl.minimumInteritemSpacing]);
+        }
+        CK(![av usesPageHeaderSpacing] &&
+           av.titleLabel.hidden &&
+           [[av valueForKey:@"artistsTitleLabel"] isHidden] &&
+           [[av valueForKey:@"searchField"] isHidden],
+           "A1g 艺术家页复用主窗口顶栏，页内不再重复绘制标题与搜索框", @"");
+
+        if (cv && [cv.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]) {
+            NSCollectionViewFlowLayout *fl = (NSCollectionViewFlowLayout *)cv.collectionViewLayout;
+            NSScrollView *sv = cv.enclosingScrollView;
+            BOOL widthSynced = YES;
+            NSMutableString *widthDetail = [NSMutableString string];
+            const CGFloat widths[] = {1180.0, 680.0, 1600.0};
+            for (size_t wi = 0; wi < 3; ++wi) {
+                const CGFloat testW = widths[wi];
+                av.view.frame = NSMakeRect(0, 0, testW, 760);
+                [av.view layoutSubtreeIfNeeded];
+                const CGFloat clipW = sv.contentView ? NSWidth(sv.contentView.bounds) : testW;
+                if (fabs(NSWidth(cv.frame) - clipW) > 2.0) {
+                    widthSynced = NO;
+                    [widthDetail appendFormat:@"w=%.0f cv=%.1f clip=%.1f ", testW, NSWidth(cv.frame), clipW];
+                }
+            }
+            CK(widthSynced, "A1h 艺术家网格宽随窗口缩放紧贴可视区（不留右侧空槽）", widthDetail);
+
+            av.view.frame = NSMakeRect(0, 0, 160, 760);
+            [av.view layoutSubtreeIfNeeded];
+            CK(fl.itemSize.width >= 80.0 && fl.itemSize.width <= 160.0 && fl.itemSize.height >= fl.itemSize.width + 44.0,
+               "A1i 极窄宿主下艺术家网格回落单列且不横向溢出",
+               [NSString stringWithFormat:@"item=%.1fx%.1f", fl.itemSize.width, fl.itemSize.height]);
+            av.view.frame = NSMakeRect(0, 0, 1180, 760);
+            [av.view layoutSubtreeIfNeeded];
         }
 
         // ---- A2 专辑曲目表：右侧固定列不得被挤出可视区 ----

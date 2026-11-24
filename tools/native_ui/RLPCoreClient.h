@@ -31,6 +31,13 @@ typedef void (^RLPDataCompletion)(NSData * _Nullable data);
 /// 主线程调用一次：初始化曲库/配置/播放核心（不监听端口、不开浏览器）。
 - (BOOL)startEmbedded;
 
+/// 窗口开始关闭时立即关闸并触发 C++ 核心非阻塞退出标志，不等待后台队列排空。
+- (void)prepareForShutdown;
+
+/// 有界等待快队列（_ioQueue / _writeQueue）排空后停掉 C++ 核心；
+/// timeoutMs <= 0 时无限等待（同 -shutdown），超时未排空返回 NO。
+- (BOOL)shutdownWithTimeoutMs:(int)timeoutMs;
+
 /// 主线程调用：协作式收尾（先 request_shutdown 再 stop_embedded）。幂等。
 - (void)shutdown;
 

@@ -5,7 +5,7 @@
 // 本文件是 RLPlayer 的一部分，以 GNU 通用公共许可证第 3 版（或更新版本）发布。
 // 完整条款见仓库根目录的 LICENSE 文件。
 //
-// fft.h — 紧凑 radix-2 复数 FFT（用于客观测量与后续分块卷积的基础）
+// fft.h — 紧凑 radix-2 复数 FFT（macOS 启用 Apple Accelerate vDSP 64-bit double 加速）
 #pragma once
 #include "fp_strict.h"   // 261030-01 审计：DSP 路径严格 IEEE（输出进入音频样本）
 #include "kaiser.h"          // 提供 kPi
@@ -15,10 +15,39 @@
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
+#if defined(__APPLE__) && !defined(RL_NO_ACCELERATE)
+#include <Accelerate/Accelerate.h>
+#include <array>
+#include <mutex>
+#endif
 
 namespace rta::dsp {
 
 using cplx = std::complex<double>;
+
+#if defined(__APPLE__) && !defined(RL_NO_ACCELERATE)
+namespace detail {
+
+// Thread-safe immutable FFTSetupD cache per log2n (never destroyed while in use).
+inline FFTSetupD vdsp_fft_setup(vDSP_Length log2n) {
+    static std::mutex mtx;
+    static std::array<FFTSetupD, 31> setups{};
+    if (log2n >= setups.size()) return nullptr;
+    std::lock_guard<std::mutex> lk(mtx);
+    if (!setups[log2n]) {
+        setups[log2n] = vDSP_create_fftsetupD(log2n, kFFTRadix2);
+    }
+    return setups[log2n];
+}
+
+inline vDSP_Length vdsp_log2_exact(size_t n) {
+    vDSP_Length l = 0;
+    while ((size_t(1) << l) < n) ++l;
+    return l;
+}
+
+} // namespace detail
+#endif
 
 // 原地基-2 FFT，n 必须是 2 的幂
 inline void fft(std::vector<cplx>& a, bool inverse = false) {
@@ -26,6 +55,32 @@ inline void fft(std::vector<cplx>& a, bool inverse = false) {
     const size_t n = a.size();
     if (n < 2) return;
     if (n & (n - 1)) throw std::invalid_argument("FFT length must be a power of two");
+
+#if defined(__APPLE__) && !defined(RL_NO_ACCELERATE)
+    if (n >= 8) {
+        const vDSP_Length log2n = detail::vdsp_log2_exact(n);
+        if (FFTSetupD setup = detail::vdsp_fft_setup(log2n)) {
+            static thread_local std::vector<double> cachedRe, cachedIm;
+            std::vector<double> localRe, localIm;
+            auto& re = (n <= 65536) ? cachedRe : localRe;
+            auto& im = (n <= 65536) ? cachedIm : localIm;
+            if (re.size() != n) re.resize(n);
+            if (im.size() != n) im.resize(n);
+            DSPDoubleSplitComplex split{re.data(), im.data()};
+            vDSP_ctozD(reinterpret_cast<const DSPDoubleComplex*>(a.data()), 2, &split, 1, n);
+            vDSP_fft_zipD(setup, &split, 1, log2n, inverse ? FFT_INVERSE : FFT_FORWARD);
+            if (inverse) {
+                const double invN = 1.0 / (double)n;
+                vDSP_vsmulD(re.data(), 1, &invN, re.data(), 1, n);
+                vDSP_vsmulD(im.data(), 1, &invN, im.data(), 1, n);
+            }
+            vDSP_ztocD(&split, 1, reinterpret_cast<DSPDoubleComplex*>(a.data()), 2, n);
+            check_design_cancel();
+            return;
+        }
+    }
+#endif
+
     // One last-size table per thread, bounded to 512 KiB of root values.
     // Larger transforms use a local table without evicting the small cache.
     // Release the old size before allocating another: no retained spare table.

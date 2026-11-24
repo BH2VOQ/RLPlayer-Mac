@@ -21,6 +21,7 @@
 #include "audio/dsd_reader.h"
 #include "dsp/dop.h"
 #include "dsp/resampler.h"
+#include "dsp/gpu_pref.h"
 #include "audio/cast_upsample_plan.h"
 #include "dsp/filter_families.h"
 #include "dsp/dither.h"
@@ -68,60 +69,162 @@ inline CastTestHooks& cast_test_hooks() {
 struct CastSinkFormat {
     uint32_t rate = 0;
     int      bits = 0;
+    int      channels = 0;
 };
 
-// 纯函数：从 ProtocolInfo Sink 串解析出 (rate, bits) 列表
-// 认 audio/wav, audio/x-wav, audio/L16|L24|L32, rate=NNNN
+struct CastSinkEntry {
+    std::string protocol;
+    std::string network;
+    std::string mime;      // 小写主 MIME（分号前），如 "audio/wav" / "audio/l24"
+    std::string pn;        // DLNA.ORG_PN 值（如有）
+    uint32_t    rate = 0;  // 0 = 通配
+    int         bits = 0;  // 0 = 通配
+    int         channels = 0; // 0 = 通配
+
+    bool is_wav() const {
+        return mime == "audio/wav" || mime == "audio/x-wav" || mime == "audio/wave";
+    }
+    bool is_lpcm() const {
+        return mime == "audio/l16" || mime == "audio/l24" || mime == "audio/l32";
+    }
+    bool is_pcm_castable() const {
+        return is_wav() || is_lpcm();
+    }
+};
+
+struct CastSinkCaps {
+    bool ok = false;
+    std::vector<CastSinkEntry> entries;
+};
+
+inline std::string cast_trim_str(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+// 解析单条 ProtocolInfo Sink 能力元组，保持 (mime, rate, channels, bits) 绑定于同一条目
+inline CastSinkEntry cast_parse_sink_entry(const std::string& token) {
+    CastSinkEntry e;
+    const std::string t = cast_trim_str(token);
+    if (t.empty()) return e;
+
+    auto parse_kv_params = [&](const std::string& segment) {
+        size_t pos = 0;
+        while (pos < segment.size()) {
+            const size_t next = segment.find(';', pos);
+            const std::string kv = cast_trim_str(
+                segment.substr(pos, next == std::string::npos ? std::string::npos : next - pos));
+            const size_t eq = kv.find('=');
+            if (eq != std::string::npos) {
+                const std::string k = cast_lower_str(cast_trim_str(kv.substr(0, eq)));
+                std::string v = cast_trim_str(kv.substr(eq + 1));
+                if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+                    v = v.substr(1, v.size() - 2);
+                }
+                if (k == "rate") {
+                    const unsigned long rv = std::strtoul(v.c_str(), nullptr, 10);
+                    if (rv > 0) e.rate = static_cast<uint32_t>(rv);
+                } else if (k == "channels" || k == "ch") {
+                    const int cv = std::atoi(v.c_str());
+                    if (cv > 0) e.channels = cv;
+                } else if (k == "bits" || k == "bitspersample") {
+                    const int bv = std::atoi(v.c_str());
+                    if (bv == 16 || bv == 24 || bv == 32) e.bits = bv;
+                } else if (k == "dlna.org_pn" && e.pn.empty()) {
+                    e.pn = v;
+                }
+            }
+            if (next == std::string::npos) break;
+            pos = next + 1;
+        }
+    };
+
+    const size_t c1 = t.find(':');
+    if (c1 == std::string::npos) {
+        e.mime = cast_lower_str(t);
+        return e;
+    }
+    e.protocol = cast_lower_str(cast_trim_str(t.substr(0, c1)));
+    const size_t c2 = t.find(':', c1 + 1);
+    if (c2 == std::string::npos) {
+        e.mime = cast_lower_str(cast_trim_str(t.substr(c1 + 1)));
+        return e;
+    }
+    e.network = cast_trim_str(t.substr(c1 + 1, c2 - c1 - 1));
+    const size_t c3 = t.find(':', c2 + 1);
+    const std::string content = (c3 == std::string::npos) ? t.substr(c2 + 1)
+                                                          : t.substr(c2 + 1, c3 - c2 - 1);
+    const std::string extra = (c3 == std::string::npos) ? std::string() : t.substr(c3 + 1);
+
+    const size_t semi = content.find(';');
+    e.mime = cast_lower_str(cast_trim_str(content.substr(0, semi)));
+    if (semi != std::string::npos) {
+        parse_kv_params(content.substr(semi + 1));
+    }
+    if (!extra.empty() && extra != "*") {
+        parse_kv_params(extra);
+    }
+
+    // LPCM MIME 隐含固定位深；generic audio/wav 若未显式写 bits/bitspersample 则保留 0 (位深通配)
+    if (e.bits == 0) {
+        if (e.mime == "audio/l16") e.bits = 16;
+        else if (e.mime == "audio/l24") e.bits = 24;
+        else if (e.mime == "audio/l32") e.bits = 32;
+    }
+    return e;
+}
+
+inline CastSinkCaps cast_parse_sink_caps(const std::string& sink) {
+    CastSinkCaps caps;
+    if (sink.empty()) return caps;
+    size_t start = 0;
+    while (start < sink.size()) {
+        const size_t comma = sink.find(',', start);
+        const std::string token = cast_trim_str(
+            sink.substr(start, comma == std::string::npos ? std::string::npos : (comma - start)));
+        if (!token.empty()) {
+            caps.entries.push_back(cast_parse_sink_entry(token));
+            caps.ok = true;
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return caps;
+}
+
+inline bool cast_tuple_compatible(const CastSinkCaps& caps, int bits, int channels) {
+    for (const auto& e : caps.entries) {
+        if (e.is_pcm_castable() &&
+            (!e.bits || bits == 0 || e.bits == bits) &&
+            (!e.channels || channels == 0 || e.channels == channels)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline std::vector<uint32_t> cast_compatible_rates(const CastSinkCaps& caps, int bits, int channels) {
+    std::vector<uint32_t> rates;
+    for (const auto& e : caps.entries) {
+        if (e.is_pcm_castable() && e.rate > 0 &&
+            (!e.bits || bits == 0 || e.bits == bits) &&
+            (!e.channels || channels == 0 || e.channels == channels)) {
+            rates.push_back(e.rate);
+        }
+    }
+    return rates;
+}
+
+// 兼容接口：从 ProtocolInfo Sink 串解析出带明确 rate 的 (rate, bits, channels) 列表
 // 无 rate 的 audio/wav 通配视为未声明
 inline std::vector<CastSinkFormat> parse_sink_formats(const std::string& sink) {
     std::vector<CastSinkFormat> out;
-    if (sink.empty()) return out;
-
-    size_t start = 0;
-    while (start < sink.size()) {
-        size_t comma = sink.find(',', start);
-        std::string token = sink.substr(start, comma == std::string::npos ? std::string::npos : (comma - start));
-        start = (comma == std::string::npos) ? sink.size() : comma + 1;
-
-        std::string lower = cast_lower_str(token);
-
-        bool isWav = (lower.find("audio/wav") != std::string::npos || lower.find("audio/x-wav") != std::string::npos);
-        bool isL16 = (lower.find("audio/l16") != std::string::npos);
-        bool isL24 = (lower.find("audio/l24") != std::string::npos);
-        bool isL32 = (lower.find("audio/l32") != std::string::npos);
-
-        if (!isWav && !isL16 && !isL24 && !isL32) continue;
-
-        int bits = 0;
-        if (isL16) bits = 16;
-        else if (isL24) bits = 24;
-        else if (isL32) bits = 32;
-        else {
-            size_t bp = lower.find("bitspersample=");
-            if (bp != std::string::npos) {
-                bits = std::atoi(lower.c_str() + bp + 14);
-            } else {
-                size_t bsp = lower.find("bits=");
-                if (bsp != std::string::npos && (bsp == 0 || !std::isalnum((unsigned char)lower[bsp - 1]))) {
-                    bits = std::atoi(lower.c_str() + bsp + 5);
-                }
-            }
-        }
-
-        uint32_t rate = 0;
-        size_t rp = lower.find("rate=");
-        if (rp != std::string::npos) {
-            size_t vstart = rp + 5;
-            while (vstart < lower.size() && (lower[vstart] == ' ' || lower[vstart] == '"')) ++vstart;
-            size_t vend = vstart;
-            while (vend < lower.size() && std::isdigit((unsigned char)lower[vend])) ++vend;
-            if (vend > vstart) {
-                rate = (uint32_t)std::strtoul(lower.substr(vstart, vend - vstart).c_str(), nullptr, 10);
-            }
-        }
-
-        if (rate > 0) {
-            out.push_back({rate, bits});
+    const CastSinkCaps caps = cast_parse_sink_caps(sink);
+    for (const auto& e : caps.entries) {
+        if (e.is_pcm_castable() && e.rate > 0) {
+            out.push_back({e.rate, e.bits, e.channels});
         }
     }
     return out;
@@ -512,6 +615,23 @@ inline std::string action_failed_en(const std::string& action, const UpnpError& 
 
 }  // namespace cast_err
 
+// 精确计算 PolyphaseResampler（含 passthrough 与 two_stage 级联）接收 totalInFrames 输入后的总原始输出帧数：
+// 用于边转码边播放时在首块写出前即确定 WAV 44 字节头中的准确 RIFF/data 长度。
+inline uint64_t compute_resampler_exact_raw_out_frames(const rta::dsp::PolyphaseResampler& rs,
+                                                       uint64_t totalInFrames) {
+    if (totalInFrames == 0) return 0;
+    if (rs.passthrough()) return totalInFrames;
+    if (rs.two_stage()) {
+        const auto* s1 = rs.first_stage();
+        const auto* s2 = rs.second_stage();
+        const uint64_t n1 = s1 ? compute_resampler_exact_raw_out_frames(*s1, totalInFrames) : totalInFrames;
+        return s2 ? compute_resampler_exact_raw_out_frames(*s2, n1) : n1;
+    }
+    const uint64_t L = (uint64_t)std::max(1, rs.upFactor());
+    const uint64_t M = (uint64_t)std::max(1, rs.downFactor());
+    return (uint64_t)(((__uint128_t)totalInFrames * (__uint128_t)L + (__uint128_t)(M - 1u)) / (__uint128_t)M);
+}
+
 struct CastState {
     bool        running = false;
     bool        endedNaturally = false; // 本次投放是否因曲目自然播完而结束（主动 stop / 报错 / 未起播均为 false）
@@ -565,6 +685,7 @@ struct CastState {
     int         prepPercent = -1;    // 准备进度 0..100；-1 = 不在准备阶段
     uint64_t    prepFramesTotal = 0;
     uint64_t    prepFramesDone = 0;
+    bool        gpuResample = false; // 本次投放升频是否真的走了 Apple Metal GPU
 };
 
 struct CastStartParams {
@@ -587,9 +708,11 @@ struct CastStartParams {
     // 强制目标率：默认关。只影响"渲染器没声明目标速率"时的判定，开关本身仍受 applyUpsample 支配。
     bool        forceUpsampleRate = false;
     uint32_t    ceilingRate   = 192000;
-    std::string filterName;      // 命名滤波器；空 = 默认 "poly-sinc-lp"
+    std::string filterName;      // 命名滤波器；空 或 "auto" = 默认 "poly-sinc-tight-lp"
+    std::string filterNx;        // 高采样率 (> 48000 Hz) 时优先使用的命名滤波器
     std::string requestedRate;   // "" | "src" | "follow" | "max" | 十进制数字
     std::string rateFamilyPolicy; // "" = prefer | "strict" | "compatible"
+    std::string gpuVendor = "auto"; // "auto"(默认 64-bit CPU 升频) | "metal" | "off"
 };
 
 struct CastStartResult {
@@ -780,6 +903,7 @@ public:
         state_.prepFramesTotal = 0;
         state_.prepFramesDone = 0;
         state_.resampled = false;
+        state_.gpuResample = false;
 
         if (apTarget) {
             if (p.applyUpsample) {
@@ -852,6 +976,7 @@ public:
         state_.volumeSupported = false;
         state_.currentVolume = -1;
         state_.lastVolumeError.clear();
+        state_.gpuResample = false;
         return true;
     }
 
@@ -1325,12 +1450,31 @@ private:
         bool needCleanupTemp = false;
         std::string wavToServe = p.file;
         AudioSourceFormat srcFormat;
+        bool legacyGpuResample = false;
         double durationSec = 0.0;   // 供播放器进度条用（源文件时长，秒）
+        std::shared_ptr<ProgressiveFileState> progState;
+        std::atomic<bool> producerAbortReq{false};
+        std::thread producerThread;
+        std::mutex producerErrMtx;
+        std::string producerErrZh;
+        std::string producerErrEn;
+
+        auto stop_and_join_producer = [&]() {
+            producerAbortReq.store(true);
+            if (progState) progState->abort();
+            if (producerThread.joinable()) producerThread.join();
+        };
+        struct ProducerScopeGuard {
+            decltype(stop_and_join_producer)& fn;
+            ~ProducerScopeGuard() { fn(); }
+        } producerGuard{stop_and_join_producer};
 
         // err：中文（行为真相，历史文案逐字保留）；errEn：同一事实的英文版（可空）。
         // 英文参数必须与中文同时给出，避免出现「界面切英文但错误还是中文」的半截状态。
-        auto fail = [this, &tempWavPath, &needCleanupTemp](const std::string& err,
-                                                          const std::string& errEn = std::string()) {
+        auto fail = [this, &tempWavPath, &needCleanupTemp, &stop_and_join_producer](
+                        const std::string& err,
+                        const std::string& errEn = std::string()) {
+            stop_and_join_producer();
             std::lock_guard<std::mutex> lk(mtx_);
             state_.running = false;
             state_.endedNaturally = false;
@@ -1494,7 +1638,8 @@ private:
                 return;
             }
         } else {
-            rta::audio::AudioBuffer ab;
+            auto abPtr = std::make_shared<rta::audio::AudioBuffer>();
+            rta::audio::AudioBuffer& ab = *abPtr;
             try {
                 if (ext == ".wav") {
                     try {
@@ -1518,14 +1663,37 @@ private:
             const uint64_t srcFrames = ab.frames();
             const double srcDurationSec = sourceRate ? (double)srcFrames / (double)sourceRate : 0.0;
 
-            // 取渲染器 ProtocolInfo Sink 格式能力
-            auto sinkFormats = parse_sink_formats(proto.ok ? proto.sink : "");
-            std::vector<uint32_t> rendererRates;
-            int rendererMaxBits = 0;
-            for (const auto& f : sinkFormats) {
-                if (f.rate > 0) rendererRates.push_back(f.rate);
-                if (f.bits > rendererMaxBits) rendererMaxBits = f.bits;
+            // 按 Windows v3.4.0 契约完整解析 Sink 元组，禁止把不同条目的 rate / bits / channels 交叉拼接
+            const CastSinkCaps sinkCaps = cast_parse_sink_caps(proto.ok ? proto.sink : std::string());
+
+            // 选定兼容位深：保留调用方显式 p.bits；否则优先沿用源位深，若元组不兼容则先降位深再尝试无损升位深（如 16-bit 源遇仅 L24 渲染器）
+            int targetBits = (p.bits > 0) ? p.bits : sourceBits;
+            bool tupleWidened = false;
+            if (sinkCaps.ok && p.bits == 0 && !cast_tuple_compatible(sinkCaps, targetBits, sourceChannels)) {
+                bool foundCand = false;
+                for (int cand : {24, 16}) {
+                    if (cand <= sourceBits && cast_tuple_compatible(sinkCaps, cand, sourceChannels)) {
+                        targetBits = cand;
+                        foundCand = true;
+                        break;
+                    }
+                }
+                if (!foundCand) {
+                    for (int cand : {24, 32}) {
+                        if (cand > sourceBits && cast_tuple_compatible(sinkCaps, cand, sourceChannels)) {
+                            targetBits = cand;
+                            tupleWidened = true;
+                            foundCand = true;
+                            break;
+                        }
+                    }
+                }
             }
+
+            // 只收集与选定 (targetBits, sourceChannels) 同属一条声明元组的采样率
+            std::vector<uint32_t> rendererRates = sinkCaps.ok
+                ? cast_compatible_rates(sinkCaps, targetBits, sourceChannels)
+                : std::vector<uint32_t>{};
             std::sort(rendererRates.begin(), rendererRates.end());
             rendererRates.erase(std::unique(rendererRates.begin(), rendererRates.end()), rendererRates.end());
 
@@ -1540,6 +1708,18 @@ private:
                 rta::audio::parse_rate_family_policy(p.rateFamilyPolicy)
             );
 
+            // 若 Sink 显式声明了能力但没有任何 PCM 条目兼容当前位深/声道（未勾选强制），禁止按“未声明”静默升频
+            if (sinkCaps.ok && !cast_tuple_compatible(sinkCaps, targetBits, sourceChannels) &&
+                !p.forceUpsampleRate && rateDecision.upsample) {
+                rateDecision.targetRate = sourceRate;
+                rateDecision.upsample = false;
+                rateDecision.forced = false;
+                rateDecision.crossFamily = false;
+                rateDecision.reason = "incompatible-tuple";
+                rateDecision.noteZh = "渲染器未声明匹配位深/声道的 WAV 升频格式，按源直供";
+                rateDecision.noteEn = "Renderer declares no compatible WAV/LPCM bit depth or channel tuple for upsampling; serving at source format";
+            }
+
             if (!rateDecision.upsample) {
                 // 不做升频：走现有源直供或老转码路径
                 {
@@ -1549,8 +1729,10 @@ private:
                     state_.crossFamily = false;
                     state_.servedRate = sourceRate;
                     state_.servedBits = sourceBits;
+                    state_.servedFilter.clear();
                     state_.upsampleNote = rateDecision.noteZh;
                     state_.upsampleNoteEn = rateDecision.noteEn;
+                    state_.gpuResample = false;
                 }
 
                 if (ext == ".wav" && p.rate == 0 && p.bits == 0) {
@@ -1569,6 +1751,10 @@ private:
                             rcfg.outRate = p.rate;
                             rcfg.channels = ab.channels;
                             rta::dsp::PolyphaseResampler resampler(rcfg);
+                            const bool wantMetal = rta::dsp::gpu_vendor_wants_metal_resample(p.gpuVendor);
+                            if (wantMetal) rta::dsp::set_gpu_vendor(rta::dsp::normalize_gpu_vendor(p.gpuVendor));
+                            resampler.set_use_gpu(wantMetal);
+                            legacyGpuResample = resampler.gpu_active();
                             const size_t inFrames = ab.frames();
                             const size_t maxOut = resampler.maxOutFrames(inFrames);
                             std::vector<std::vector<double>> inCh(ab.channels, std::vector<double>(inFrames));
@@ -1616,8 +1802,14 @@ private:
                     }
                 }
             } else {
-                // 升频生效：决定供源位深并进入流式写盘准备阶段
-                auto bitDecision = rta::audio::decide_cast_served_bits(sourceBits, rendererMaxBits);
+                // 升频生效：确定实际供源位深（严格匹配所选 Sink 元组）并进入流式写盘准备阶段
+                rta::audio::CastBitDecision bitDecision;
+                if (targetBits > 0 && targetBits < sourceBits) {
+                    bitDecision = rta::audio::decide_cast_served_bits(sourceBits, targetBits);
+                } else {
+                    bitDecision.servedBits = (targetBits > 0) ? targetBits : sourceBits;
+                    bitDecision.reduced = false;
+                }
                 int servedBits = bitDecision.servedBits;
                 if (servedBits <= 0) servedBits = sourceBits;
 
@@ -1626,6 +1818,9 @@ private:
                 if (bitDecision.reduced) {
                     upsampleNote += "；" + bitDecision.noteZh;
                     upsampleNoteEn += "; " + bitDecision.noteEn;
+                } else if (tupleWidened && servedBits > sourceBits) {
+                    upsampleNote += "；渲染器仅声明 " + std::to_string(servedBits) + " bit 格式，输出位深无损扩展为 " + std::to_string(servedBits) + " bit";
+                    upsampleNoteEn += "; renderer only declares " + std::to_string(servedBits) + "-bit format; output bit depth losslessly widened to " + std::to_string(servedBits) + "-bit";
                 }
 
                 const uint32_t targetRate = rateDecision.targetRate;
@@ -1633,7 +1828,7 @@ private:
                 const int bytesPerSample = (servedBits + 7) / 8;
                 const uint64_t expectedDataBytes = targetOutFrames * (uint64_t)sourceChannels * (uint64_t)bytesPerSample;
 
-                // 4.1 RIFF 4 GiB 上限检查
+                // 4.1 RIFF 4 GiB 上限快速预检（构造成本高的滤波器前先拦截明显超限曲目）
                 uint64_t maxWavDataBytes = 4294967295ull - 44ull;
                 {
                     std::lock_guard<std::mutex> hlk(cast_test_hooks().m);
@@ -1681,30 +1876,62 @@ private:
                     return;
                 }
 
-                // 4.3 配置重采样器与命名滤波器
+                // 4.3 配置重采样器与命名滤波器（默认 poly-sinc-tight-lp，对齐 Windows v3.4.0；>48kHz 时优先取 filterNx）
                 rta::dsp::ResamplerConfig rcfg;
                 rcfg.inRate = sourceRate;
                 rcfg.outRate = targetRate;
                 rcfg.channels = sourceChannels;
+                rcfg.autoTaps = true;
+                rta::dsp::apply_resample_purpose(rcfg, rta::dsp::ResamplePurpose::Pcm);
 
-                std::string fname = p.filterName.empty() ? "poly-sinc-lp" : p.filterName;
-                const auto* fp = rta::dsp::find_preset(fname, sourceRate >= 88200);
-                if (!fp && fname != "poly-sinc-lp") {
-                    // 不静默降级：名字不认识时回退默认预设，但必须把这件事写进 note
-                    //（界面读 servedFilter 显示**实际用的**滤波器，不显示用户填的那个名字）
-                    upsampleNote += "；滤波器 " + fname + " 不存在，已回退 poly-sinc-lp";
-                    upsampleNoteEn += "; filter " + fname + " not found, fell back to poly-sinc-lp";
-                    fname = "poly-sinc-lp";
-                    fp = rta::dsp::find_preset(fname, sourceRate >= 88200);
+                const std::string rawFilterReq = (sourceRate > 48000u && !p.filterNx.empty()) ? p.filterNx : p.filterName;
+                std::string fname = (rawFilterReq.empty() || rawFilterReq == "auto")
+                    ? std::string("poly-sinc-tight-lp")
+                    : rawFilterReq;
+                const bool nxPath = (sourceRate > 48000u);
+                const auto* fp = rta::dsp::find_preset(fname, nxPath);
+                if (!fp && fname != "poly-sinc-tight-lp") {
+                    // 不静默降级：名字不认识时回退默认预设 poly-sinc-tight-lp，并写进 note 供 UI 真实展示
+                    upsampleNote += "；滤波器 " + fname + " 不存在，已回退 poly-sinc-tight-lp";
+                    upsampleNoteEn += "; filter " + fname + " not found, fell back to poly-sinc-tight-lp";
+                    fname = "poly-sinc-tight-lp";
+                    fp = rta::dsp::find_preset(fname, nxPath);
                 }
                 const std::string effectiveFilter = fp ? std::string(fp->name) : std::string();
                 if (fp) {
                     rta::dsp::apply_preset(rcfg, *fp);
                 }
+                rta::dsp::apply_resample_purpose(rcfg, rta::dsp::ResamplePurpose::Pcm);
 
-                rta::dsp::PolyphaseResampler resampler(rcfg);
+                auto resamplerPtr = std::make_shared<rta::dsp::PolyphaseResampler>(rcfg);
+                rta::dsp::PolyphaseResampler& resampler = *resamplerPtr;
+                const bool wantMetal = rta::dsp::gpu_vendor_wants_metal_resample(p.gpuVendor);
+                if (wantMetal) rta::dsp::set_gpu_vendor(rta::dsp::normalize_gpu_vendor(p.gpuVendor));
+                resampler.set_use_gpu(wantMetal);
 
-                // 4.4 创建临时 WAV 并写入 44 字节占位头
+                // 计算群延迟补偿帧数与精确输出总帧数/字节数（用于预先写入真实 WAV 头与渐进供源）
+                const double ratioOutPerIn = (sourceRate > 0) ? ((double)targetRate / (double)sourceRate) : 1.0;
+                const uint64_t latencyOutFrames = (uint64_t)std::ceil(
+                    std::max(0.0, resampler.latencyInputSamples()) * ratioOutPerIn);
+                const size_t drainTotalIn = (size_t)std::ceil(std::max(0.0, resampler.tailInputSamples())) + 2;
+                const uint64_t totalRawOutFrames =
+                    compute_resampler_exact_raw_out_frames(resampler, srcFrames + (uint64_t)drainTotalIn);
+                const uint64_t skippedLatencyExpected = std::min<uint64_t>(totalRawOutFrames, latencyOutFrames);
+                const uint64_t exactOutFrames = totalRawOutFrames - skippedLatencyExpected;
+                const uint64_t exactDataBytes = exactOutFrames * (uint64_t)sourceChannels * (uint64_t)bytesPerSample;
+                if (exactDataBytes > maxWavDataBytes) {
+                    double expGb = (double)exactDataBytes / (1024.0 * 1024.0 * 1024.0);
+                    char bufZh[256];
+                    char bufEn[256];
+                    std::snprintf(bufZh, sizeof(bufZh),
+                                  "临时 WAV 预计 %.2f GB，超过 WAV(RIFF) 4 GiB 上限；请降低投放升频上限", expGb);
+                    std::snprintf(bufEn, sizeof(bufEn),
+                                  "Temporary WAV estimated %.2f GB exceeds WAV(RIFF) 4 GiB limit; please lower the cast upsample ceiling", expGb);
+                    fail(bufZh, bufEn);
+                    return;
+                }
+
+                // 4.4 创建临时 WAV 并直接写入准确 44 字节 RIFF/data 头（边转码边播时渲染器首包即见真实总长）
                 tempWavPath = make_cast_temp_wav_path("upsample");
                 FILE* f = std::fopen(tempWavPath.c_str(), "wb");
                 if (!f) {
@@ -1713,8 +1940,15 @@ private:
                 }
                 needCleanupTemp = true;
 
+                const uint32_t dataBytes32 = (uint32_t)exactDataBytes;
+                const uint32_t riffSize32 = 36u + dataBytes32;
+
                 uint8_t hdr[44] = {0};
                 std::memcpy(hdr, "RIFF", 4);
+                hdr[4]  = (uint8_t)(riffSize32 & 0xFF);
+                hdr[5]  = (uint8_t)((riffSize32 >> 8) & 0xFF);
+                hdr[6]  = (uint8_t)((riffSize32 >> 16) & 0xFF);
+                hdr[7]  = (uint8_t)((riffSize32 >> 24) & 0xFF);
                 std::memcpy(hdr + 8, "WAVE", 4);
                 std::memcpy(hdr + 12, "fmt ", 4);
                 hdr[16] = 16; hdr[17] = 0; hdr[18] = 0; hdr[19] = 0;
@@ -1736,8 +1970,12 @@ private:
                 hdr[34] = (uint8_t)(servedBits & 0xFF);
                 hdr[35] = (uint8_t)((servedBits >> 8) & 0xFF);
                 std::memcpy(hdr + 36, "data", 4);
+                hdr[40] = (uint8_t)(dataBytes32 & 0xFF);
+                hdr[41] = (uint8_t)((dataBytes32 >> 8) & 0xFF);
+                hdr[42] = (uint8_t)((dataBytes32 >> 16) & 0xFF);
+                hdr[43] = (uint8_t)((dataBytes32 >> 24) & 0xFF);
 
-                if (std::fwrite(hdr, 1, 44, f) != 44) {
+                if (std::fwrite(hdr, 1, 44, f) != 44 || std::fflush(f) != 0) {
                     std::fclose(f);
                     fail("写入临时 WAV 头失败", "Failed to write temporary WAV header");
                     return;
@@ -1748,7 +1986,7 @@ private:
                     std::lock_guard<std::mutex> lk(mtx_);
                     state_.phase = "preparing";
                     state_.prepPercent = 0;
-                    state_.prepFramesTotal = targetOutFrames;
+                    state_.prepFramesTotal = exactOutFrames;
                     state_.prepFramesDone = 0;
                     state_.upsampleApplied = true;
                     state_.upsampleForced = rateDecision.forced;
@@ -1764,26 +2002,197 @@ private:
                     state_.upsampleNote = upsampleNote;
                     state_.upsampleNoteEn = upsampleNoteEn;
                     state_.resampled = (targetRate != sourceRate);
+                    state_.gpuResample = (targetRate != sourceRate) && resampler.gpu_active();
                 }
 
-                // 4.6 流式分块重采样与写入
-                constexpr size_t kChunk = 1 << 16;
-                std::vector<std::vector<double>> inCh(sourceChannels, std::vector<double>(kChunk));
-                std::vector<const double*> inPtrs(sourceChannels);
-                for (int c = 0; c < sourceChannels; ++c) inPtrs[c] = inCh[c].data();
+                // 4.6 分块重采样状态机（预缓冲达标后立刻起播，余下块由后台生产者线程持续写盘与 publish）
+                struct StreamingUpsampleJob {
+                    std::shared_ptr<rta::audio::AudioBuffer> ab;
+                    std::shared_ptr<rta::dsp::PolyphaseResampler> resampler;
+                    FILE* f = nullptr;
+                    int sourceChannels = 0;
+                    int bytesPerSample = 0;
+                    int servedBits = 0;
+                    bool applyDither = false;
+                    uint64_t maxWavDataBytes = 0;
+                    uint64_t latencyOutFrames = 0;
+                    uint64_t exactOutFrames = 0;
+                    uint64_t exactDataBytes = 0;
+                    uint64_t srcFrames = 0;
+                    size_t drainTotalIn = 0;
 
-                size_t maxOutChunk = resampler.maxOutFrames(kChunk);
-                std::vector<std::vector<double>> outCh(sourceChannels, std::vector<double>(maxOutChunk));
-                std::vector<double*> outPtrs(sourceChannels);
-                for (int c = 0; c < sourceChannels; ++c) outPtrs[c] = outCh[c].data();
+                    const size_t kChunk = 8192;
+                    const size_t kDrainChunk = 1024;
+                    std::vector<std::vector<double>> inCh;
+                    std::vector<const double*> inPtrs;
+                    std::vector<std::vector<double>> outCh;
+                    std::vector<double*> outPtrs;
+                    std::vector<std::vector<double>> zeroIn;
+                    std::vector<const double*> zeroPtrs;
+                    std::vector<std::vector<double>> drainOut;
+                    std::vector<double*> drainOutPtrs;
+                    std::vector<uint8_t> pcmBytes;
 
-                std::vector<uint8_t> pcmBytes;
-                const bool applyDither = (servedBits < sourceBits);
-                rta::dsp::Rng rng(0x112CA57);
-                uint64_t writtenFrames = 0;
-                size_t srcOffset = 0;
+                    rta::dsp::Rng rng{0x112CA57};
+                    uint64_t skippedLatency = 0;
+                    uint64_t writtenFrames = 0;
+                    uint64_t writtenBytes = 0;
+                    bool riffOverflow = false;
+                    size_t srcOffset = 0;
+                    size_t drainedIn = 0;
+
+                    ~StreamingUpsampleJob() {
+                        if (f) {
+                            std::fclose(f);
+                            f = nullptr;
+                        }
+                    }
+
+                    void init_buffers() {
+                        inCh.assign((size_t)sourceChannels, std::vector<double>(kChunk));
+                        inPtrs.resize((size_t)sourceChannels);
+                        for (int c = 0; c < sourceChannels; ++c) inPtrs[(size_t)c] = inCh[(size_t)c].data();
+
+                        const size_t maxOutChunk = resampler->maxOutFrames(kChunk);
+                        outCh.assign((size_t)sourceChannels, std::vector<double>(maxOutChunk));
+                        outPtrs.resize((size_t)sourceChannels);
+                        for (int c = 0; c < sourceChannels; ++c) outPtrs[(size_t)c] = outCh[(size_t)c].data();
+
+                        zeroIn.assign((size_t)sourceChannels, std::vector<double>(kDrainChunk, 0.0));
+                        zeroPtrs.resize((size_t)sourceChannels);
+                        for (int c = 0; c < sourceChannels; ++c) zeroPtrs[(size_t)c] = zeroIn[(size_t)c].data();
+
+                        const size_t maxDrainOut = resampler->maxOutFrames(kDrainChunk);
+                        drainOut.assign((size_t)sourceChannels, std::vector<double>(maxDrainOut));
+                        drainOutPtrs.resize((size_t)sourceChannels);
+                        for (int c = 0; c < sourceChannels; ++c) drainOutPtrs[(size_t)c] = drainOut[(size_t)c].data();
+                    }
+
+                    bool has_more_work() const {
+                        return srcOffset < srcFrames || drainedIn < drainTotalIn;
+                    }
+
+                    bool write_frames(const std::vector<std::vector<double>>& buf, size_t nOut,
+                                      std::mutex& stateMtx, CastState& state,
+                                      ProgressiveFileState* prog) {
+                        if (nOut == 0) return true;
+                        size_t skip = 0;
+                        if (skippedLatency < latencyOutFrames) {
+                            skip = (size_t)std::min<uint64_t>((uint64_t)nOut, latencyOutFrames - skippedLatency);
+                            skippedLatency += skip;
+                        }
+                        const size_t activeOut = nOut - skip;
+                        if (activeOut == 0) return true;
+
+                        const size_t outBytes = activeOut * (size_t)sourceChannels * (size_t)bytesPerSample;
+                        if (writtenBytes + (uint64_t)outBytes > maxWavDataBytes) {
+                            riffOverflow = true;
+                            return false;
+                        }
+
+                        pcmBytes.resize(outBytes);
+                        size_t byteIdx = 0;
+                        for (size_t i = skip; i < nOut; ++i) {
+                            for (int c = 0; c < sourceChannels; ++c) {
+                                double x = buf[(size_t)c][i];
+                                if (!rta::audio::audio_finite(x)) x = 0.0;
+                                if (servedBits == 16) {
+                                    double s = x * 32768.0;
+                                    if (applyDither) s += (rng.uniform() - rng.uniform());
+                                    s = std::floor(s + 0.5);
+                                    if (s > 32767.0) s = 32767.0;
+                                    if (s < -32768.0) s = -32768.0;
+                                    int16_t v = static_cast<int16_t>(s);
+                                    pcmBytes[byteIdx++] = (uint8_t)(v & 0xFF);
+                                    pcmBytes[byteIdx++] = (uint8_t)((v >> 8) & 0xFF);
+                                } else if (servedBits == 24) {
+                                    double s = x * 8388608.0;
+                                    if (applyDither) s += (rng.uniform() - rng.uniform());
+                                    s = std::floor(s + 0.5);
+                                    if (s > 8388607.0) s = 8388607.0;
+                                    if (s < -8388608.0) s = -8388608.0;
+                                    int32_t v = static_cast<int32_t>(s);
+                                    pcmBytes[byteIdx++] = (uint8_t)(v & 0xFF);
+                                    pcmBytes[byteIdx++] = (uint8_t)((v >> 8) & 0xFF);
+                                    pcmBytes[byteIdx++] = (uint8_t)((v >> 16) & 0xFF);
+                                } else if (servedBits == 32) {
+                                    double s = x * 2147483648.0;
+                                    if (applyDither) s += (rng.uniform() - rng.uniform());
+                                    s = std::floor(s + 0.5);
+                                    if (s > 2147483647.0) s = 2147483647.0;
+                                    if (s < -2147483648.0) s = -2147483648.0;
+                                    int32_t v = static_cast<int32_t>(s);
+                                    pcmBytes[byteIdx++] = (uint8_t)(v & 0xFF);
+                                    pcmBytes[byteIdx++] = (uint8_t)((v >> 8) & 0xFF);
+                                    pcmBytes[byteIdx++] = (uint8_t)((v >> 16) & 0xFF);
+                                    pcmBytes[byteIdx++] = (uint8_t)((v >> 24) & 0xFF);
+                                }
+                            }
+                        }
+
+                        if (!f || std::fwrite(pcmBytes.data(), 1, byteIdx, f) != byteIdx || std::fflush(f) != 0) {
+                            return false;
+                        }
+                        writtenFrames += activeOut;
+                        writtenBytes += byteIdx;
+                        if (prog) {
+                            prog->publish((int64_t)(44ull + writtenBytes), false);
+                        }
+                        {
+                            std::lock_guard<std::mutex> lk(stateMtx);
+                            state.prepFramesDone = writtenFrames;
+                            state.prepPercent = exactOutFrames > 0
+                                ? std::min(100, (int)((writtenFrames * 100ull) / exactOutFrames))
+                                : 100;
+                        }
+                        return true;
+                    }
+
+                    // 处理下一块输入或拖尾，返回 true 表示写入成功（或无更多工作）
+                    bool step_next_chunk(std::mutex& stateMtx, CastState& state,
+                                         ProgressiveFileState* prog, bool* isDrainPhase = nullptr) {
+                        if (srcOffset < srcFrames) {
+                            if (isDrainPhase) *isDrainPhase = false;
+                            const size_t thisChunk = std::min(kChunk, (size_t)(srcFrames - srcOffset));
+                            for (int c = 0; c < sourceChannels; ++c) {
+                                for (size_t i = 0; i < thisChunk; ++i) {
+                                    inCh[(size_t)c][i] = ab->sample(srcOffset + i, c);
+                                }
+                            }
+                            srcOffset += thisChunk;
+                            const size_t nOut = resampler->process(inPtrs.data(), thisChunk, outPtrs.data());
+                            return write_frames(outCh, nOut, stateMtx, state, prog);
+                        }
+                        if (drainedIn < drainTotalIn) {
+                            if (isDrainPhase) *isDrainPhase = true;
+                            const size_t thisDrain = std::min(kDrainChunk, drainTotalIn - drainedIn);
+                            const size_t nOut = resampler->process(zeroPtrs.data(), thisDrain, drainOutPtrs.data());
+                            drainedIn += thisDrain;
+                            if (nOut == 0) return true;
+                            return write_frames(drainOut, nOut, stateMtx, state, prog);
+                        }
+                        return true;
+                    }
+                };
+
+                auto job = std::make_shared<StreamingUpsampleJob>();
+                job->ab = abPtr;
+                job->resampler = resamplerPtr;
+                job->f = f;
+                f = nullptr; // 所有权转入 job
+                job->sourceChannels = sourceChannels;
+                job->bytesPerSample = bytesPerSample;
+                job->servedBits = servedBits;
+                job->applyDither = (servedBits < sourceBits) || rateDecision.upsample;
+                job->maxWavDataBytes = maxWavDataBytes;
+                job->latencyOutFrames = latencyOutFrames;
+                job->exactOutFrames = exactOutFrames;
+                job->exactDataBytes = exactDataBytes;
+                job->srcFrames = srcFrames;
+                job->drainTotalIn = drainTotalIn;
+                job->init_buffers();
+
                 bool cancelled = false;
-
                 auto check_cancel = [&]() -> bool {
                     bool hookCancel = false;
                     {
@@ -1799,123 +2208,38 @@ private:
                     return false;
                 };
 
-                auto write_output_frames = [&](size_t nOut) -> bool {
-                    if (nOut == 0) return true;
-                    if (writtenFrames + nOut > targetOutFrames) {
-                        nOut = (size_t)(targetOutFrames - writtenFrames);
-                    }
-                    if (nOut == 0) return true;
-
-                    pcmBytes.resize(nOut * (size_t)sourceChannels * (size_t)bytesPerSample);
-                    size_t byteIdx = 0;
-                    for (size_t i = 0; i < nOut; ++i) {
-                        for (int c = 0; c < sourceChannels; ++c) {
-                            double x = outCh[c][i];
-                            if (!rta::audio::audio_finite(x)) x = 0.0;
-                            if (servedBits == 16) {
-                                double s = x * 32768.0;
-                                if (applyDither) s += (rng.uniform() - rng.uniform());
-                                s = std::floor(s + 0.5);
-                                if (s > 32767.0) s = 32767.0;
-                                if (s < -32768.0) s = -32768.0;
-                                int16_t v = static_cast<int16_t>(s);
-                                pcmBytes[byteIdx++] = (uint8_t)(v & 0xFF);
-                                pcmBytes[byteIdx++] = (uint8_t)((v >> 8) & 0xFF);
-                            } else if (servedBits == 24) {
-                                double s = x * 8388608.0;
-                                if (applyDither) s += (rng.uniform() - rng.uniform());
-                                s = std::floor(s + 0.5);
-                                if (s > 8388607.0) s = 8388607.0;
-                                if (s < -8388608.0) s = -8388608.0;
-                                int32_t v = static_cast<int32_t>(s);
-                                pcmBytes[byteIdx++] = (uint8_t)(v & 0xFF);
-                                pcmBytes[byteIdx++] = (uint8_t)((v >> 8) & 0xFF);
-                                pcmBytes[byteIdx++] = (uint8_t)((v >> 16) & 0xFF);
-                            } else if (servedBits == 32) {
-                                double s = x * 2147483648.0;
-                                if (applyDither) s += (rng.uniform() - rng.uniform());
-                                s = std::floor(s + 0.5);
-                                if (s > 2147483647.0) s = 2147483647.0;
-                                if (s < -2147483648.0) s = -2147483648.0;
-                                int32_t v = static_cast<int32_t>(s);
-                                pcmBytes[byteIdx++] = (uint8_t)(v & 0xFF);
-                                pcmBytes[byteIdx++] = (uint8_t)((v >> 8) & 0xFF);
-                                pcmBytes[byteIdx++] = (uint8_t)((v >> 16) & 0xFF);
-                                pcmBytes[byteIdx++] = (uint8_t)((v >> 24) & 0xFF);
-                            }
-                        }
-                    }
-
-                    if (std::fwrite(pcmBytes.data(), 1, byteIdx, f) != byteIdx) {
-                        return false;
-                    }
-                    writtenFrames += nOut;
-                    {
-                        std::lock_guard<std::mutex> lk(mtx_);
-                        state_.prepFramesDone = writtenFrames;
-                        state_.prepPercent = targetOutFrames > 0 ? (int)((writtenFrames * 100ull) / targetOutFrames) : 100;
-                    }
-                    return true;
-                };
-
-                while (srcOffset < srcFrames) {
+                // 预缓冲门限：写入约 1 秒目标采样率 PCM（或短曲目全长）后即可起播
+                const uint64_t prebufferFrames = std::min<uint64_t>(exactOutFrames, (uint64_t)targetRate);
+                while (job->has_more_work() && job->writtenFrames < prebufferFrames) {
                     if (check_cancel()) break;
-                    size_t thisChunk = std::min(kChunk, (size_t)(srcFrames - srcOffset));
-                    for (int c = 0; c < sourceChannels; ++c) {
-                        for (size_t i = 0; i < thisChunk; ++i) {
-                            inCh[c][i] = ab.sample(srcOffset + i, c);
+                    bool isDrainPhase = false;
+                    if (!job->step_next_chunk(mtx_, state_, nullptr, &isDrainPhase)) {
+                        if (job->f) {
+                            std::fclose(job->f);
+                            job->f = nullptr;
                         }
-                    }
-                    srcOffset += thisChunk;
-
-                    size_t nOut = resampler.process(inPtrs.data(), thisChunk, outPtrs.data());
-                    if (!write_output_frames(nOut)) {
-                        std::fclose(f);
-                        fail("写入临时 WAV 数据失败", "Failed to write temporary WAV data");
+                        if (job->riffOverflow) {
+                            double expGb = (double)(job->writtenBytes) / (1024.0 * 1024.0 * 1024.0);
+                            char bufZh[256], bufEn[256];
+                            std::snprintf(bufZh, sizeof(bufZh),
+                                          "临时 WAV 超过 WAV(RIFF) 4 GiB 上限（已写 %.2f GB）；请降低投放升频上限", expGb);
+                            std::snprintf(bufEn, sizeof(bufEn),
+                                          "Temporary WAV exceeds WAV(RIFF) 4 GiB limit (wrote %.2f GB); please lower the cast upsample ceiling", expGb);
+                            fail(bufZh, bufEn);
+                        } else if (isDrainPhase) {
+                            fail("写入临时 WAV 拖尾数据失败", "Failed to write temporary WAV drain data");
+                        } else {
+                            fail("写入临时 WAV 数据失败", "Failed to write temporary WAV data");
+                        }
                         return;
                     }
-                }
-
-                // 零输入排空拖尾（零尾只用于排水，累计写到目标帧数即停）
-                const size_t drainChunk = 1024;
-                std::vector<std::vector<double>> zeroIn(sourceChannels, std::vector<double>(drainChunk, 0.0));
-                std::vector<const double*> zeroPtrs(sourceChannels);
-                for (int c = 0; c < sourceChannels; ++c) zeroPtrs[c] = zeroIn[c].data();
-
-                size_t maxDrainOut = resampler.maxOutFrames(drainChunk);
-                std::vector<std::vector<double>> drainOut(sourceChannels, std::vector<double>(maxDrainOut));
-                std::vector<double*> drainOutPtrs(sourceChannels);
-                for (int c = 0; c < sourceChannels; ++c) drainOutPtrs[c] = drainOut[c].data();
-
-                const size_t maxDrainIn = (size_t)std::ceil(resampler.latencyInputSamples() * 2.0) + 2048;
-                size_t drainedIn = 0;
-                while (!cancelled && writtenFrames < targetOutFrames && drainedIn < maxDrainIn) {
-                    if (check_cancel()) break;
-                    size_t nOut = resampler.process(zeroPtrs.data(), drainChunk, drainOutPtrs.data());
-                    drainedIn += drainChunk;
-                    if (nOut == 0) continue;
-                    for (int c = 0; c < sourceChannels; ++c) {
-                        if (outCh[c].size() < nOut) outCh[c].resize(nOut);
-                        std::copy(drainOut[c].begin(), drainOut[c].begin() + nOut, outCh[c].begin());
-                    }
-                    if (!write_output_frames(nOut)) {
-                        std::fclose(f);
-                        fail("写入临时 WAV 拖尾数据失败", "Failed to write temporary WAV drain data");
-                        return;
-                    }
-                }
-
-                if (!cancelled && writtenFrames < targetOutFrames) {
-                    size_t padFrames = (size_t)(targetOutFrames - writtenFrames);
-                    for (int c = 0; c < sourceChannels; ++c) {
-                        if (outCh[c].size() < padFrames) outCh[c].resize(padFrames);
-                        std::fill(outCh[c].begin(), outCh[c].begin() + padFrames, 0.0);
-                    }
-                    write_output_frames(padFrames);
                 }
 
                 if (cancelled) {
-                    std::fclose(f);
+                    if (job->f) {
+                        std::fclose(job->f);
+                        job->f = nullptr;
+                    }
                     std::remove(tempWavPath.c_str());
                     {
                         std::lock_guard<std::mutex> lk(mtx_);
@@ -1927,40 +2251,119 @@ private:
                     return;
                 }
 
-                // 回填 RIFF/data 大小
-                uint32_t dataBytes32 = (uint32_t)(writtenFrames * (uint64_t)sourceChannels * (uint64_t)bytesPerSample);
-                uint32_t riffSize32 = 36u + dataBytes32;
-
-                std::fseek(f, 4, SEEK_SET);
-                uint8_t b4[4];
-                b4[0] = (uint8_t)(riffSize32 & 0xFF);
-                b4[1] = (uint8_t)((riffSize32 >> 8) & 0xFF);
-                b4[2] = (uint8_t)((riffSize32 >> 16) & 0xFF);
-                b4[3] = (uint8_t)((riffSize32 >> 24) & 0xFF);
-                std::fwrite(b4, 1, 4, f);
-
-                std::fseek(f, 40, SEEK_SET);
-                b4[0] = (uint8_t)(dataBytes32 & 0xFF);
-                b4[1] = (uint8_t)((dataBytes32 >> 8) & 0xFF);
-                b4[2] = (uint8_t)((dataBytes32 >> 16) & 0xFF);
-                b4[3] = (uint8_t)((dataBytes32 >> 24) & 0xFF);
-                std::fwrite(b4, 1, 4, f);
-
-                std::fflush(f);
-                std::fclose(f);
-                f = nullptr;
-
                 wavToServe = tempWavPath;
-                durationSec = targetRate ? (double)writtenFrames / (double)targetRate : 0.0;
+                durationSec = targetRate ? (double)exactOutFrames / (double)targetRate : 0.0;
                 srcFormat.sampleRate = targetRate;
                 srcFormat.bits = servedBits;
                 srcFormat.channels = sourceChannels;
                 srcFormat.isDsd = false;
                 srcFormat.encoding = "Linear PCM";
 
-                {
-                    std::lock_guard<std::mutex> lk(mtx_);
-                    state_.prepPercent = -1;
+                if (!job->has_more_work()) {
+                    // 短曲目在预缓冲期内已全部完成：直接关闭文件并走常规静态供源
+                    if (job->writtenFrames != exactOutFrames || job->writtenBytes != exactDataBytes) {
+                        // 兜底：若实际写出与预估差极个别帧，回填准确 RIFF/data 头保证自洽
+                        const uint32_t actualDataBytes32 = (uint32_t)job->writtenBytes;
+                        const uint32_t actualRiffSize32 = 36u + actualDataBytes32;
+                        uint8_t b4[4];
+                        b4[0] = (uint8_t)(actualRiffSize32 & 0xFF);
+                        b4[1] = (uint8_t)((actualRiffSize32 >> 8) & 0xFF);
+                        b4[2] = (uint8_t)((actualRiffSize32 >> 16) & 0xFF);
+                        b4[3] = (uint8_t)((actualRiffSize32 >> 24) & 0xFF);
+                        std::fseek(job->f, 4, SEEK_SET);
+                        std::fwrite(b4, 1, 4, job->f);
+                        b4[0] = (uint8_t)(actualDataBytes32 & 0xFF);
+                        b4[1] = (uint8_t)((actualDataBytes32 >> 8) & 0xFF);
+                        b4[2] = (uint8_t)((actualDataBytes32 >> 16) & 0xFF);
+                        b4[3] = (uint8_t)((actualDataBytes32 >> 24) & 0xFF);
+                        std::fseek(job->f, 40, SEEK_SET);
+                        std::fwrite(b4, 1, 4, job->f);
+                        durationSec = targetRate ? (double)job->writtenFrames / (double)targetRate : 0.0;
+                    }
+                    if (job->f) {
+                        std::fflush(job->f);
+                        std::fclose(job->f);
+                        job->f = nullptr;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(mtx_);
+                        state_.prepPercent = -1;
+                    }
+                } else {
+                    // 长曲目：注册 ProgressiveFileState 并启动后台生产者线程并发写余下块，主线程立即 SetAVTransportURI + Play
+                    progState = std::make_shared<ProgressiveFileState>();
+                    progState->filePath = tempWavPath;
+                    progState->totalSize = (int64_t)(44ull + exactDataBytes);
+                    progState->publish((int64_t)(44ull + job->writtenBytes), false);
+
+                    producerThread = std::thread([this, job, progState, &stopReq = stopReq_,
+                                                  &producerAbortReq, &producerErrMtx,
+                                                  &producerErrZh, &producerErrEn]() {
+                        while (job->has_more_work()) {
+                            if (stopReq.load() || producerAbortReq.load()) {
+                                if (job->f) {
+                                    std::fclose(job->f);
+                                    job->f = nullptr;
+                                }
+                                progState->abort();
+                                return;
+                            }
+                            bool isDrainPhase = false;
+                            if (!job->step_next_chunk(mtx_, state_, progState.get(), &isDrainPhase)) {
+                                if (job->f) {
+                                    std::fclose(job->f);
+                                    job->f = nullptr;
+                                }
+                                std::string eZh, eEn;
+                                if (job->riffOverflow) {
+                                    double expGb = (double)(job->writtenBytes) / (1024.0 * 1024.0 * 1024.0);
+                                    char bufZh[256], bufEn[256];
+                                    std::snprintf(bufZh, sizeof(bufZh),
+                                                  "临时 WAV 超过 WAV(RIFF) 4 GiB 上限（已写 %.2f GB）；请降低投放升频上限", expGb);
+                                    std::snprintf(bufEn, sizeof(bufEn),
+                                                  "Temporary WAV exceeds WAV(RIFF) 4 GiB limit (wrote %.2f GB); please lower the cast upsample ceiling", expGb);
+                                    eZh = bufZh;
+                                    eEn = bufEn;
+                                } else if (isDrainPhase) {
+                                    eZh = "写入临时 WAV 拖尾数据失败";
+                                    eEn = "Failed to write temporary WAV drain data";
+                                } else {
+                                    eZh = "写入临时 WAV 数据失败";
+                                    eEn = "Failed to write temporary WAV data";
+                                }
+                                {
+                                    std::lock_guard<std::mutex> elk(producerErrMtx);
+                                    producerErrZh = eZh;
+                                    producerErrEn = eEn;
+                                }
+                                progState->abort(eZh);
+                                return;
+                            }
+                        }
+
+                        if (job->f) {
+                            std::fflush(job->f);
+                            std::fclose(job->f);
+                            job->f = nullptr;
+                        }
+                        if (job->writtenBytes != job->exactDataBytes) {
+                            std::string eZh = "渐进 WAV 产出字节数与头部声明不一致";
+                            std::string eEn = "Progressive WAV byte count mismatched precomputed header length";
+                            {
+                                std::lock_guard<std::mutex> elk(producerErrMtx);
+                                producerErrZh = eZh;
+                                producerErrEn = eEn;
+                            }
+                            progState->abort(eZh);
+                            return;
+                        }
+                        progState->publish((int64_t)(44ull + job->writtenBytes), true);
+                        {
+                            std::lock_guard<std::mutex> lk(mtx_);
+                            state_.prepFramesDone = job->writtenFrames;
+                            state_.prepPercent = -1;
+                        }
+                    });
                 }
             }
         }
@@ -1983,14 +2386,19 @@ private:
             }
             state_.durationSec = durationSec > 0.0 ? durationSec : 0.0;
             state_.resampled = (state_.servedRate != 0 && state_.sourceRate != 0 && state_.servedRate != state_.sourceRate);
+            if (!state_.upsampleApplied) state_.gpuResample = state_.resampled && legacyGpuResample;
         }
 
         if (stopReq_.load()) {
-            std::lock_guard<std::mutex> lk(mtx_);
-            state_.running = false;
-            state_.endedNaturally = false;
-            state_.phase = "stopped";
-            state_.paused = false;
+            stop_and_join_producer();
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                state_.running = false;
+                state_.endedNaturally = false;
+                state_.phase = "stopped";
+                state_.paused = false;
+                state_.prepPercent = -1;
+            }
             if (needCleanupTemp && !tempWavPath.empty()) std::remove(tempWavPath.c_str());
             return;
         }
@@ -2020,7 +2428,9 @@ private:
         }
 
         std::string localIp = upnp_local_ip_for(targetDev.host, (uint16_t)targetDev.port);
-        std::string streamPath = server.register_file(wavToServe, "audio/wav");
+        std::string streamPath = progState
+            ? server.register_progressive_file(progState, "audio/wav")
+            : server.register_file(wavToServe, "audio/wav");
         std::string streamUrl = "http://" + localIp + ":" + std::to_string(server.port()) + streamPath;
 
         // 4) UPnP 控制动作 SetAVTransportURI & Play
@@ -2037,6 +2447,7 @@ private:
 
         UpnpActionResult setRes = client.set_av_transport_uri(streamUrl, didlXml);
         if (!setRes.ok) {
+            stop_and_join_producer();
             server.stop();
             fail(cast_err::action_failed("SetAVTransportURI", setRes.error),
                  cast_err::action_failed_en("SetAVTransportURI", setRes.error));
@@ -2045,6 +2456,7 @@ private:
 
         UpnpActionResult playRes = client.play("1");
         if (!playRes.ok) {
+            stop_and_join_producer();
             client.stop();
             server.stop();
             fail(cast_err::action_failed("Play", playRes.error),
@@ -2195,13 +2607,32 @@ private:
                 }
             }
 
+            if (progState) {
+                std::lock_guard<std::mutex> plk(progState->mtx);
+                if (progState->failed && !stopReq_.load() && !producerAbortReq.load()) {
+                    std::string errZh, errEn;
+                    {
+                        std::lock_guard<std::mutex> elk(producerErrMtx);
+                        errZh = !producerErrZh.empty() ? producerErrZh : progState->error;
+                        errEn = producerErrEn;
+                    }
+                    if (!errZh.empty()) {
+                        client.stop();
+                        server.stop();
+                        fail(errZh, errEn);
+                        return;
+                    }
+                }
+            }
+
             for (int i = 0; i < 5; ++i) {
                 if (stopReq_.load()) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
 
-        // 6) 结束收尾
+        // 6) 结束收尾（先停止并等待后台转码线程与 HTTP 供源结束，再删除临时 WAV）
+        stop_and_join_producer();
         client.stop();
         server.stop();
         if (needCleanupTemp && !tempWavPath.empty()) {
@@ -2215,6 +2646,7 @@ private:
             state_.phase = "stopped";
             state_.transportState = "STOPPED";
             state_.paused = false;
+            state_.prepPercent = -1;
         }
     }
 

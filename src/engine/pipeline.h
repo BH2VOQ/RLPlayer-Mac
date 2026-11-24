@@ -58,7 +58,7 @@ struct PipelineConfig {
     // ---- 重采样 ----
     uint32_t outRate    = 0;          // 0 = 与源相同
     int      taps       = 262144;
-    bool     gpuResample = true;    // 用 GPU 做多相升频（rtagpu.dll 缺失时自动退回 CPU，输出逐位相同）
+    bool     gpuResample = false;   // 用 GPU 做多相升频（默认 false：64-bit CPU + NEON 精度更高；gpuvendor=metal 时由上层开启）
     bool     twoStage    = true;    // 大比率升频拆两级（同参数下 CPU 运算量约 1/4，可听带内一致）
     int      stage2Taps  = 64;      // 两段式第二级抽头数
     double   attenDb    = 180.0;

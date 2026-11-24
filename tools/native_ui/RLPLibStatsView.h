@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 页面离开时停掉轮询（避免后台空转）。
 - (void)stopPolling;
 - (void)applyTheme;
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

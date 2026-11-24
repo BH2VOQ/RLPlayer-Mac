@@ -268,7 +268,7 @@ int main() {
     }
 
     // ---------------- 判据 D：从 50% 起播 + EQ ⟹ usedEq 仍为 true ----------------
-    std::printf("\n--- 判据 D：从 50% 起播仍走 EQ ---\n");
+    std::printf("\n--- 判据 D：从 50%% 起播仍走 EQ ---\n");
     if (haveA) {
         const StartPos sp = start_pos_for(0.5, in.frames(), in.frames());
         // 造一个"从 pos 开始的输入缓冲"——这正是 play_one 生产者线程在起播定位后做的事

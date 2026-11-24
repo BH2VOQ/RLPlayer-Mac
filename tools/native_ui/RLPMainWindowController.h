@@ -10,7 +10,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /// 主窗口：侧栏 + 内容区 + 底部播放条（纯 AppKit，无 WKWebView）。
-@interface RLPMainWindowController : NSWindowController
+@interface RLPMainWindowController : NSWindowController <NSWindowDelegate>
 
 @property (nonatomic, strong, readonly) RLPSidebarViewController *sidebar;
 @property (nonatomic, strong, readonly) RLPAlbumsViewController *albums;

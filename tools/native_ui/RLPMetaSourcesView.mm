@@ -25,11 +25,13 @@
 @interface RLPMetaSourcesView ()
 @property (nonatomic, strong) NSStackView *listStack;
 @property (nonatomic, strong) NSStackView *rootStack;
+@property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSButton *resetBtn;
 @property (nonatomic, strong) NSTextField *msg;
 @property (nonatomic, strong) NSMutableArray<RLPMetaSource *> *sources;   // 按当前优先级顺序
 @property (nonatomic, strong) NSArray<NSString *> *defaultOrder;
 @property (nonatomic, assign) NSUInteger seq;
+@property (nonatomic, assign) NSInteger msgMode;
 /// identifier（web 模板名，如 sp_meta_<id>）→ 数据源 id。动作按它分派，
 /// 不去解析 identifier 字符串 —— 名字是给 parity 取证用的，不该兼职当数据。
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *sourceIdByControl;
@@ -73,6 +75,7 @@
     head.spacing = 10;
     NSTextField *title = RLPLabel(RLPTr(@"数据源优先级"),
         [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    self.titleLabel = title;
     [head addArrangedSubview:title];
     self.resetBtn = [NSButton buttonWithTitle:RLPTr(@"恢复默认") target:self action:@selector(onReset:)];
     self.resetBtn.bezelStyle = NSBezelStyleRounded;
@@ -133,6 +136,7 @@
 
 - (void)reload {
     if (![RLPCoreClient shared].started) {
+        self.msgMode = 1;
         self.msg.stringValue = RLPTr(@"核心未启动");
         return;
     }
@@ -142,6 +146,7 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_ || seq != self_.seq) return;
         if (!json || ![json[@"ok"] boolValue]) {
+            self_.msgMode = 2;
             self_.msg.stringValue = RLPTr(@"读取数据源失败");
             return;
         }
@@ -160,6 +165,7 @@
         }
         NSString *def = [json[@"defaultOrder"] isKindOfClass:[NSString class]] ? json[@"defaultOrder"] : @"";
         self_.defaultOrder = def.length ? [def componentsSeparatedByString:@","] : @[];
+        self_.msgMode = 3;
         self_.msg.stringValue = RLPTr(@"越靠上优先级越高");
         [self_ renderRows];
         // 行数是**异步**决定的：挂载时按 0 行算高度，行回来后必须让外层重算，
@@ -336,6 +342,7 @@
     // 顺序已保存：给出可读的优先级链（web metaOrderCommit 同口径）。
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     for (RLPMetaSource *x in self.sources) [names addObject:x.name];
+    self.msgMode = 4;
     self.msg.stringValue = [RLPTr(@"顺序已保存") stringByAppendingFormat:@"：%@",
                             [names componentsJoinedByString:@" → "]];
 }
@@ -359,12 +366,36 @@
     [self.sources setArray:reordered];
     [self renderRows];
     [self persist];
+    self.msgMode = 5;
     self.msg.stringValue = RLPTr(@"顺序已保存");
 }
 
 #pragma mark - 主题
 
 - (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    self.titleLabel.textColor = t.text;
+    self.msg.textColor = t.mut;
+    [self renderRows];
+}
+
+- (void)applyLanguage {
+    self.titleLabel.stringValue = RLPTr(@"数据源优先级");
+    self.resetBtn.title = RLPTr(@"恢复默认");
+    if (self.msgMode == 1) {
+        self.msg.stringValue = RLPTr(@"核心未启动");
+    } else if (self.msgMode == 2) {
+        self.msg.stringValue = RLPTr(@"读取数据源失败");
+    } else if (self.msgMode == 3) {
+        self.msg.stringValue = RLPTr(@"越靠上优先级越高");
+    } else if (self.msgMode == 4) {
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (RLPMetaSource *x in self.sources) [names addObject:x.name];
+        self.msg.stringValue = [RLPTr(@"顺序已保存") stringByAppendingFormat:@"：%@",
+                                [names componentsJoinedByString:@" → "]];
+    } else if (self.msgMode == 5) {
+        self.msg.stringValue = RLPTr(@"顺序已保存");
+    }
     [self renderRows];
 }
 

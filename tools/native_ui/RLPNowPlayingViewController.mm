@@ -594,6 +594,11 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
 - (void)applyLanguage {
     self.seek.toolTip = RLPTr(@"进度");
     self.repBtn.toolTip = RLPTr(@"循环方式");
+    self.prevBtn.toolTip = RLPTr(@"上一首");
+    self.playBtn.toolTip = RLPTr(@"播放 / 暂停");
+    self.nextBtn.toolTip = RLPTr(@"下一首");
+    self.stopBtn.toolTip = RLPTr(@"停止");
+    self.volume.toolTip = RLPTr(@"音量");
     [self applyVolumeLockedState:self.rawVolumeLocked];
 }
 
@@ -1009,8 +1014,10 @@ static BOOL RLPNPTextFieldIsEditing(NSTextField *field) {
     self.layer.borderColor = t.line.CGColor;
     for (NSTextField *l in @[self.posLabel, self.sepLabel, self.durLabel, self.volLabel])
         l.textColor = t.mut;
-    for (NSButton *b in @[self.prevBtn, self.playBtn, self.nextBtn, self.stopBtn])
+    for (NSButton *b in @[self.prevBtn, self.nextBtn, self.stopBtn])
         b.contentTintColor = t.text;
+    self.playBtn.layer.backgroundColor = t.accent.CGColor;
+    self.playBtn.contentTintColor = NSColor.whiteColor;
     self.volIcon.contentTintColor = t.mut;
     self.volDbField.textColor = t.text;
     self.volMuteBtn.contentTintColor = t.mut;
@@ -2449,6 +2456,8 @@ static NSString *RLPCastHandoffFailureText(NSDictionary *r) {
 @property (nonatomic, strong) NSTextField *metaLabel;
 @property (nonatomic, strong) NSTextView *lyricsView;
 @property (nonatomic, strong) NSTextField *lyricsEmpty;
+@property (nonatomic, copy) NSString *lyricsPlaceholderMainKey;
+@property (nonatomic, copy) NSString *lyricsPlaceholderDetailKey;
 // ---- 音频分析：一行四元素（动态 / 音质 / 假无损 / 展开）----
 @property (nonatomic, strong) NSView *anlRow;
 @property (nonatomic, strong) RLPAnlCardView *anlDyn;
@@ -2823,7 +2832,7 @@ static NSString *RLPCastHandoffFailureText(NSDictionary *r) {
         RLPRailWrapView *w=(RLPRailWrapView *)s.railChipWrap;
         w.contentOffset = w.contentOffset - deltaY;
     };
-    wrap.onOffsetChanged=^(CGFloat off){
+    wrap.onOffsetChanged=^(CGFloat off){(void)off;
         __typeof__(self) s=wsWrap; if(s) [s railLayoutChips];
     };
     NSMutableArray<RLPRailChipView *> *cards=[NSMutableArray array];
@@ -3526,6 +3535,8 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
 /// web `#npLyric` 空态 / `#lyricbox` 加载态的两行文案：
 /// 主行字号跟歌词 clamp（13~17），副行固定 12px + `--mut2`，居中、可换行（`maximumNumberOfLines=0`）。
 - (void)setLyricsPlaceholder:(NSString *)main detail:(NSString *)detail {
+    self.lyricsPlaceholderMainKey = [main copy] ?: @"";
+    self.lyricsPlaceholderDetailKey = [detail copy] ?: @"";
     const CGFloat size=(self.lyricPointSize>0.01)?self.lyricPointSize
         :RLPNPLyricPointSize(self.webCanvas.bounds.size.height);
     RLPTheme *t=[RLPTheme current];
@@ -3868,7 +3879,7 @@ static CGFloat RLPNPMetaChipWidth(NSButton *b) {
     NSOpenPanel *p=[NSOpenPanel openPanel];
     p.canChooseFiles=YES;p.canChooseDirectories=NO;p.allowsMultipleSelection=NO;
     p.message=RLPTr(@"选择一张图片作为歌曲封面");
-    p.allowedFileTypes=@[ @"jpg", @"jpeg", @"png", @"webp", @"gif" ];
+    RLPConfigureOpenPanelFileTypes(p, @[ @"jpg", @"jpeg", @"png", @"webp", @"gif" ]);
     if ([p runModal]!=NSModalResponseOK || !p.URL) return;
     [self setCoverAtPath:p.URL.path forTrack:self.currentPath];
 }
@@ -6058,8 +6069,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
     self.comparePaths = [NSMutableArray array];
     self.compareChecks = [NSMutableArray array];
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:[NSString stringWithFormat:@"/api/files?dir=%@", RLPEnc(dir)]
         completion:^(NSDictionary * _Nullable json) {
+        __strong __typeof__(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         NSArray *names = [json[@"files"] isKindOfClass:[NSArray class]] ? json[@"files"] : @[];
         NSString *base = path.lastPathComponent;
         for (id n in names) {
@@ -6068,11 +6082,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             NSButton *chk = [NSButton checkboxWithTitle:n target:nil action:nil];
             chk.state = [n isEqualToString:base] ? NSControlStateValueOn : NSControlStateValueOff;
             chk.font = t.small;
-            [self.compareList addArrangedSubview:chk];
-            [self.comparePaths addObject:full];
-            [self.compareChecks addObject:chk];
+            [strongSelf.compareList addArrangedSubview:chk];
+            [strongSelf.comparePaths addObject:full];
+            [strongSelf.compareChecks addObject:chk];
         }
-        if (!names.count) self.compareOut.string = RLPTr(@"该目录下没有可对比的音频文件");
+        if (!names.count) strongSelf.compareOut.string = RLPTr(@"该目录下没有可对比的音频文件");
     }];
     [self.comparePopover close];
     self.comparePopover = RLPShowCardPopover(self.titleLabel2, RLPCardController(s, 450, 320), 450);
@@ -6088,10 +6102,13 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     NSMutableArray *parts = [NSMutableArray array];
     for (NSString *p in sel) [parts addObject:[NSString stringWithFormat:@"file=%@", RLPEnc(p)]];
     self.compareOut.string = RLPTr(@"正在对齐并分析…");
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/compare" body:[parts componentsJoinedByString:@"&"]
         completion:^(NSDictionary * _Nullable r) {
+        __strong __typeof__(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         if (!r || ![r[@"ok"] boolValue]) {
-            self.compareOut.string = [r[@"error"] isKindOfClass:[NSString class]] ? r[@"error"] : RLPTr(@"对比失败");
+            strongSelf.compareOut.string = [r[@"error"] isKindOfClass:[NSString class]] ? r[@"error"] : RLPTr(@"对比失败");
             return;
         }
         NSMutableString *out = [NSMutableString string];
@@ -6122,7 +6139,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
             [out appendString:@"\n"];
         }
         if ([r[@"explanation"] length]) [out appendFormat:@"\n%@\n", r[@"explanation"]];
-        self.compareOut.string = out;
+        strongSelf.compareOut.string = out;
     }];
 }
 
@@ -6132,9 +6149,11 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     const NSUInteger gen = self.trackGeneration;
     NSString *tk = [self.trackKey copy] ?: @"";
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(self.currentPath),on?1:0];
+    __weak __typeof__(self) ws = self;
     [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
-        if(gen != self.trackGeneration || ![tk isEqualToString:(self.trackKey ?: @"")] || ![favoritePath isEqualToString:self.currentPath])return;
-        if (json && [json[@"ok"] boolValue]) {self.favorite=on;self.favoriteButton.title=on?@"♥":@"♡";RLPToast(RLPTr(on?@"已收藏":@"已取消收藏"));[[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self];}
+        __typeof__(self) s = ws;
+        if (!s || gen != s.trackGeneration || ![tk isEqualToString:(s.trackKey ?: @"")] || ![favoritePath isEqualToString:s.currentPath]) return;
+        if (json && [json[@"ok"] boolValue]) {s.favorite=on;s.favoriteButton.title=on?@"♥":@"♡";RLPToast(RLPTr(on?@"已收藏":@"已取消收藏"));[[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:s];}
         else RLPToast(RLPTr(@"收藏失败"));
     }];
 }
@@ -6484,6 +6503,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 }
 
 - (void)applyTheme {
+    if (!self.isViewLoaded) return;
     RLPTheme *t=[RLPTheme current];self.webCanvas.needsDisplay=YES;
     self.cover.layer.backgroundColor=t.bg2.CGColor;self.cover.layer.borderColor=t.line.CGColor;
     self.coverShadow.layer.backgroundColor=t.bg2.CGColor;
@@ -6512,6 +6532,10 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
                          NSParagraphStyleAttributeName:ps}];
     }
     self.lyricsEmpty.textColor=t.mut2;
+    if (!self.lyricLines.count) {
+        [self setLyricsPlaceholder:(self.lyricsPlaceholderMainKey.length ? self.lyricsPlaceholderMainKey : @"没有歌词")
+                            detail:(self.lyricsPlaceholderDetailKey ?: @"")];
+    }
     self.railHide.contentTintColor=t.mut2;
     for(NSView *p in @[self.analysisPanel,self.railPanel]){p.wantsLayer=YES;p.layer.cornerRadius=14;p.layer.borderWidth=1;p.layer.borderColor=t.line.CGColor;p.layer.backgroundColor=[t.isLight?[NSColor colorWithSRGBRed:15/255. green:23/255. blue:42/255. alpha:.04]:[NSColor colorWithWhite:1 alpha:.045] CGColor];}
     self.waveformView.wantsLayer=YES;self.waveformView.layer.cornerRadius=10;self.waveformView.layer.masksToBounds=YES;
@@ -6551,6 +6575,7 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
 
 - (void)applyLanguage {
     self.pageTitle = RLPTr(@"正在播放");
+    if (!self.isViewLoaded) return;
     {
         NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
         ps.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -6588,7 +6613,8 @@ static NSString *RLPNowPlayingCastDeviceLabel(NSString *device) {
     [self applyCastChipStyle];
     [self.webControls applyLanguage];
     if (!self.lyricLines.count) {
-        self.lyricsEmpty.stringValue = RLPTr(@"没有歌词");
+        [self setLyricsPlaceholder:(self.lyricsPlaceholderMainKey.length ? self.lyricsPlaceholderMainKey : @"没有歌词")
+                            detail:(self.lyricsPlaceholderDetailKey ?: @"")];
     }
     [self renderRailMetadata];
     [self.knowledge applyLanguage];

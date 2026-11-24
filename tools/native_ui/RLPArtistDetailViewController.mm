@@ -35,6 +35,7 @@
 //   GET /api/entity/summary?kind=person&name=…&lang=zh[&refresh=1]
 // 两者各自独立异步填充：骨架 + hero + 专辑网格先出来，加载文案只出现在卡片内。
 #import "RLPArtistDetailViewController.h"
+#import <QuartzCore/QuartzCore.h>
 #import "RLPCoreClient.h"
 #import "RLPModels.h"
 #import "RLPSupport.h"
@@ -66,6 +67,102 @@ static const CGFloat kArtistFieldRowGap = 13.0;
 - (BOOL)isFlipped { return YES; }
 @end
 
+/// 固定宿主的专辑网格布局：AppKit 自带的 NSCollectionViewFlowLayout 在
+/// NSCollectionView 并非 enclosingScrollView.documentView（而是嵌在有左右留白的 _doc 里）时，
+/// 滚动触发重排会错拿 enclosingScrollView.contentView.bounds.size.width 当版心，
+/// 导致间距瞬间被拉宽、最右列溢出进滚动条。这里严格只按 collectionView.bounds 排布，
+/// 并在纵向滚动时保持横向位置恒定，同时仍继承 NSCollectionViewFlowLayout 以兼容既有接口。
+@interface RLPArtistAlbumFlowLayout : NSCollectionViewFlowLayout
+@end
+
+@implementation RLPArtistAlbumFlowLayout {
+    NSMutableArray<NSCollectionViewLayoutAttributes *> *_cachedAttrs;
+    NSSize _cachedContentSize;
+    CGFloat _preparedWidth;
+}
+
+- (void)prepareLayout {
+    if (!_cachedAttrs) _cachedAttrs = [NSMutableArray array];
+    [_cachedAttrs removeAllObjects];
+
+    NSCollectionView *cv = self.collectionView;
+    const CGFloat boundsW = cv ? NSWidth(cv.bounds) : 0.0;
+    _preparedWidth = boundsW;
+    const NSInteger count = (cv && cv.numberOfSections > 0) ? [cv numberOfItemsInSection:0] : 0;
+    const NSEdgeInsets ins = self.sectionInset;
+    const CGFloat availW = MAX(0.0, boundsW - ins.left - ins.right);
+    const CGFloat itemW = MAX(1.0, self.itemSize.width);
+    const CGFloat itemH = MAX(1.0, self.itemSize.height);
+    const CGFloat minGapX = MAX(0.0, self.minimumInteritemSpacing);
+    const CGFloat gapY = MAX(0.0, self.minimumLineSpacing);
+
+    if (count <= 0 || boundsW < 1.0) {
+        _cachedContentSize = NSMakeSize(boundsW, 0.0);
+        return;
+    }
+
+    NSInteger cols = 1;
+    if (availW >= itemW) {
+        cols = MAX(1, (NSInteger)floor((availW + minGapX + 0.01) / (itemW + minGapX)));
+    }
+    const CGFloat usedW = (CGFloat)cols * itemW + (CGFloat)(cols - 1) * minGapX;
+    const CGFloat extra = (cols > 1 && count >= cols) ? MAX(0.0, availW - usedW) : 0.0;
+    const CGFloat actualGapX = (cols > 1) ? (minGapX + extra / (CGFloat)(cols - 1)) : 0.0;
+    const CGFloat maxItemX = ins.left + MAX(0.0, availW - itemW);
+
+    for (NSInteger i = 0; i < count; ++i) {
+        const NSInteger row = i / cols;
+        const NSInteger col = i % cols;
+        CGFloat x = ins.left;
+        if (cols > 1 && col > 0) {
+            if (col == cols - 1 && count >= cols && availW >= itemW) {
+                x = ins.left + availW - itemW;
+            } else {
+                x = ins.left + round(((CGFloat)col * (itemW + actualGapX)) * 2.0) * 0.5;
+                if (x > maxItemX) x = maxItemX;
+            }
+        }
+        const CGFloat y = ins.top + (CGFloat)row * (itemH + gapY);
+        NSIndexPath *ip = [NSIndexPath indexPathForItem:i inSection:0];
+        NSCollectionViewLayoutAttributes *a =
+            [NSCollectionViewLayoutAttributes layoutAttributesForItemWithIndexPath:ip];
+        a.frame = NSMakeRect(x, y, itemW, itemH);
+        [_cachedAttrs addObject:a];
+    }
+
+    const NSInteger rows = (count + cols - 1) / cols;
+    const CGFloat totalH = ins.top + ins.bottom + (CGFloat)rows * itemH + (CGFloat)MAX(0, rows - 1) * gapY;
+    _cachedContentSize = NSMakeSize(boundsW, totalH);
+}
+
+- (NSSize)collectionViewContentSize {
+    return _cachedContentSize;
+}
+
+- (NSArray<NSCollectionViewLayoutAttributes *> *)layoutAttributesForElementsInRect:(NSRect)rect {
+    NSMutableArray<NSCollectionViewLayoutAttributes *> *res = [NSMutableArray array];
+    for (NSCollectionViewLayoutAttributes *a in _cachedAttrs) {
+        if (NSIntersectsRect(a.frame, rect)) {
+            [res addObject:a];
+        }
+    }
+    return res;
+}
+
+- (NSCollectionViewLayoutAttributes *)layoutAttributesForItemAtIndexPath:(NSIndexPath *)indexPath {
+    if (!indexPath || indexPath.section != 0 || indexPath.item < 0 ||
+        indexPath.item >= (NSInteger)_cachedAttrs.count) {
+        return nil;
+    }
+    return _cachedAttrs[(NSUInteger)indexPath.item];
+}
+
+- (BOOL)shouldInvalidateLayoutForBoundsChange:(NSRect)newBounds {
+    return fabs(NSWidth(newBounds) - _preparedWidth) > 0.5;
+}
+
+@end
+
 static NSMutableParagraphStyle *RLPArtistPara(CGFloat lineSpacing) {
     NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
     ps.lineBreakMode = NSLineBreakByWordWrapping;
@@ -88,10 +185,24 @@ static NSAttributedString *RLPArtistAttr(NSString *s, NSFont *font, NSColor *col
                                            attributes:RLPArtistAttrs(font, color, kern, lineSpacing)];
 }
 
-/// 多行文本高度（与显示侧同一套 attributes 量，量出来才会和排出来一致）。
+static NSAttributedString *RLPArtistSingleLineAttr(NSString *s, NSFont *font, NSColor *color,
+                                                   CGFloat kern, NSTextAlignment alignment) {
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    ps.alignment = alignment;
+    NSMutableDictionary *a = [NSMutableDictionary dictionary];
+    if (font) a[NSFontAttributeName] = font;
+    if (color) a[NSForegroundColorAttributeName] = color;
+    a[NSParagraphStyleAttributeName] = ps;
+    if (fabs(kern) > 0.001) a[NSKernAttributeName] = @(kern);
+    return [[NSAttributedString alloc] initWithString:s ?: @"" attributes:a];
+}
+
+/// 多行文本高度（与显示侧同一套 attributes 量，减 4pt 匹配 NSTextFieldCell 内边距，避免最末行被裁切）。
 static CGFloat RLPArtistTextH(NSString *s, NSFont *font, CGFloat width, CGFloat lineSpacing) {
     if (!s.length || !font || width < 1.0) return 0.0;
-    NSRect br = [s boundingRectWithSize:NSMakeSize(width, CGFLOAT_MAX)
+    const CGFloat wrapW = MAX(1.0, width - 4.0);
+    NSRect br = [s boundingRectWithSize:NSMakeSize(wrapW, CGFLOAT_MAX)
                                 options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                              attributes:RLPArtistAttrs(font, nil, 0, lineSpacing)];
     return ceil(br.size.height);
@@ -167,9 +278,16 @@ static NSTextField *RLPArtistMakeLabel(NSString *ident) {
     l.drawsBackground = NO;
     l.bordered = NO;
     l.editable = NO;
-    l.selectable = YES;
+    l.selectable = NO;
     l.translatesAutoresizingMaskIntoConstraints = YES;
     l.autoresizingMask = NSViewNotSizable;
+    return l;
+}
+
+static NSTextField *RLPArtistMakeSelectableLabel(NSString *ident) {
+    NSTextField *l = RLPArtistMakeLabel(ident);
+    l.selectable = YES;
+    l.allowsEditingTextAttributes = YES;
     return l;
 }
 
@@ -185,59 +303,203 @@ static void RLPArtistStyleWrap(NSTextField *tf) {
     }
 }
 
-/// web `.btn` / `.cite-chip` 的底座：一个自绘圆角描边的无边框按钮。
+/// web `.btn` / `.cite-chip` 的底座：精确居中自绘圆角芯片/动作按钮。
 @interface RLPArtistChip : NSButton
-@property (nonatomic, assign) BOOL filled;      // YES = background:var(--hov)（web .btn）
-@property (nonatomic, assign) CGFloat radius;   // 默认 rSm
-/// 用纯文本设置标题（同时写 title 与 attributedTitle）。
-/// 为什么必须同时写：排版本与 RLPArtistChipW 都按 `title` 量宽、NSButton 绘制按
-/// `attributedTitle`。只设 attributedTitle 会得到「空框 + 最小宽度」——
-/// 2026-11-21 离屏截图实测：三个 hero 按钮成了三个空白胶囊，
-/// 来源行「复制链接 / 复制」芯片与整行徽章也一起塌掉/被撑满。
+@property (nonatomic, assign) BOOL filled;         // YES = background:var(--hov) + 边框
+@property (nonatomic, assign) BOOL accentFill;     // YES = 主色渐变实心动作按钮
+@property (nonatomic, assign) BOOL ghost;          // YES = 无静态边框（仅悬停出底），用于顶栏返回面包屑
+@property (nonatomic, assign) BOOL playTriangle;   // YES = 文字左侧自绘矢量播放三角（同 RLPAlbumButton）
+@property (nonatomic, copy, nullable) NSString *leadingSymbol;
+@property (nonatomic, assign) CGFloat radius;      // 默认 8.0
+@property (nonatomic, assign) CGFloat padX;        // 默认 13.0（两侧对称内边距）
+@property (nonatomic, strong, nullable) NSColor *chipTextColor;
+@property (nonatomic, strong, nullable) NSFont *chipFont;
 - (void)setText:(NSString *)text color:(NSColor *)color font:(NSFont *)font;
+- (CGFloat)preferredWidth;
 @end
 
-@implementation RLPArtistChip
+@implementation RLPArtistChip {
+    BOOL _hovered;
+    NSTrackingArea *_hoverArea;
+}
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
         self.bordered = NO;
         self.bezelStyle = NSBezelStyleRegularSquare;
+        self.alignment = NSTextAlignmentCenter;
         self.wantsLayer = NO;
         self.radius = 8.0;
+        self.padX = 13.0;
     }
     return self;
 }
 
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_hoverArea) [self removeTrackingArea:_hoverArea];
+    _hoverArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                              options:(NSTrackingMouseEnteredAndExited |
+                                                       NSTrackingActiveInKeyWindow |
+                                                       NSTrackingInVisibleRect)
+                                                owner:self
+                                             userInfo:nil];
+    [self addTrackingArea:_hoverArea];
+}
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    [self addCursorRect:self.bounds cursor:[NSCursor pointingHandCursor]];
+}
+- (void)mouseEntered:(NSEvent *)event { (void)event; _hovered = YES; [self setNeedsDisplay:YES]; }
+- (void)mouseExited:(NSEvent *)event { (void)event; _hovered = NO; [self setNeedsDisplay:YES]; }
+
 - (void)setText:(NSString *)text color:(NSColor *)color font:(NSFont *)font {
     NSString *s = text ?: @"";
     NSFont *f = font ?: [NSFont systemFontOfSize:12];
+    _chipFont = f;
+    _chipTextColor = color;
     self.font = f;
-    self.title = s;                       // 量宽来源
-    self.attributedTitle = RLPArtistAttr(s, f, color ?: [RLPTheme current].text, 0, 0);  // 绘制来源
+    self.title = s;
+    self.alignment = NSTextAlignmentCenter;
+    [self setNeedsDisplay:YES];
 }
+
+- (CGFloat)iconWidth {
+    if (self.playTriangle) return 8.0;
+    if (self.leadingSymbol.length || self.image) return 11.0;
+    return 0.0;
+}
+
+- (CGFloat)iconGap {
+    return ([self iconWidth] > 0.0) ? (self.playTriangle ? 7.0 : 5.0) : 0.0;
+}
+
+- (CGFloat)preferredWidth {
+    NSFont *f = _chipFont ?: (self.font ?: [NSFont systemFontOfSize:12]);
+    CGFloat tw = ceil([(self.title ?: @"") sizeWithAttributes:@{ NSFontAttributeName: f }].width);
+    CGFloat iw = [self iconWidth];
+    CGFloat ig = (self.title.length > 0 && iw > 0.0) ? [self iconGap] : 0.0;
+    CGFloat px = (self.padX > 0.0) ? self.padX : 12.0;
+    return MAX(34.0, ceil(tw + iw + ig + px * 2.0));
+}
+
 - (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
     RLPTheme *t = [RLPTheme current];
-    // 先画背景与边框，再让 NSButton **自己画标题**。
-    //
-    // 为什么不能只画圆角框就返回：NSButton 的标题由它自己的 cell 绘制，
-    // 覆盖 drawRect 而不调 super 就等于把文字整个抹掉 —— 画面上只剩空药丸。
-    // （2026-11-21 离屏截图实测：hero 三个按钮与来源行的复制芯片全是空框，
-    //  而 title/attributedTitle 都有值。判据只量几何，抓不到"字没画出来"。）
-    NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0.5, 0.5)
+    const NSRect b = self.bounds;
+    if (NSWidth(b) < 2.0 || NSHeight(b) < 2.0) return;
+
+    NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(b, 0.5, 0.5)
                                                       xRadius:self.radius yRadius:self.radius];
-    if (self.filled) { [t.hov setFill]; [p fill]; }
-    [t.line setStroke];
-    p.lineWidth = 1.0;
-    [p stroke];
-    [super drawRect:dirtyRect];   // ← 标题由 cell 画
+    const BOOL pressed = self.isHighlighted;
+    if (self.accentFill) {
+        NSColor *c0 = (_hovered || pressed) ? t.accent2 : t.accent;
+        NSColor *c1 = t.accent2;
+        NSGradient *grad = [[NSGradient alloc] initWithStartingColor:c0 endingColor:c1];
+        [grad drawInBezierPath:p angle:-90];
+    } else if (self.ghost) {
+        if (_hovered || pressed) {
+            [(pressed ? t.hov2 : t.hov) setFill];
+            [p fill];
+            [t.line setStroke];
+            p.lineWidth = 1.0;
+            [p stroke];
+        }
+    } else {
+        if (pressed) {
+            [t.hov2 setFill];
+            [p fill];
+        } else if (self.filled) {
+            [(_hovered ? t.hov2 : t.hov) setFill];
+            [p fill];
+        } else if (_hovered) {
+            [t.hov setFill];
+            [p fill];
+        }
+        [(_hovered || pressed ? t.line2 : t.line) setStroke];
+        p.lineWidth = 1.0;
+        [p stroke];
+    }
+
+    NSFont *f = _chipFont ?: (self.font ?: [NSFont systemFontOfSize:12]);
+    NSColor *fg = self.accentFill ? NSColor.whiteColor : (_chipTextColor ?: t.text);
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    ps.alignment = NSTextAlignmentLeft;
+    NSDictionary *attrs = @{
+        NSFontAttributeName: f,
+        NSForegroundColorAttributeName: fg,
+        NSParagraphStyleAttributeName: ps
+    };
+    NSString *title = self.title ?: @"";
+    NSSize tsz = [title sizeWithAttributes:attrs];
+    const CGFloat iw = [self iconWidth];
+    const CGFloat ig = (title.length > 0 && iw > 0.0) ? [self iconGap] : 0.0;
+    const CGFloat pad = MAX(4.0, self.padX);
+    const CGFloat maxContentW = MAX(4.0, NSWidth(b) - pad * 2.0);
+    const CGFloat textW = MIN(ceil(tsz.width), MAX(0.0, maxContentW - iw - ig));
+    const CGFloat totalW = iw + ig + textW;
+    const CGFloat startX = floor((NSWidth(b) - totalW) * 0.5);
+
+    if (self.playTriangle) {
+        const CGFloat th = 10.0;
+        const CGFloat ty = round((NSHeight(b) - th) * 0.5);
+        NSBezierPath *tri = [NSBezierPath bezierPath];
+        [tri moveToPoint:NSMakePoint(startX, ty)];
+        [tri lineToPoint:NSMakePoint(startX + iw, ty + th * 0.5)];
+        [tri lineToPoint:NSMakePoint(startX, ty + th)];
+        [tri closePath];
+        [fg setFill];
+        [tri fill];
+    } else if (iw > 0.0) {
+        NSImage *sym = self.leadingSymbol.length
+            ? [NSImage imageWithSystemSymbolName:self.leadingSymbol accessibilityDescription:title]
+            : self.image;
+        if (sym) {
+            if (@available(macOS 11.0, *)) {
+                NSImageSymbolConfiguration *cfg =
+                    [NSImageSymbolConfiguration configurationWithPointSize:MAX(10.0, f.pointSize - 0.5)
+                                                                    weight:NSFontWeightMedium];
+                NSImage *configured = [sym imageWithSymbolConfiguration:cfg];
+                if (configured) sym = configured;
+            }
+            NSColor *symColor = self.ghost ? t.mut : fg;
+            NSImage *tinted = [NSImage imageWithSize:NSMakeSize(iw, iw) flipped:NO drawingHandler:^BOOL(NSRect dst) {
+                [sym drawInRect:dst fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+                       fraction:1.0 respectFlipped:NO hints:nil];
+                [symColor set];
+                NSRectFillUsingOperation(dst, NSCompositingOperationSourceAtop);
+                return YES;
+            }];
+            const CGFloat iy = round((NSHeight(b) - iw) * 0.5);
+            [tinted drawInRect:NSMakeRect(startX, iy, iw, iw)
+                      fromRect:NSZeroRect
+                     operation:NSCompositingOperationSourceOver
+                      fraction:1.0
+                respectFlipped:YES
+                         hints:nil];
+        }
+    }
+
+    if (title.length > 0 && textW > 0.5) {
+        const CGFloat tx = startX + iw + ig;
+        const CGFloat th = ceil(tsz.height);
+        const CGFloat ty = round((NSHeight(b) - th) * 0.5);
+        [title drawInRect:NSMakeRect(tx, ty, textW + 2.0, th) withAttributes:attrs];
+    }
 }
 @end
 
-/// 芯片推荐宽度：文字宽 + 左右 9pt。
 static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     CGFloat w = ceil([(title ?: @"") sizeWithAttributes:@{ NSFontAttributeName: font ?: [NSFont systemFontOfSize:12] }].width);
-    return MAX(32.0, w + 20.0);
+    return MAX(34.0, w + 26.0);
+}
+
+static CGFloat RLPArtistChipWidth(NSButton *btn) {
+    if ([btn isKindOfClass:[RLPArtistChip class]]) {
+        return [(RLPArtistChip *)btn preferredWidth];
+    }
+    return RLPArtistChipW(btn.title, btn.font);
 }
 
 #pragma mark - 字段行（web .efrow：标签在上、值在下）
@@ -272,7 +534,7 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         [self addSubview:_label];
 
         // web .efrow .vl{font-size:12.5px;line-height:1.72;color:var(--txt)}
-        _value = RLPArtistMakeLabel(@"efrow.value");
+        _value = RLPArtistMakeSelectableLabel(@"efrow.value");
         _value.font = [NSFont systemFontOfSize:12.5];
         _value.textColor = t.text;
         RLPArtistStyleWrap(_value);
@@ -344,22 +606,19 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     const CGFloat w = MAX(1.0, width);
     const CGFloat colGap = kArtistFieldColGap;
     const CGFloat rowGap = kArtistFieldRowGap;
-    // 与 web 的 `repeat(auto-fill, minmax(178px, 1fr))` 同口径：
-    // 列数 = 能塞下多少个「不小于 178pt 的等宽列」，而不是写死两列。
-    // 宽窗口因此自然变成 3–4 列，短字段不再拖出一大片空白。
+    // 与 web 的 `repeat(auto-fill, minmax(178px, 1fr))` 同口径，上限 4 列避免超宽屏拆得太碎。
     NSInteger cols = (NSInteger)floor((w + colGap) / (kArtistFieldMinW + colGap));
-    cols = MAX(1, MIN(cols, 6));                 // 上限 6 列，避免超宽屏把字段挤成一条缝
-    // 列数不得超过**实际要显示的字段数**：只有 2 个字段时按 6 列排，
-    // 内容会全挤在左边、右边整片空着 —— 用户 2026-11-21 截图里
-    // 「风格 / 代表作品」两项之间空出巨大间隔就是这个。
-    // （web 的 auto-fill 有同样的收缩行为：空轨道不占列宽。）
+    cols = MAX(1, MIN(cols, 4));
     {
         NSInteger visible = 0;
         for (NSUInteger i = 0; i < _items.count; ++i) if (!_items[i].hidden) ++visible;
         if (visible > 0) cols = MIN(cols, MAX(1, visible));
     }
     _columnCount = cols;
-    const CGFloat colW = MAX(1.0, (w - colGap * (CGFloat)(cols - 1)) / (CGFloat)MAX(1, cols));
+    const CGFloat naturalColW = MAX(1.0, (w - colGap * (CGFloat)(cols - 1)) / (CGFloat)MAX(1, cols));
+    // 宽屏且轨道较宽时把默认列宽限制在 300pt，避免仅有 2–3 个短字段时中间裂出 700pt+ 大空白；
+    // 同时允许每行最后一个短字段向右借用余宽，让稍长的代表作品列表能单行展示。
+    const CGFloat trackW = (cols > 1 && w > 760.0) ? MIN(naturalColW, 300.0) : naturalColW;
 
     CGFloat y = 0.0, rowH = 0.0;
     NSInteger col = 0;
@@ -370,8 +629,20 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         const BOOL wide = _wides[i].boolValue;
         const BOOL full = wide || cols <= 1;
         if (wide && col > 0) { y += rowH + rowGap; col = 0; rowH = 0.0; }
-        const CGFloat itemW = full ? w : colW;
-        const CGFloat x = (CGFloat)col * (colW + colGap);
+        const CGFloat x = full ? 0.0 : (CGFloat)col * (trackW + colGap);
+        BOOL nextIsWideOrEnd = YES;
+        for (NSUInteger j = i + 1; j < _items.count; ++j) {
+            if (_items[j].hidden) continue;
+            nextIsWideOrEnd = _wides[j].boolValue;
+            break;
+        }
+        const BOOL lastOnRow = !full && ((col + 1 >= cols) || nextIsWideOrEnd);
+        CGFloat itemW = full ? w : trackW;
+        if (lastOnRow && trackW < naturalColW) {
+            itemW = MIN(MAX(1.0, w - x), MAX(trackW, 640.0));
+        } else {
+            itemW = MIN(MAX(1.0, w - x), itemW);
+        }
         row.frame = NSMakeRect(x, y, itemW, row.frame.size.height);
         const CGFloat h = [row layoutWidth:itemW];
         rowH = MAX(rowH, h);
@@ -389,6 +660,52 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 #pragma mark - 专辑卡片（168x214）
 
+@interface RLPArtistStyleBadgeView : RLPArtistFlippedView
+@property (nonatomic, strong, readonly) NSTextField *label;
+@property (nonatomic, strong, readonly) NSFont *badgeFont;
+- (instancetype)initWithTitle:(NSString *)title;
+- (CGFloat)preferredWidth;
+@end
+
+@implementation RLPArtistStyleBadgeView
+- (instancetype)initWithTitle:(NSString *)title {
+    self = [super initWithFrame:NSZeroRect];
+    if (self) {
+        RLPTheme *t = [RLPTheme current];
+        self.identifier = @"artist.style.badge";
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 6.0;
+        self.layer.masksToBounds = YES;
+        self.layer.backgroundColor = t.accentWeak.CGColor;
+        _badgeFont = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+        _label = [NSTextField labelWithString:title ?: @""];
+        _label.font = _badgeFont;
+        _label.textColor = t.accentText;
+        _label.attributedStringValue = RLPArtistSingleLineAttr(title ?: @"", _badgeFont, t.accentText, 0, NSTextAlignmentCenter);
+        _label.alignment = NSTextAlignmentCenter;
+        _label.maximumNumberOfLines = 1;
+        _label.lineBreakMode = NSLineBreakByTruncatingTail;
+        _label.drawsBackground = NO;
+        _label.wantsLayer = NO;
+        [self addSubview:_label];
+    }
+    return self;
+}
+- (CGFloat)preferredWidth {
+    NSString *s = _label.stringValue ?: @"";
+    CGFloat w = ceil([s sizeWithAttributes:@{ NSFontAttributeName: _badgeFont }].width);
+    return MAX(32.0, w + 20.0);
+}
+- (void)layout {
+    [super layout];
+    const CGFloat h = NSHeight(self.bounds);
+    const CGFloat w = NSWidth(self.bounds);
+    const CGFloat lh = ceil([_label sizeThatFits:NSMakeSize(MAX(1.0, w - 12.0), CGFLOAT_MAX)].height);
+    const CGFloat ly = MAX(0.0, round((h - lh) * 0.5));
+    _label.frame = NSMakeRect(6.0, ly, MAX(0.0, w - 12.0), lh);
+}
+@end
+
 /// 资料来源的一行（web `.trow.source-row`）：整行 hov 底 + 左侧「来源徽章」药丸。
 ///
 /// 药丸底必须由**行视图**在文字之前画，不能挂在徽章 label 的 layer 上：
@@ -399,7 +716,9 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 @property (nonatomic, strong, readonly) NSView *badgePill;
 @end
 
-@implementation RLPArtistSourceRow
+@implementation RLPArtistSourceRow {
+    NSTrackingArea *_hoverArea;
+}
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
@@ -412,6 +731,35 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     }
     return self;
 }
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_hoverArea) [self removeTrackingArea:_hoverArea];
+    _hoverArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                              options:(NSTrackingMouseEnteredAndExited |
+                                                       NSTrackingActiveInKeyWindow |
+                                                       NSTrackingInVisibleRect)
+                                                owner:self
+                                             userInfo:nil];
+    [self addTrackingArea:_hoverArea];
+}
+- (void)mouseEntered:(NSEvent *)event {
+    (void)event;
+    RLPTheme *t = [RLPTheme current];
+    self.layer.backgroundColor = t.hov2.CGColor;
+    self.layer.borderColor = t.line.CGColor;
+}
+- (void)mouseExited:(NSEvent *)event {
+    (void)event;
+    RLPTheme *t = [RLPTheme current];
+    self.layer.backgroundColor = t.hov.CGColor;
+    self.layer.borderColor = t.hairline.CGColor;
+}
+@end
+
+@class RLPArtistAlbumItem;
+@interface RLPArtistAlbumCardView : NSView
+@property (nonatomic, weak) RLPArtistAlbumItem *item;
+@property (nonatomic, strong) NSTrackingArea *hoverArea;
 @end
 
 @interface RLPArtistAlbumItem : NSCollectionViewItem
@@ -419,22 +767,49 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 @property (nonatomic, strong) NSTextField *placeholderLabel;
 @property (nonatomic, strong) NSTextField *nameLabel;
 @property (nonatomic, strong) NSTextField *yearLabel;
+@property (nonatomic, strong) NSButton *playBadge;
 @property (nonatomic, copy) NSString *albumKey;
 - (void)setAlbum:(RLPAlbum *)album;
+- (void)cardHoverChanged:(BOOL)hovered;
+- (void)applyTheme;
 @end
 
-@implementation RLPArtistAlbumItem
+@implementation RLPArtistAlbumCardView
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_hoverArea) [self removeTrackingArea:_hoverArea];
+    _hoverArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                              options:(NSTrackingMouseEnteredAndExited |
+                                                       NSTrackingActiveAlways |
+                                                       NSTrackingInVisibleRect)
+                                                owner:self
+                                             userInfo:nil];
+    [self addTrackingArea:_hoverArea];
+}
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    [self addCursorRect:self.bounds cursor:[NSCursor pointingHandCursor]];
+}
+- (void)mouseEntered:(NSEvent *)event { (void)event; [self.item cardHoverChanged:YES]; }
+- (void)mouseExited:(NSEvent *)event { (void)event; [self.item cardHoverChanged:NO]; }
+@end
+
+@implementation RLPArtistAlbumItem { BOOL _hovered; }
 
 - (void)loadView {
     RLPTheme *t = [RLPTheme current];
-    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 168, 214)];
+    RLPArtistAlbumCardView *v = [[RLPArtistAlbumCardView alloc] initWithFrame:NSMakeRect(0, 0, 168, 214)];
+    v.item = self;
     v.wantsLayer = YES;
+    v.layer.masksToBounds = NO;
     self.view = v;
 
-    _coverView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    _coverView = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
     _coverView.wantsLayer = YES;
-    _coverView.layer.cornerRadius = 8;
+    _coverView.layer.cornerRadius = 10;
     _coverView.layer.masksToBounds = YES;
+    _coverView.layer.borderWidth = 1.0;
+    _coverView.layer.borderColor = t.hairline.CGColor;
     _coverView.layer.backgroundColor = t.bg2.CGColor;
     _coverView.imageScaling = NSImageScaleProportionallyUpOrDown;
     _coverView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -463,49 +838,100 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _yearLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [v addSubview:_yearLabel];
 
+    _playBadge = [[NSButton alloc] initWithFrame:NSZeroRect];
+    _playBadge.bordered = NO;
+    _playBadge.imagePosition = NSImageOnly;
+    _playBadge.imageScaling = NSImageScaleProportionallyDown;
+    _playBadge.image = [NSImage imageWithSystemSymbolName:@"play.fill"
+                                   accessibilityDescription:RLPTr(@"播放整张")];
+    _playBadge.contentTintColor = NSColor.whiteColor;
+    _playBadge.toolTip = RLPTr(@"播放整张");
+    _playBadge.target = self;
+    _playBadge.action = @selector(onPlayBadge:);
+    _playBadge.identifier = @"artist.album.playbadge";
+    _playBadge.wantsLayer = YES;
+    _playBadge.layer.cornerRadius = 16;
+    _playBadge.layer.backgroundColor = t.accent.CGColor;
+    _playBadge.hidden = YES;
+    _playBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    [v addSubview:_playBadge];
+
     [NSLayoutConstraint activateConstraints:@[
         [_coverView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
         [_coverView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
         [_coverView.topAnchor constraintEqualToAnchor:v.topAnchor],
-        [_coverView.heightAnchor constraintEqualToConstant:168],
-
+        [_coverView.heightAnchor constraintEqualToAnchor:_coverView.widthAnchor],
         [_placeholderLabel.centerXAnchor constraintEqualToAnchor:_coverView.centerXAnchor],
         [_placeholderLabel.centerYAnchor constraintEqualToAnchor:_coverView.centerYAnchor],
-
+        [_playBadge.trailingAnchor constraintEqualToAnchor:_coverView.trailingAnchor constant:-8],
+        [_playBadge.bottomAnchor constraintEqualToAnchor:_coverView.bottomAnchor constant:-8],
+        [_playBadge.widthAnchor constraintEqualToConstant:32],
+        [_playBadge.heightAnchor constraintEqualToConstant:32],
         [_nameLabel.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:2],
         [_nameLabel.trailingAnchor constraintEqualToAnchor:v.trailingAnchor constant:-2],
         [_nameLabel.topAnchor constraintEqualToAnchor:_coverView.bottomAnchor constant:8],
-
         [_yearLabel.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
         [_yearLabel.trailingAnchor constraintEqualToAnchor:_nameLabel.trailingAnchor],
         [_yearLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:2],
     ]];
 }
 
-- (void)setSelected:(BOOL)selected {
-    [super setSelected:selected];
+- (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
-    if (selected) {
-        self.view.layer.backgroundColor = [t.accent colorWithAlphaComponent:0.15].CGColor;
-        self.view.layer.cornerRadius = 8;
-    } else {
-        self.view.layer.backgroundColor = NSColor.clearColor.CGColor;
-    }
+    _nameLabel.textColor = t.text;
+    _yearLabel.textColor = t.mut;
+    _placeholderLabel.textColor = t.mut;
+    _coverView.layer.backgroundColor = t.bg2.CGColor;
+    _playBadge.layer.backgroundColor = t.accent.CGColor;
+    [self refreshHighlight];
 }
 
-- (void)setAlbum:(RLPAlbum *)album {
+- (void)refreshHighlight {
     RLPTheme *t = [RLPTheme current];
+    const BOOL on = _hovered || self.selected;
+    _coverView.layer.borderWidth = on ? 2.0 : 1.0;
+    _coverView.layer.borderColor = on ? t.accent.CGColor : t.hairline.CGColor;
+    self.view.layer.shadowOpacity = on ? 0.16 : 0.0;
+    self.view.layer.shadowRadius = on ? 7 : 0;
+    self.view.layer.shadowOffset = CGSizeMake(0, -2);
+    self.view.layer.shadowColor = NSColor.blackColor.CGColor;
+}
+
+- (void)setSelected:(BOOL)selected { [super setSelected:selected]; [self refreshHighlight]; }
+- (void)cardHoverChanged:(BOOL)hovered { _hovered = hovered; _playBadge.hidden = !hovered; [self refreshHighlight]; }
+- (void)onPlayBadge:(id)sender { (void)sender; if (self.albumKey.length) RLPPlayAlbum(self.albumKey, 0); }
+
+- (void)setAlbum:(RLPAlbum *)album {
+    _hovered = NO;
+    _playBadge.hidden = YES;
     self.albumKey = album.key ?: @"";
-    self.nameLabel.stringValue = album.name.length ? album.name : RLPTr(@"未知专辑");
-    self.yearLabel.stringValue = album.year > 0 ? [NSString stringWithFormat:@"%ld", (long)album.year] : @"—";
-    self.coverView.layer.backgroundColor = t.bg2.CGColor;
+    self.nameLabel.stringValue = album.name.length ? album.name : (album.key.length ? album.key : @"");
+    self.placeholderLabel.stringValue = album.name.length ? [album.name substringToIndex:1] : @"♪";
+
+    NSMutableArray<NSString *> *metaParts = [NSMutableArray array];
+    if (album.year > 0) [metaParts addObject:[NSString stringWithFormat:@"%ld", (long)album.year]];
+    if (album.trackCount > 0) [metaParts addObject:[NSString stringWithFormat:@"%ld %@", (long)album.trackCount, RLPTr(@"首")]];
+    if (album.sampleRate > 0) {
+        NSString *sr = (album.sampleRate % 1000 == 0)
+            ? [NSString stringWithFormat:@"%ldk", (long)(album.sampleRate / 1000)]
+            : [NSString stringWithFormat:@"%.1fk", album.sampleRate / 1000.0];
+        [metaParts addObject:(album.bits > 0 ? [NSString stringWithFormat:@"%@/%ld", sr, (long)album.bits] : sr)];
+    } else if (album.duration > 0.5) {
+        const NSInteger sec = (NSInteger)llround(album.duration);
+        const NSInteger h = sec / 3600, m = (sec % 3600) / 60, sc = sec % 60;
+        [metaParts addObject:(h > 0 ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)h, (long)m, (long)sc]
+                                    : [NSString stringWithFormat:@"%ld:%02ld", (long)m, (long)sc])];
+    }
+    NSString *meta = metaParts.count ? [metaParts componentsJoinedByString:@" · "] : @"";
+    self.yearLabel.stringValue = meta;
+    self.yearLabel.hidden = (meta.length == 0);
+    [self applyTheme];
 
     if (album.key.length == 0) {
         self.coverView.image = nil;
         self.placeholderLabel.hidden = NO;
         return;
     }
-
     NSImage *cached = [[RLPCoverLoader shared] cachedCoverForAlbumKey:album.key];
     if (cached) {
         self.coverView.image = cached;
@@ -520,13 +946,8 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
                 __typeof__(self) self_ = weakSelf;
                 if (!self_) return;
                 if ([self_.albumKey isEqualToString:expectedKey]) {
-                    if (img) {
-                        self_.coverView.image = img;
-                        self_.placeholderLabel.hidden = YES;
-                    } else {
-                        self_.coverView.image = nil;
-                        self_.placeholderLabel.hidden = NO;
-                    }
+                    self_.coverView.image = img;
+                    self_.placeholderLabel.hidden = (img != nil);
                 }
             }];
         }
@@ -543,6 +964,7 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 @property (nonatomic, readwrite) NSInteger totalTracks;
 @property (nonatomic, readwrite) double totalDuration;
 @property (nonatomic) BOOL loaded;
+@property (nonatomic, assign) BOOL lastLoadFailed;
 
 // —— 头部（保留旧私有名：test_native_pages_fixes 的 (PagesFixesAudit) 直接取这些）——
 @property (nonatomic, strong) NSView *avatarView;
@@ -558,6 +980,9 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 @property (nonatomic, strong) NSButton *backBtn;            // 保留（顶栏返回按钮）
 @property (nonatomic, strong) NSCollectionView *collection;
 @property (nonatomic, strong) NSMutableArray<RLPAlbum *> *albums;
+@property (nonatomic, strong) NSView *albumsDivider;
+@property (nonatomic, strong) NSTextField *albumsTitle;
+@property (nonatomic, strong) RLPArtistChip *playAllBtn;
 
 // —— 新排版 ——
 @property (nonatomic, strong) NSScrollView *pageScroll;
@@ -578,10 +1003,14 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 @property (nonatomic, strong) NSView *cardBio;
 @property (nonatomic, strong) NSTextField *bioTitle;
+@property (nonatomic, strong) NSView *bioClip;
+@property (nonatomic, strong) NSView *bioFade;
+@property (nonatomic, strong) CAGradientLayer *bioFadeGrad;
 @property (nonatomic, strong) NSTextField *bioText;
 @property (nonatomic, strong) NSButton *bioToggle;
 @property (nonatomic, strong) NSView *cardStyles;
-@property (nonatomic, strong) NSMutableArray<NSTextField *> *styleBadges;
+@property (nonatomic, strong) NSTextField *stylesTitle;
+@property (nonatomic, strong) NSMutableArray<NSView *> *styleBadges;
 @property (nonatomic, strong) NSView *cardSources;
 @property (nonatomic, strong) NSTextField *sourcesTitle;
 @property (nonatomic, strong) NSMutableArray<NSView *> *sourceRows;
@@ -603,8 +1032,11 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 @property (nonatomic, assign) NSInteger summaryPollCount;
 @property (nonatomic, assign) BOOL inLayout;
 @property (nonatomic, assign) CGFloat lastLayoutWidth;
+@property (nonatomic, assign) CGFloat lastGridContentW;
+@property (nonatomic, assign) NSInteger lastGridCount;
 
 - (void)relayoutPage;
+- (void)relayoutForWidth:(CGFloat)W;
 - (void)reloadKnowledge:(BOOL)refresh;
 - (void)reloadSummary:(BOOL)refresh;
 @end
@@ -629,12 +1061,24 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     return self;
 }
 
-- (void)dealloc { [NSObject cancelPreviousPerformRequestsWithTarget:self]; }
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+}
+
+- (void)setSubtitle:(NSString *)text {
+    [super setSubtitle:text];
+    if (self.isViewLoaded) self.subtitleLabel.hidden = YES;
+    if (self.isViewLoaded && self.view.window && text.length) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:text];
+    }
+}
 
 #pragma mark - 建树
 
 - (void)buildContent {
     RLPTheme *t = [RLPTheme current];
+    self.subtitleLabel.hidden = YES;
 
     // ---- 滚动容器 ----
     _pageScroll = [[NSScrollView alloc] initWithFrame:self.contentView.bounds];
@@ -644,18 +1088,30 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _pageScroll.autohidesScrollers = YES;
     _pageScroll.borderType = NSNoBorder;
     [self.contentView addSubview:_pageScroll];
+    if (_pageScroll.contentView) {
+        _pageScroll.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(clipViewFrameDidChange:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:_pageScroll.contentView];
+    }
 
     _doc = [[RLPArtistFlippedView alloc] initWithFrame:NSMakeRect(0, 0, 954, 700)];
     _pageScroll.documentView = _doc;
 
     // ---- 顶栏返回按钮（保留 _backBtn，导航契约判据要读它的 title）----
-    _backBtn = [NSButton buttonWithTitle:RLPTr(@"返回艺术家列表") target:self action:@selector(onBack:)];
-    _backBtn.bezelStyle = NSBezelStyleRounded;
+    RLPArtistChip *backChip = [[RLPArtistChip alloc] initWithFrame:NSZeroRect];
+    backChip.ghost = YES;
+    backChip.radius = 7.0;
+    backChip.padX = 8.0;
+    backChip.leadingSymbol = @"chevron.left";
+    backChip.target = self;
+    backChip.action = @selector(onBack:);
+    [backChip setText:RLPTr(@"返回艺术家列表")
+                color:t.mut
+                 font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+    _backBtn = backChip;
     _backBtn.identifier = @"artist.back.top";
-    _backBtn.image = [NSImage imageWithSystemSymbolName:@"chevron.left"
-                               accessibilityDescription:RLPTr(@"返回艺术家列表")];
-    _backBtn.imagePosition = NSImageLeading;
-    _backBtn.font = t.small;
     [_doc addSubview:_backBtn];
 
     // ---- Hero ----
@@ -664,6 +1120,8 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _avatarView.layer.cornerRadius = kArtistAvatarSide / 2.0;   // 圆形（web border-radius:50%）
     _avatarView.layer.masksToBounds = YES;
     _avatarView.layer.backgroundColor = t.cvBg.CGColor;
+    _avatarView.layer.borderWidth = 1.0;
+    _avatarView.layer.borderColor = t.line.CGColor;
     _avatarView.identifier = @"artist.hero.avatar";
     [_doc addSubview:_avatarView];
 
@@ -674,38 +1132,65 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     [_avatarView addSubview:_initialLabel];
 
     // 真头像盖在首字母之上：拿到图就显示，拿不到就露出首字母占位。
-    _avatarImage = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    _avatarImage = [[RLPCoverImageView alloc] initWithFrame:NSZeroRect];
     _avatarImage.imageScaling = NSImageScaleProportionallyUpOrDown;
     _avatarImage.hidden = YES;
     [_avatarView addSubview:_avatarImage];
 
     // web .ahead .kind{font-size:10px;letter-spacing:1.4px;color:var(--mut2);font-weight:600}
+    NSFont *eyebrowFont = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
     _eyebrowLabel = RLPArtistMakeLabel(@"artist.hero.eyebrow");
-    _eyebrowLabel.attributedStringValue = RLPArtistAttr(RLPTr(@"ARTIST · 艺术家资料"),
-        [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold], t.mut2, 1.4, 0);
+    _eyebrowLabel.font = eyebrowFont;
+    _eyebrowLabel.textColor = t.mut2;
+    _eyebrowLabel.usesSingleLineMode = NO;
+    _eyebrowLabel.maximumNumberOfLines = 1;
+    _eyebrowLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    _eyebrowLabel.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"ARTIST · 艺术家资料"),
+        eyebrowFont, t.mut2, 1.4, NSTextAlignmentLeft);
     [_doc addSubview:_eyebrowLabel];
 
-    // web .ahead h1{font-size:26px;font-weight:750;letter-spacing:-.4px;单行截断}
-    _nameLabel = RLPArtistMakeLabel(@"artist.hero.name");
+    // web .ahead h1{font-size:28px;font-weight:750;letter-spacing:-.5px;单行截断}
+    NSFont *nameFont = [NSFont systemFontOfSize:28 weight:NSFontWeightBold];
+    _nameLabel = RLPArtistMakeSelectableLabel(@"artist.hero.name");
+    _nameLabel.font = nameFont;
+    _nameLabel.textColor = t.text;
     _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     _nameLabel.maximumNumberOfLines = 1;
-    _nameLabel.usesSingleLineMode = YES;
-    _nameLabel.attributedStringValue = RLPArtistAttr(_artistName.length ? _artistName : RLPTr(@"未知艺术家"),
-        [NSFont systemFontOfSize:26 weight:NSFontWeightBold], t.text, -0.4, 0);
+    _nameLabel.usesSingleLineMode = NO;
+    _nameLabel.attributedStringValue = RLPArtistSingleLineAttr(_artistName.length ? _artistName : RLPTr(@"未知艺术家"),
+        nameFont, t.text, -0.5, NSTextAlignmentLeft);
     [_doc addSubview:_nameLabel];
 
     // web .ahead .sub{font-size:12.5px;color:var(--mut)}——没有资料时整行不显示
     _subLabel = RLPArtistMakeLabel(@"artist.hero.sub");
     _subLabel.hidden = YES;
+    _subLabel.font = [NSFont systemFontOfSize:12.5];
     _subLabel.textColor = t.mut;
+    _subLabel.usesSingleLineMode = NO;
     _subLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     _subLabel.maximumNumberOfLines = 1;
     [_doc addSubview:_subLabel];
 
-    // 三个按钮（横排，web .btn）
+    // 三个按钮（横排，web .btn；查看专辑带图标填充主视觉，刷新资料与返回列表用次级描边层级）
     _btnAlbums = [self heroButton:RLPTr(@"查看专辑") ident:@"artist.hero.btn.albums" action:@selector(onScrollToAlbums:)];
     _btnRefresh = [self heroButton:RLPTr(@"刷新资料") ident:@"artist.hero.btn.refresh" action:@selector(onRefresh:)];
     _btnBackList = [self heroButton:RLPTr(@"返回列表") ident:@"artist.hero.btn.back" action:@selector(onBack:)];
+    if ([_btnAlbums isKindOfClass:[RLPArtistChip class]]) {
+        RLPArtistChip *c = (RLPArtistChip *)_btnAlbums;
+        c.leadingSymbol = @"square.grid.2x2";
+        [c setText:RLPTr(@"查看专辑") color:t.text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]];
+    }
+    if ([_btnRefresh isKindOfClass:[RLPArtistChip class]]) {
+        RLPArtistChip *c = (RLPArtistChip *)_btnRefresh;
+        c.leadingSymbol = @"arrow.clockwise";
+        c.filled = NO;
+        [c setText:RLPTr(@"刷新资料") color:t.text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+    }
+    if ([_btnBackList isKindOfClass:[RLPArtistChip class]]) {
+        RLPArtistChip *c = (RLPArtistChip *)_btnBackList;
+        c.filled = NO;
+        [c setText:RLPTr(@"返回列表") color:t.text2 font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+    }
     for (NSButton *b in @[ _btnAlbums ?: (id)[NSNull null], _btnRefresh ?: (id)[NSNull null],
                            _btnBackList ?: (id)[NSNull null] ]) {
         if ([b isKindOfClass:[NSButton class]]) [_doc addSubview:b];
@@ -723,9 +1208,40 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     [self buildStylesCard];
     [self buildSourcesCard];
 
+    // ---- 唱片作品小节头 ----
+    _albumsDivider = [[NSView alloc] initWithFrame:NSZeroRect];
+    _albumsDivider.wantsLayer = YES;
+    _albumsDivider.layer.backgroundColor = t.line.CGColor;
+    [_doc addSubview:_albumsDivider];
+
+    NSFont *albumsTitleFont = [NSFont systemFontOfSize:14.5 weight:NSFontWeightBold];
+    _albumsTitle = RLPArtistMakeLabel(@"artist.albums.title");
+    _albumsTitle.font = albumsTitleFont;
+    _albumsTitle.textColor = t.text;
+    _albumsTitle.usesSingleLineMode = NO;
+    _albumsTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"唱片作品"),
+        albumsTitleFont, t.text, 0.2, NSTextAlignmentLeft);
+    _albumsTitle.maximumNumberOfLines = 1;
+    _albumsTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_doc addSubview:_albumsTitle];
+
+    _playAllBtn = [[RLPArtistChip alloc] initWithFrame:NSZeroRect];
+    _playAllBtn.identifier = @"artist.albums.playall";
+    _playAllBtn.accentFill = YES;
+    _playAllBtn.playTriangle = YES;
+    _playAllBtn.radius = 8.0;
+    _playAllBtn.padX = 15.0;
+    _playAllBtn.target = self;
+    _playAllBtn.action = @selector(onPlayAllAlbums:);
+    _playAllBtn.hidden = YES;
+    [_playAllBtn setText:RLPTr(@"播放全部")
+                  color:[NSColor whiteColor]
+                   font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]];
+    [_doc addSubview:_playAllBtn];
+
     // ---- 专辑网格 ----
     _collection = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
-    NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
+    NSCollectionViewFlowLayout *layout = [[RLPArtistAlbumFlowLayout alloc] init];
     layout.itemSize = NSMakeSize(168, 214);
     layout.minimumInteritemSpacing = 18;
     layout.minimumLineSpacing = 22;
@@ -759,11 +1275,12 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     b.identifier = ident;
     b.filled = YES;
     b.radius = 8.0;
+    b.padX = 14.0;
     b.target = self;
     b.action = action;
     b.alignment = NSTextAlignmentCenter;
-    [b setText:title color:[RLPTheme current].text font:[NSFont systemFontOfSize:12]];
-    // 注意：不在这里 sizeToFit。relayoutPage 会给按钮明确的 frame（h=28），
+    [b setText:title color:[RLPTheme current].text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+    // 注意：不在这里 sizeToFit。relayoutPage 会给按钮明确的 frame（h=30），
     // sizeToFit 之后 NSButton 会把 cell 高度压到 14pt，文字被裁掉（离屏实测）。
     return b;
 }
@@ -786,9 +1303,13 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     card.autoresizingMask = NSViewNotSizable;
     [_doc addSubview:card];
 
+    NSFont *headFont = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
     NSTextField *head = RLPArtistMakeLabel(@"artist.card.title");
-    head.attributedStringValue = RLPArtistAttr(title,
-        [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.mut2, 1.0, 0);
+    head.font = headFont;
+    head.textColor = t.mut2;
+    head.usesSingleLineMode = NO;
+    head.attributedStringValue = RLPArtistSingleLineAttr(title,
+        headFont, t.mut2, 1.0, NSTextAlignmentLeft);
     head.maximumNumberOfLines = 1;
     head.lineBreakMode = NSLineBreakByTruncatingTail;
     [card addSubview:head];
@@ -814,8 +1335,15 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
     // 卡片内状态行（「正在获取资料…」/失败行/暂无资料）——加载文案只出现在卡片里
     _summaryStatus = RLPArtistMakeLabel(@"artist.summary.status");
+    _summaryStatus.font = [NSFont systemFontOfSize:12];
+    _summaryStatus.textColor = [RLPTheme current].mut2;
     RLPArtistStyleWrap(_summaryStatus);
     _summaryStatus.hidden = YES;
+    {
+        NSClickGestureRecognizer *retryTap = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(onClickSummaryStatus:)];
+        retryTap.numberOfClicksRequired = 1;
+        [_summaryStatus addGestureRecognizer:retryTap];
+    }
     [_cardSummary addSubview:_summaryStatus];
 
     RLPArtistChip *retryChip = [[RLPArtistChip alloc] initWithFrame:NSZeroRect];
@@ -826,22 +1354,42 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _summaryRetry.target = self;
     _summaryRetry.action = @selector(onRetry:);
     _summaryRetry.hidden = YES;
-    _summaryRetry.attributedTitle = RLPArtistAttr(RLPTr(@"重试获取"), [NSFont systemFontOfSize:12],
-                                                  [RLPTheme current].text, 0, 0);
+    [retryChip setText:RLPTr(@"重试获取") color:[RLPTheme current].text font:[NSFont systemFontOfSize:12]];
     [_cardSummary addSubview:_summaryRetry];
 
     _summaryFoot = RLPArtistMakeLabel(@"artist.summary.foot");
+    _summaryFoot.font = [NSFont systemFontOfSize:11];
+    _summaryFoot.textColor = [RLPTheme current].mut2;
     RLPArtistStyleWrap(_summaryFoot);
     _summaryFoot.hidden = YES;
     [_cardSummary addSubview:_summaryFoot];
 }
 
 - (void)buildBioCard {
+    RLPTheme *t = [RLPTheme current];
     _cardBio = [self newCard:@"artist.card.bio" title:RLPTr(@"简介")];
     _bioTitle = [self cardTitleOf:_cardBio];
-    _bioText = RLPArtistMakeLabel(@"artist.bio.text");
+    _bioClip = [[RLPArtistFlippedView alloc] initWithFrame:NSZeroRect];
+    _bioClip.wantsLayer = YES;
+    _bioClip.layer.masksToBounds = YES;
+    [_cardBio addSubview:_bioClip];
+
+    _bioText = RLPArtistMakeSelectableLabel(@"artist.bio.text");
+    _bioText.font = [NSFont systemFontOfSize:12.5];
+    _bioText.textColor = t.text2;
     RLPArtistStyleWrap(_bioText);
-    [_cardBio addSubview:_bioText];
+    [_bioClip addSubview:_bioText];
+
+    _bioFade = [[NSView alloc] initWithFrame:NSZeroRect];
+    _bioFade.wantsLayer = YES;
+    _bioFadeGrad = [CAGradientLayer layer];
+    _bioFadeGrad.startPoint = CGPointMake(0.5, 1.0);   // 非翻转视图：y=1 在上、y=0 在下
+    _bioFadeGrad.endPoint = CGPointMake(0.5, 0.0);
+    _bioFadeGrad.colors = @[(__bridge id)[t.bg2 colorWithAlphaComponent:0.0].CGColor,
+                            (__bridge id)t.bg2.CGColor];
+    [_bioFade.layer addSublayer:_bioFadeGrad];
+    _bioFade.hidden = YES;
+    [_bioClip addSubview:_bioFade];
 
     RLPArtistChip *toggleChip = [[RLPArtistChip alloc] initWithFrame:NSZeroRect];
     _bioToggle = toggleChip;
@@ -851,14 +1399,14 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _bioToggle.target = self;
     _bioToggle.action = @selector(onToggleBio:);
     _bioToggle.hidden = YES;
-    _bioToggle.attributedTitle = RLPArtistAttr(RLPTr(@"展开全部"), [NSFont systemFontOfSize:12],
-                                               [RLPTheme current].text, 0, 0);
+    [toggleChip setText:RLPTr(@"展开全部") color:[RLPTheme current].text font:[NSFont systemFontOfSize:12]];
     [_cardBio addSubview:_bioToggle];
     _cardBio.hidden = YES;
 }
 
 - (void)buildStylesCard {
     _cardStyles = [self newCard:@"artist.card.styles" title:RLPTr(@"风格与相似")];
+    _stylesTitle = [self cardTitleOf:_cardStyles];
     _cardStyles.hidden = YES;
 }
 
@@ -869,6 +1417,17 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 }
 
 #pragma mark - 排版（唯一入口：宽度变了 / 数据到了都调它）
+
+- (void)clipViewFrameDidChange:(NSNotification *)note {
+    (void)note;
+    if (_inLayout || !_pageScroll.contentView) return;
+    const CGFloat clipW = _pageScroll.contentView.bounds.size.width;
+    if (clipW < 40.0) return;
+    if (fabs(_lastLayoutWidth - clipW) >= 0.5 || fabs(_doc.frame.size.width - clipW) >= 0.5) {
+        [self syncDocWidthToScroll];
+        [self relayoutPage];
+    }
+}
 
 - (void)viewDidLayout {
     [super viewDidLayout];
@@ -908,38 +1467,57 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     const CGFloat W = _doc.bounds.size.width;
     if (W < 40.0) return;
     _inLayout = YES;
-    RLPTheme *t = [RLPTheme current];
+    [self relayoutForWidth:W];
+    // 传统滚动条（NSScrollerStyleLegacy）会在总高超出可视区时收窄 clipW（约 17pt），
+    // 且 clipViewFrameDidChange 在 _inLayout 期间会提前返回；这里立即同步做第 2 遍排版，
+    // 保证播放全部与专辑网格右缘严丝合缝，绝不被滚动条压住或向右溢出。
+    if (_pageScroll) {
+        [_pageScroll layoutSubtreeIfNeeded];
+        if (_pageScroll.contentView) {
+            const CGFloat afterW = _pageScroll.contentView.bounds.size.width;
+            if (afterW >= 40.0 && fabs(afterW - W) >= 0.5) {
+                if (fabs(_doc.frame.size.width - afterW) > 0.5) {
+                    _doc.frame = NSMakeRect(0, 0, afterW, _doc.frame.size.height);
+                }
+                [self relayoutForWidth:afterW];
+                [_pageScroll layoutSubtreeIfNeeded];
+            }
+        }
+    }
+    _inLayout = NO;
+}
+
+- (void)relayoutForWidth:(CGFloat)W {
+    if (!_doc || W < 40.0) return;
 
     const CGFloat padX = kArtistPagePadX;
     const CGFloat contentW = MAX(80.0, W - padX * 2.0);
-    CGFloat y = 6.0;
+    CGFloat y = 12.0;
 
     // ---- ① 顶栏返回按钮 ----
     {
-        const CGFloat bw = MIN(contentW, MAX(96.0, RLPArtistChipW(_backBtn.title, _backBtn.font) + 26.0));
+        const CGFloat bw = MIN(contentW, RLPArtistChipWidth(_backBtn));
         const CGFloat bh = 26.0;
         _backBtn.frame = NSMakeRect(padX, y, bw, bh);
-        y += bh + 8.0;
+        y += bh + 12.0;
     }
 
     // ---- ② Hero ----
     const CGFloat avatarS = kArtistAvatarSide;
     const CGFloat heroLeft = padX;
-    const CGFloat infoX = heroLeft + avatarS + 20.0;       // web .ahead gap:20px
+    const CGFloat infoX = heroLeft + avatarS + 24.0;
     const CGFloat infoW = MAX(60.0, W - infoX - padX);
-    const CGFloat eyebrowH = 14.0;
-    const CGFloat nameH = 32.0;                            // 26pt 单行
-    const CGFloat subH = 18.0;
-    const CGFloat btnH = 28.0;                             // web .btn 6px+12px+2px
+    const CGFloat eyebrowH = MAX(13.0, ceil([_eyebrowLabel sizeThatFits:NSMakeSize(infoW, CGFLOAT_MAX)].height));
+    const CGFloat nameH = MAX(33.0, ceil([_nameLabel sizeThatFits:NSMakeSize(infoW, CGFLOAT_MAX)].height));
+    const CGFloat subH = MAX(16.0, ceil([_subLabel sizeThatFits:NSMakeSize(infoW, CGFLOAT_MAX)].height));
+    const CGFloat btnH = 30.0;
 
-    // eyebrow / 大标题 / 副标题 / 按钮 自顶向下堆叠，整体与头像底对齐（web align-items:flex-end）
     const BOOL hasSub = !_subLabel.hidden;
-    const CGFloat stackH = eyebrowH + 5.0 + nameH + 7.0
-                         + (hasSub ? subH : 0.0)
-                         + 13.0 + btnH;                     // web .sub margin-bottom:13px
+    const CGFloat stackH = eyebrowH + 6.0 + nameH
+                         + (hasSub ? (6.0 + subH) : 0.0)
+                         + 13.0 + btnH;
     const CGFloat heroTop = y;
-    const CGFloat heroH = MAX(avatarS, stackH);
-    const CGFloat stackTop = heroTop + MAX(0.0, heroH - avatarS);
+    const CGFloat stackTop = heroTop + MAX(0.0, avatarS - stackH - 5.0);
 
     _avatarView.frame = NSMakeRect(heroLeft, heroTop, avatarS, avatarS);
     _avatarImage.frame = _avatarView.bounds;
@@ -950,10 +1528,11 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
     CGFloat sy = stackTop;
     _eyebrowLabel.frame = NSMakeRect(infoX, sy, infoW, eyebrowH);
-    sy += eyebrowH + 5.0;
+    sy += eyebrowH + 6.0;
     _nameLabel.frame = NSMakeRect(infoX, sy, infoW, nameH);
-    sy += nameH + 7.0;
+    sy += nameH;
     if (hasSub) {
+        sy += 6.0;
         _subLabel.frame = NSMakeRect(infoX, sy, infoW, subH);
         sy += subH;
     } else {
@@ -961,27 +1540,28 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     }
     sy += 13.0;
 
-    // 三个按钮横排（放不下就换行，永不溢出）
+    // 三个按钮横排（严格按 preferredWidth 定宽、放不下就换行，永不左侧挤压或溢出）
     {
         CGFloat bx = infoX;
         CGFloat by = sy;
         CGFloat bwSum = 0.0;
         NSArray<NSButton *> *btns = @[ _btnAlbums, _btnRefresh, _btnBackList ];
-        const CGFloat gap = 8.0;
+        const CGFloat gap = 10.0;
         for (NSButton *b in btns) {
-            const CGFloat bw = RLPArtistChipW(b.title, b.font) + 6.0;
+            const CGFloat bw = MIN(infoW, RLPArtistChipWidth(b));
             bwSum += bw + gap;
         }
         const BOOL oneRow = (infoX + bwSum - gap) <= (W - padX + 0.5);
+        CGFloat btnsBottom = sy + btnH;
         for (NSButton *b in btns) {
-            const CGFloat bw = RLPArtistChipW(b.title, b.font) + 6.0;
+            const CGFloat bw = MIN(infoW, RLPArtistChipWidth(b));
             if (!oneRow && bx > infoX && (bx + bw) > (W - padX + 0.5)) { bx = infoX; by += btnH + 8.0; }
             b.frame = NSMakeRect(bx, by, bw, btnH);
+            btnsBottom = MAX(btnsBottom, by + btnH);
             bx += bw + gap;
         }
+        y = MAX(heroTop + avatarS, btnsBottom) + 22.0;
     }
-    _statsLabel.frame = NSZeroRect;
-    y = heroTop + heroH + 18.0;
 
     // ---- ③ ~ ⑥ 纵向卡片 ----
     y = [self layoutSummaryCardAt:y width:contentW x:padX];
@@ -990,22 +1570,91 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     if (!_cardStyles.hidden) { y += kArtistCardGap; y = [self layoutStylesCardAt:y width:contentW x:padX]; }
     if (!_cardSources.hidden) { y += kArtistCardGap; y = [self layoutSourcesCardAt:y width:contentW x:padX]; }
 
-    // ---- ⑦ 专辑网格 ----
-    y += 8.0;
-    const NSInteger cols = MAX(1, (NSInteger)floor((contentW + 18.0) / (168.0 + 18.0)));
+    // ---- ⑦ 唱片作品头部 + 响应式专辑网格 ----
     const NSInteger n = (NSInteger)self.albums.count;
+    const BOOL showAlbumsSection = (n > 0 || !_emptyLabel.hidden);
+    if (showAlbumsSection) {
+        y += 22.0;
+        _albumsDivider.hidden = NO;
+        _albumsDivider.frame = NSMakeRect(padX, y, contentW, 1.0);
+        y += 14.0;
+
+        _albumsTitle.hidden = NO;
+        const NSSize tsz = [_albumsTitle sizeThatFits:NSMakeSize(contentW, CGFLOAT_MAX)];
+        const CGFloat tw = MIN(contentW, ceil(tsz.width) + 6.0);
+        const CGFloat th = MAX(18.0, ceil(tsz.height));
+        const CGFloat rowH = 30.0;
+        CGFloat rightEdge = padX + contentW;
+        if (n > 0) {
+            _playAllBtn.hidden = NO;
+            const CGFloat pbw = MIN(contentW * 0.45, RLPArtistChipWidth(_playAllBtn));
+            _playAllBtn.frame = NSMakeRect(padX + contentW - pbw, y, pbw, rowH);
+            rightEdge = NSMinX(_playAllBtn.frame) - 12.0;
+        } else {
+            _playAllBtn.hidden = YES;
+            _playAllBtn.frame = NSZeroRect;
+        }
+        _albumsTitle.frame = NSMakeRect(padX, y + round((rowH - th) * 0.5), tw, th);
+        if (!_statsLabel.hidden && _statsLabel.stringValue.length > 0 && rightEdge > padX + tw + 18.0) {
+            const CGFloat sx = padX + tw + 10.0;
+            const CGFloat sh = MAX(15.0, ceil([_statsLabel sizeThatFits:NSMakeSize(MAX(1.0, rightEdge - sx), CGFLOAT_MAX)].height));
+            _statsLabel.frame = NSMakeRect(sx, y + round((rowH - sh) * 0.5), MAX(0.0, rightEdge - sx), sh);
+        } else {
+            _statsLabel.frame = NSZeroRect;
+        }
+        y += rowH + 14.0;
+    } else {
+        _albumsDivider.hidden = YES;
+        _albumsTitle.hidden = YES;
+        _playAllBtn.hidden = YES;
+        _statsLabel.frame = NSZeroRect;
+    }
+
+    const CGFloat gapX = 16.0, gapY = 20.0, minItemW = 148.0;
+    const NSInteger cols = MAX(1, (NSInteger)floor((contentW + gapX) / (minItemW + gapX)));
+    const CGFloat itemW = MAX(80.0, floor((contentW - gapX * (CGFloat)(cols - 1)) / (CGFloat)cols));
+    const CGFloat itemH = itemW + 46.0;
     const NSInteger rows = (cols > 0 && n > 0) ? ((n + cols - 1) / cols) : 0;
-    const CGFloat gridH = (rows > 0) ? (CGFloat)rows * 214.0 + (CGFloat)(rows - 1) * 22.0 : 0.0;
+    CGFloat gridH = (rows > 0) ? (CGFloat)rows * itemH + (CGFloat)(rows - 1) * gapY : 0.0;
     if (gridH > 0.5) {
         _collection.hidden = NO;
         _collection.frame = NSMakeRect(padX, y, contentW, gridH);
-        if (NSCollectionViewFlowLayout *fl = (NSCollectionViewFlowLayout *)_collection.collectionViewLayout) {
-            if (fabs(fl.itemSize.width - 168.0) > 0.5) fl.itemSize = NSMakeSize(168, 214);
+        NSCollectionViewFlowLayout *cur = [_collection.collectionViewLayout isKindOfClass:[RLPArtistAlbumFlowLayout class]]
+            ? (NSCollectionViewFlowLayout *)_collection.collectionViewLayout : nil;
+        const BOOL needRebuildLayout = !cur ||
+            fabs(cur.itemSize.width - itemW) > 0.5 ||
+            fabs(cur.itemSize.height - itemH) > 0.5 ||
+            fabs(cur.minimumInteritemSpacing - gapX) > 0.5 ||
+            fabs(cur.minimumLineSpacing - gapY) > 0.5 ||
+            fabs(_lastGridContentW - contentW) > 0.5 ||
+            _lastGridCount != n;
+        if (needRebuildLayout) {
+            NSSet<NSIndexPath *> *sel = [_collection.selectionIndexPaths copy];
+            NSCollectionViewFlowLayout *fl = [[RLPArtistAlbumFlowLayout alloc] init];
+            fl.itemSize = NSMakeSize(itemW, itemH);
+            fl.minimumInteritemSpacing = gapX;
+            fl.minimumLineSpacing = gapY;
+            fl.sectionInset = NSEdgeInsetsMake(0, 0, 0, 0);
+            _collection.collectionViewLayout = fl;
+            if (sel.count) _collection.selectionIndexPaths = sel;
+            _lastGridContentW = contentW;
+            _lastGridCount = n;
+        }
+        [_collection layoutSubtreeIfNeeded];
+        if (_collection.collectionViewLayout) {
+            const CGFloat flowH = ceil(_collection.collectionViewLayout.collectionViewContentSize.height);
+            if (flowH > gridH + 0.5) {
+                gridH = flowH;
+                _collection.frame = NSMakeRect(padX, y, contentW, gridH);
+                [_collection layoutSubtreeIfNeeded];
+            }
         }
         y += gridH;
     } else {
         _collection.hidden = YES;
         _collection.frame = NSZeroRect;
+        _lastGridContentW = contentW;
+        _lastGridCount = n;
     }
     if (!_emptyLabel.hidden) {
         const CGFloat eh = 22.0;
@@ -1015,13 +1664,12 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         _emptyLabel.frame = NSZeroRect;
     }
 
-    // 文档高度（翻转坐标下就是内容总高）
-    const CGFloat totalH = MAX(_pageScroll.contentView.bounds.size.height, y + 30.0);
+    // 文档高度（底部留出 96pt 以避开浮动播放栏）
+    const CGFloat totalH = MAX(_pageScroll.contentView.bounds.size.height, y + 96.0);
     if (fabs(_doc.frame.size.height - totalH) > 0.5 || fabs(_doc.frame.size.width - W) > 0.5) {
         _doc.frame = NSMakeRect(0, 0, W, totalH);
     }
     _lastLayoutWidth = W;
-    _inLayout = NO;
 }
 
 - (CGFloat)cardTitleH { return 15.0; }
@@ -1034,28 +1682,38 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _summaryTitle.frame = NSMakeRect(kArtistCardPadX, y, innerW, [self cardTitleH]);
     y += [self cardTitleH] + [self cardTitleGap];
 
+    BOOL hasBody = NO;
+
     // 字段网格
     const CGFloat gridH = [_summaryGrid layoutWidth:innerW];
     _summaryGrid.frame = NSMakeRect(kArtistCardPadX, y, innerW, MAX(1.0, gridH));
-    if (!_summaryGrid.hidden && gridH > 0.5) y += gridH + 10.0;
+    if (!_summaryGrid.hidden && gridH > 0.5) {
+        y += gridH;
+        hasBody = YES;
+    }
 
     // 状态行（正在获取资料… / 暂无资料 / 失败行）
     if (!_summaryStatus.hidden) {
+        if (hasBody) y += 10.0;
         const CGFloat sh = MAX(18.0, RLPArtistTextH(_summaryStatus.stringValue, _summaryStatus.font, innerW, 0));
         _summaryStatus.frame = NSMakeRect(kArtistCardPadX, y, innerW, sh);
-        y += sh + 8.0;
+        y += sh;
+        hasBody = YES;
     } else {
         _summaryStatus.frame = NSZeroRect;
     }
     if (!_summaryRetry.hidden) {
-        const CGFloat bw = RLPArtistChipW(_summaryRetry.title, _summaryRetry.font);
-        _summaryRetry.frame = NSMakeRect(kArtistCardPadX, y, bw, 26.0);
-        y += 26.0 + 8.0;
+        if (hasBody) y += 8.0;
+        if ([_summaryRetry isKindOfClass:[RLPArtistChip class]]) ((RLPArtistChip *)_summaryRetry).padX = 12.0;
+        const CGFloat bw = RLPArtistChipWidth(_summaryRetry);
+        _summaryRetry.frame = NSMakeRect(kArtistCardPadX, y, bw, 28.0);
+        y += 28.0;
+        hasBody = YES;
     } else {
         _summaryRetry.frame = NSZeroRect;
     }
 
-    // 引用芯片（[1] 标题 + 复制）
+    // 引用芯片（[1] 标题）
     if (_citeChips.count) {
         for (NSView *row in _citeChips) [row removeFromSuperview];
         [_citeChips removeAllObjects];
@@ -1071,8 +1729,8 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         chip.identifier = [NSString stringWithFormat:@"artist.summary.cite.%lu", (unsigned long)(i + 1)];
         chip.filled = NO;
         chip.radius = 6.0;
-        chip.font = [NSFont systemFontOfSize:11];
-        chip.attributedTitle = RLPArtistAttr(label, [NSFont systemFontOfSize:11], t.mut, 0, 0);
+        chip.padX = 10.0;
+        [chip setText:label color:t.mut font:[NSFont systemFontOfSize:11]];
         chip.toolTip = url;
         chip.target = self;
         chip.action = @selector(onCopyChip:);
@@ -1080,26 +1738,28 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         [_citeChips addObject:chip];
     }
     if (_citeChips.count) {
+        if (hasBody) y += 10.0;
         const CGFloat gap = 6.0;
         CGFloat cx = kArtistCardPadX, cy = y;
-        const CGFloat ch = 22.0;
+        const CGFloat ch = 24.0;
         for (NSButton *chip in _citeChips) {
-            NSString *ti = chip.title;
-            const CGFloat cw = MIN(innerW, RLPArtistChipW(ti, chip.font) + 20.0);
+            const CGFloat cw = MIN(innerW, RLPArtistChipWidth(chip));
             if (cx > kArtistCardPadX && (cx + cw) > (kArtistCardPadX + innerW + 0.5)) {
                 cx = kArtistCardPadX; cy += ch + gap;
             }
             chip.frame = NSMakeRect(cx, cy, cw, ch);
             cx += cw + gap;
         }
-        y = cy + ch + 8.0;
+        y = cy + ch;
+        hasBody = YES;
     }
 
     // 脚注
     if (!_summaryFoot.hidden) {
+        if (hasBody) y += 8.0;
         const CGFloat fh = MAX(14.0, RLPArtistTextH(_summaryFoot.stringValue, _summaryFoot.font, innerW, 0));
         _summaryFoot.frame = NSMakeRect(kArtistCardPadX, y, innerW, fh);
-        y += fh + 2.0;
+        y += fh;
     } else {
         _summaryFoot.frame = NSZeroRect;
     }
@@ -1111,28 +1771,45 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (CGFloat)layoutBioCardAt:(CGFloat)top width:(CGFloat)contentW x:(CGFloat)left {
     if (_cardBio.hidden) { _cardBio.frame = NSZeroRect; return top; }
+    RLPTheme *t = [RLPTheme current];
     const CGFloat innerW = MAX(40.0, contentW - kArtistCardPadX * 2.0);
     CGFloat y = kArtistCardPadY;
     _bioTitle.frame = NSMakeRect(kArtistCardPadX, y, innerW, [self cardTitleH]);
     y += [self cardTitleH] + 10.0;   // web .bio-sec 的 sec-title margin-bottom:10px
 
-    const CGFloat fullH = RLPArtistTextH(_bioText.stringValue, _bioText.font, innerW, 8.0);
-    const CGFloat collapsedH = 4.0 * 21.5;      // 12.5pt × 1.7 ≈ 21.25 ⟹ 折叠 4 行
-    const BOOL needToggle = (fullH > collapsedH + 1.0);
+    NSFont *bf = _bioText.font ?: [NSFont systemFontOfSize:12.5];
+    const CGFloat fullH = ceil(RLPArtistTextH(_bioText.stringValue, bf, innerW, 8.0));
+    const CGFloat collapsedH = MAX(80.0, ceil(RLPArtistTextH(@"第一行Ag\n第二行Ag\n第三行Ag\n第四行Ag", bf, innerW, 8.0)));
+    const BOOL needToggle = (fullH > collapsedH + 2.0);
     const CGFloat showH = (needToggle && !_bioExpanded) ? collapsedH : fullH;
-    _bioText.frame = NSMakeRect(kArtistCardPadX, y, innerW, MAX(16.0, showH));
-    _bioText.superview.layer.masksToBounds = YES;   // 折叠时真的裁掉后面的行
-    y += MAX(16.0, showH);
+    const CGFloat clipH = MAX(16.0, showH);
+    _bioClip.frame = NSMakeRect(kArtistCardPadX, y, innerW, clipH);
+    _bioText.frame = NSMakeRect(0.0, 0.0, innerW, MAX(clipH, fullH));
+    if (_bioFade) {
+        if (needToggle && !_bioExpanded && clipH >= 28.0) {
+            const CGFloat fadeH = MIN(26.0, clipH * 0.35);
+            _bioFade.hidden = NO;
+            _bioFade.frame = NSMakeRect(0.0, clipH - fadeH, innerW, fadeH);
+            _bioFadeGrad.frame = _bioFade.bounds;
+            _bioFadeGrad.colors = @[(__bridge id)[t.bg2 colorWithAlphaComponent:0.0].CGColor,
+                                    (__bridge id)t.bg2.CGColor];
+        } else {
+            _bioFade.hidden = YES;
+        }
+    }
+    y += clipH;
 
     if (needToggle) {
         _bioToggle.hidden = NO;
         NSString *title = _bioExpanded ? RLPTr(@"收起简介") : RLPTr(@"展开全部");
-        _bioToggle.attributedTitle = RLPArtistAttr(title, [NSFont systemFontOfSize:12],
-                                                   [RLPTheme current].text, 0, 0);
-        const CGFloat bw = RLPArtistChipW(title, _bioToggle.font);
+        if ([_bioToggle isKindOfClass:[RLPArtistChip class]]) {
+            ((RLPArtistChip *)_bioToggle).padX = 12.0;
+            [(RLPArtistChip *)_bioToggle setText:title color:t.text font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+        }
+        const CGFloat bw = RLPArtistChipWidth(_bioToggle);
         y += 10.0;
-        _bioToggle.frame = NSMakeRect(kArtistCardPadX, y, bw, 26.0);
-        y += 26.0;
+        _bioToggle.frame = NSMakeRect(kArtistCardPadX, y, bw, 28.0);
+        y += 28.0;
     } else {
         _bioToggle.hidden = YES;
         _bioToggle.frame = NSZeroRect;
@@ -1146,24 +1823,24 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 - (CGFloat)layoutStylesCardAt:(CGFloat)top width:(CGFloat)contentW x:(CGFloat)left {
     const CGFloat innerW = MAX(40.0, contentW - kArtistCardPadX * 2.0);
     CGFloat y = kArtistCardPadY;
-    NSTextField *head = nil;
-    for (NSView *v in _cardStyles.subviews) {
-        if ([v isKindOfClass:[NSTextField class]]) { head = (NSTextField *)v; break; }
-    }
+    NSTextField *head = _stylesTitle ?: [self cardTitleOf:_cardStyles];
     if (head) { head.frame = NSMakeRect(kArtistCardPadX, y, innerW, [self cardTitleH]); }
     y += [self cardTitleH] + 10.0;
 
-    const CGFloat gap = 8.0, bh = 20.0;
+    const CGFloat gap = 8.0, bh = 22.0;
     CGFloat bx = kArtistCardPadX, by = y;
-    for (NSTextField *b in _styleBadges) {
-        const CGFloat bw = MIN(innerW, RLPArtistChipW(b.stringValue, b.font) + 12.0);
+    for (NSView *b in _styleBadges) {
+        CGFloat rawW = [b isKindOfClass:[RLPArtistStyleBadgeView class]]
+            ? [(RLPArtistStyleBadgeView *)b preferredWidth]
+            : 48.0;
+        const CGFloat bw = MIN(innerW, rawW);
         if (bx > kArtistCardPadX && (bx + bw) > (kArtistCardPadX + innerW + 0.5)) {
             bx = kArtistCardPadX; by += bh + gap;
         }
         b.frame = NSMakeRect(bx, by, bw, bh);
         bx += bw + gap;
     }
-    y = by + bh;
+    y = _styleBadges.count ? (by + bh) : y;
     const CGFloat cardH = y + kArtistCardPadY;
     _cardStyles.frame = NSMakeRect(left, top, contentW, cardH);
     return top + cardH;
@@ -1176,89 +1853,79 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     _sourcesTitle.frame = NSMakeRect(kArtistCardPadX, y, innerW, [self cardTitleH]);
     y += [self cardTitleH] + 12.0;
 
-    const CGFloat rowH = 34.0, rowGap = 8.0;
+    const CGFloat rowH = 42.0, rowGap = 8.0;
     for (NSView *row in _sourceRows) {
         row.frame = NSMakeRect(kArtistCardPadX, y, innerW, rowH);
-        // 行内：徽章 / 标题 / 取回于日期 / 复制链接 + 复制
         NSArray<NSView *> *subs = row.subviews;
-        CGFloat right = innerW;
-        // 从右往左放两个芯片
+        CGFloat right = innerW - 14.0;
+        // 从右往左放可见芯片（无 URL 时 copyChip 已隐藏，跳过不占宽度）
         for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; --i) {
             NSView *v = subs[(NSUInteger)i];
-            if (![v isKindOfClass:[NSButton class]]) continue;
+            if (![v isKindOfClass:[NSButton class]] || v.hidden) continue;
             NSButton *b = (NSButton *)v;
-            const CGFloat bw = RLPArtistChipW(b.title, b.font);
+            const CGFloat bw = RLPArtistChipWidth(b);
             right -= bw;
-            b.frame = NSMakeRect(right, (rowH - 22.0) / 2.0, bw, 22.0);
-            right -= 6.0;
+            b.frame = NSMakeRect(right, round((rowH - 26.0) / 2.0), bw, 26.0);
+            right -= 14.0;
         }
-        // 左侧：徽章（定宽，按文字）/ 标题（吃掉剩余宽度）/ 日期（定宽，靠右）
-        //
-        // 旧写法给徽章算的是 `right - lx - 20`，即「把右侧剩余宽度全给徽章」⟹
-        // 徽章被撑成整行、日期被挤到最右被截断、两个芯片被顶出行外
-        // （2026-11-21 离屏截图实测：徽章像一条粉色横条）。
-        // 现在：徽章与日期都按文字量宽，只有标题伸缩。
-        CGFloat lx = 0.0;
+        CGFloat lx = 14.0;
         NSTextField *badgeTF = nil, *titleTF = nil, *dateTF = nil;
         for (NSView *v in subs) {
             if (![v isKindOfClass:[NSTextField class]]) continue;
             NSTextField *tf = (NSTextField *)v;
-            // 注意 identifier 的实际形态：徽章是 `artist.sources.badge.<n>`（**带序号**），
-            // 标题/日期是 `artist.sources.title` / `artist.sources.date`。
-            // 旧写法按 hasSuffix:@".badge" 匹配，永远匹配不到带序号的徽章 ⟹ badgeTF 恒为 nil、
-            // 徽章从不参与排版，一直保持 NSTextField 的默认 4×16 小框
-            //（2026-11-21 离屏截图实测：来源徽章是一小条粉色、日期被挪到最右）。
             if ([tf.identifier containsString:@".badge"]) badgeTF = tf;
             else if ([tf.identifier hasSuffix:@".date"]) dateTF = tf;
             else titleTF = tf;
         }
-        // 徽章：纯文字宽度 + 左右各 8pt 内边距（web .badge padding:2px 8px）
         if (badgeTF) {
-            // 取「属性字符串里真正的字体」来量宽，而不是 badgeTF.font：
-            // setting attributedStringValue 之后 control 的 font 可能不同步，
-            // 实测按 tf.font 量出的徽章宽度只有 4pt（药丸几乎不可见）。
-            NSAttributedString *bas = badgeTF.attributedStringValue;
-            NSString *bt = bas.length ? bas.string : (badgeTF.stringValue ?: @"");
-            NSFont *bfont = (bas.length && [bas attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL])
-                ? [bas attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL]
-                : (badgeTF.font ?: [NSFont systemFontOfSize:9.5]);
-            const CGFloat bw = MIN(MAX(28.0, ceil([bt sizeWithAttributes:@{ NSFontAttributeName: bfont }].width) + 16.0),
-                                   MAX(28.0, right - 40.0));
-            // 药丸只有「文字高 + 上下 3pt」这么高，并整体在行内垂直居中。
-            // 注意：**不能用 ascender - descender** —— NSFont.ascender 是负值
-            // （基线在字形盒上方，Apple 的约定），相减会得到负数，药丸高度变负 ⟹
-            // 一个像素都画不出来（2026-11-21 离屏截图实测：来源徽章整块消失）。
-            // defaultLineHeightForFont 才是「这一号字一行占多高」的正解。
-            const CGFloat badgeH = ceil(bfont.boundingRectForFont.size.height) + 8.0;
-            badgeTF.frame = NSMakeRect(lx, round((rowH - badgeH) / 2.0), bw, badgeH);
+            NSFont *bf = badgeTF.font ?: [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+            const CGFloat bTxtW = ceil([badgeTF.stringValue sizeWithAttributes:@{
+                NSFontAttributeName: bf, NSKernAttributeName: @(0.2)
+            }].width);
+            const NSSize bsz = [badgeTF sizeThatFits:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+            const CGFloat bw = MIN(MAX(42.0, MAX(bTxtW, ceil(bsz.width)) + 16.0),
+                                   MAX(42.0, right - lx - 40.0));
+            const CGFloat textH = MAX(14.0, ceil([badgeTF sizeThatFits:NSMakeSize(bw, CGFLOAT_MAX)].height));
+            const CGFloat pillH = MAX(22.0, textH + 6.0);
+            const CGFloat pillY = round((rowH - pillH) * 0.5);
+            badgeTF.frame = NSMakeRect(lx, pillY + round((pillH - textH) * 0.5), bw, textH);
             if ([row isKindOfClass:[RLPArtistSourceRow class]]) {
                 RLPArtistSourceRow *sr = (RLPArtistSourceRow *)row;
-                sr.badgePill.frame = badgeTF.frame;         // 药丸底 = 文字框同一矩形
+                sr.badgePill.frame = NSMakeRect(lx, pillY, bw, pillH);
                 sr.badgePill.layer.backgroundColor = t.accentWeak.CGColor;
             }
             lx += bw + 12.0;
         }
-        // 日期：定宽靠右，绝不截断（「取回于 2026-11-09」整串要看得见）
         CGFloat dateW = 0.0;
+        CGFloat dateH = 16.0;
         if (dateTF) {
-            NSAttributedString *das = dateTF.attributedStringValue;
-            NSString *dt = das.length ? das.string : (dateTF.stringValue ?: @"");
-            NSFont *dfont = (das.length && [das attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL])
-                ? [das attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL]
-                : (dateTF.font ?: [NSFont systemFontOfSize:11.5]);
-            dateW = ceil([dt sizeWithAttributes:@{ NSFontAttributeName: dfont }].width) + 4.0;
-            dateW = MIN(dateW, MAX(0.0, right - lx - 120.0));
+            NSString *dt = dateTF.stringValue ?: @"";
+            if (dt.length) {
+                NSFont *df = dateTF.font ?: [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+                const CGFloat dTxtW = ceil([dt sizeWithAttributes:@{ NSFontAttributeName: df }].width);
+                const NSSize dsz = [dateTF sizeThatFits:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+                dateH = MAX(15.0, ceil(dsz.height));
+                dateW = MAX(dTxtW, ceil(dsz.width)) + 12.0;
+                const CGFloat maxDateW = MAX(0.0, right - lx - 80.0);
+                dateW = MIN(dateW, maxDateW);
+                dateTF.hidden = (dateW < 24.0);
+                if (dateTF.hidden) dateW = 0.0;
+            } else {
+                dateTF.hidden = YES;
+            }
         }
-        // 标题：吃掉中间剩余宽度
         if (titleTF) {
-            const CGFloat tw = MAX(40.0, right - lx - dateW - 12.0);
-            titleTF.frame = NSMakeRect(lx, (rowH - 17.0) / 2.0, tw, 17.0);
-            lx += tw + 10.0;
+            const CGFloat dateReserve = (dateW > 0.5) ? (dateW + 14.0) : 0.0;
+            const CGFloat tw = MAX(40.0, right - lx - dateReserve);
+            const CGFloat th = MAX(16.0, ceil([titleTF sizeThatFits:NSMakeSize(tw, CGFLOAT_MAX)].height));
+            titleTF.frame = NSMakeRect(lx, round((rowH - th) / 2.0), tw, th);
+            lx += tw + 14.0;
         }
-        if (dateTF) {
-            dateTF.frame = NSMakeRect(MAX(lx, right - dateW), (rowH - 16.0) / 2.0, MAX(20.0, dateW), 16.0);
+        if (dateTF && !dateTF.hidden && dateW > 0.5) {
+            dateTF.frame = NSMakeRect(MAX(lx, right - dateW), round((rowH - dateH) / 2.0), dateW, dateH);
+        } else if (dateTF) {
+            dateTF.frame = NSZeroRect;
         }
-        (void)t;
         y += rowH + rowGap;
     }
     y -= (_sourceRows.count ? rowGap : 0.0);
@@ -1294,9 +1961,13 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     NSString *sub = @"";
     if (self.materials.count) {
         NSString *date = RLPArtistFmtDate(self.materials.firstObject[@"fetched_at"]);
-        NSString *prefix = self.knowledgeFromCache ? RLPTr(@"缓存 ·") : RLPTr(@"资料");
+        NSString *rawPrefix = self.knowledgeFromCache ? RLPTr(@"缓存 ·") : RLPTr(@"资料");
+        NSString *trimmedPrefix = [rawPrefix stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *prefix = self.knowledgeFromCache
+            ? [trimmedPrefix stringByAppendingString:@" "]
+            : [NSString stringWithFormat:@"%@ · ", trimmedPrefix];
         if (date.length) {
-            sub = [NSString stringWithFormat:@"%@ · %@ %@", prefix, date, RLPTr(@"取回")];
+            sub = [NSString stringWithFormat:@"%@%@ %@", prefix, date, RLPTr(@"取回")];
         }
     }
     _subLabel.stringValue = sub;
@@ -1336,41 +2007,47 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         [labels addObject:k];
     }
     // sections 兜底：fields 为空时用段落文本（heading 为「概述」「简介」不加小标题）
+    NSMutableDictionary *effectiveFields = [fields mutableCopy];
     if (labels.count == 0 && self.summarySections.count) {
         NSMutableString *acc = [NSMutableString string];
         for (NSDictionary *sec in self.summarySections) {
             NSString *heading = [sec[@"heading"] isKindOfClass:[NSString class]] ? sec[@"heading"] : @"";
             NSArray *paras = [sec[@"paragraphs"] isKindOfClass:[NSArray class]] ? sec[@"paragraphs"] : @[];
             if (!paras.count) continue;
-            BOOL headingUseful = heading.length &&
-                ![heading isEqualToString:@"概述"] && ![heading isEqualToString:@"简介"];
-            if (headingUseful && ![heading isEqualToString:@"简介"]) {
-                // section 小标题直接作为字段标签
-                if (![seen containsObject:heading]) {
-                    [labels addObject:heading];
-                    [seen addObject:heading];
-                }
-                continue;
-            }
+            NSMutableString *secTxt = [NSMutableString string];
             for (NSDictionary *p in paras) {
                 NSString *txt = [p[@"text"] isKindOfClass:[NSString class]] ? p[@"text"] : @"";
                 if (txt.length) {
-                    if (acc.length) [acc appendString:@"\n"];
-                    [acc appendString:txt];
+                    if (secTxt.length) [secTxt appendString:@"\n"];
+                    [secTxt appendString:txt];
                 }
             }
+            if (!secTxt.length) continue;
+            BOOL headingUseful = heading.length &&
+                ![heading isEqualToString:@"概述"] && ![heading isEqualToString:@"简介"];
+            if (headingUseful) {
+                if (![seen containsObject:heading]) {
+                    [labels addObject:heading];
+                    [seen addObject:heading];
+                    effectiveFields[heading] = secTxt;
+                }
+                continue;
+            }
+            if (acc.length) [acc appendString:@"\n"];
+            [acc appendString:secTxt];
         }
         if (acc.length) {
             NSString *bioKey = RLPTr(@"简介");
             if (![seen containsObject:bioKey] && ![self hasBio]) {
                 [labels insertObject:bioKey atIndex:0];
-                seen = [NSMutableSet setWithObject:bioKey];
+                [seen addObject:bioKey];
+                effectiveFields[bioKey] = acc;
             }
         }
     }
 
     for (NSString *label in labels) {
-        NSString *value = RLPArtistFieldText(fields[label]);
+        NSString *value = RLPArtistFieldText(effectiveFields[label]);
         if (!value.length) continue;
         RLPArtistFieldRow *row = [[RLPArtistFieldRow alloc] initWithFieldName:label value:value];
         row.identifier = [@"artist.summary.field." stringByAppendingString:label];
@@ -1406,7 +2083,7 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         statusColor = t.mut;
     }
     _summaryStatus.hidden = !showStatus;
-    _summaryStatus.stringValue = statusText;
+    _summaryStatus.font = [NSFont systemFontOfSize:12];
     _summaryStatus.textColor = statusColor;
     _summaryStatus.attributedStringValue = RLPArtistAttr(statusText, [NSFont systemFontOfSize:12],
                                                          statusColor, 0, 0);
@@ -1415,6 +2092,8 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     // 3) 引用芯片 / 脚注
     NSArray *cites = self.summaryCitations ?: @[];
     _summaryFoot.hidden = (cites.count == 0);
+    _summaryFoot.font = [NSFont systemFontOfSize:11];
+    _summaryFoot.textColor = t.mut2;
     _summaryFoot.attributedStringValue = RLPArtistAttr(
         RLPTr(@"依据上面的来源整理，可能不完整，请以来源为准"),
         [NSFont systemFontOfSize:11], t.mut2, 0, 0);
@@ -1426,18 +2105,20 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     NSDictionary *m = [self bioMaterial];
     NSString *text = [m[@"text"] isKindOfClass:[NSString class]] ? m[@"text"] : @"";
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSFont *bioFont = [NSFont systemFontOfSize:12.5];
+    _bioText.font = bioFont;
+    _bioText.textColor = t.text2;
     if (!text.length) {
         _cardBio.hidden = YES;
         _bioText.stringValue = @"";
         return;
     }
     _cardBio.hidden = NO;
-    _bioText.attributedStringValue = RLPArtistAttr(text, [NSFont systemFontOfSize:12.5], t.text2, 0, 8.0);
+    _bioText.attributedStringValue = RLPArtistAttr(text, bioFont, t.text2, 0, 8.0);
 }
 
 - (void)refreshStylesCard {
-    RLPTheme *t = [RLPTheme current];
-    for (NSTextField *b in _styleBadges) [b removeFromSuperview];
+    for (NSView *b in _styleBadges) [b removeFromSuperview];
     [_styleBadges removeAllObjects];
 
     NSMutableArray<NSString *> *names = [NSMutableArray array];
@@ -1455,14 +2136,7 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     }
     _cardStyles.hidden = NO;
     for (NSString *n in names) {
-        NSTextField *badge = RLPArtistMakeLabel(@"artist.style.badge");
-        badge.attributedStringValue = RLPArtistAttr(n, [NSFont systemFontOfSize:11], t.accentText, 0, 0);
-        badge.alignment = NSTextAlignmentCenter;
-        badge.wantsLayer = YES;
-        badge.layer.cornerRadius = 5.0;
-        badge.layer.backgroundColor = t.accentWeak.CGColor;
-        badge.maximumNumberOfLines = 1;
-        badge.lineBreakMode = NSLineBreakByTruncatingTail;
+        RLPArtistStyleBadgeView *badge = [[RLPArtistStyleBadgeView alloc] initWithTitle:n];
         [_cardStyles addSubview:badge];
         [_styleBadges addObject:badge];
     }
@@ -1486,14 +2160,19 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         row.identifier = [NSString stringWithFormat:@"artist.sources.row.%ld", (long)idx];
         row.wantsLayer = YES;
         row.layer.cornerRadius = 9.0;
+        row.layer.borderWidth = 1.0;
+        row.layer.borderColor = t.hairline.CGColor;
         row.layer.backgroundColor = t.hov.CGColor;
         row.autoresizingMask = NSViewNotSizable;
 
         NSTextField *badge = RLPArtistMakeLabel(@"artist.sources.badge");
         badge.identifier = [NSString stringWithFormat:@"artist.sources.badge.%ld", (long)idx];
         NSString *srcName = RLPArtistSourceBadge([m[@"source"] isKindOfClass:[NSString class]] ? m[@"source"] : @"");
-        badge.attributedStringValue = RLPArtistAttr(srcName, [NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold],
-                                                    t.accentText, 0.3, 0);
+        NSFont *badgeFont = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
+        badge.font = badgeFont;
+        badge.textColor = t.accentText;
+        badge.usesSingleLineMode = NO;
+        badge.attributedStringValue = RLPArtistSingleLineAttr(srcName, badgeFont, t.accentText, 0.2, NSTextAlignmentCenter);
         badge.alignment = NSTextAlignmentCenter;
         // 药丸底**不挂在这个 label 的 layer 上**：NSTextField 的 layer 背景会盖住
         // 它自己 cell 画的文字（离屏截图实测：粉色条盖掉了「萌娘百科」，只剩一条色块）。
@@ -1510,10 +2189,13 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
             [row addSubview:badge];
         }
 
-        NSTextField *title = RLPArtistMakeLabel(@"artist.sources.title");
+        NSTextField *title = RLPArtistMakeSelectableLabel(@"artist.sources.title");
         NSString *ttl = [m[@"title"] isKindOfClass:[NSString class]] ? m[@"title"] : @"";
-        title.attributedStringValue = RLPArtistAttr(ttl, [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
-                                                    t.text, 0, 0);
+        NSFont *titleFont = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
+        title.font = titleFont;
+        title.textColor = t.text;
+        title.usesSingleLineMode = NO;
+        title.attributedStringValue = RLPArtistSingleLineAttr(ttl, titleFont, t.text, 0, NSTextAlignmentLeft);
         title.maximumNumberOfLines = 1;
         title.lineBreakMode = NSLineBreakByTruncatingTail;
         [row addSubview:title];
@@ -1521,28 +2203,24 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
         NSTextField *date = RLPArtistMakeLabel(@"artist.sources.date");
         NSString *d = RLPArtistFmtDate(m[@"fetched_at"]);
         NSString *dText = d.length ? [NSString stringWithFormat:@"%@ %@", RLPTr(@"取回于"), d] : @"";
-        date.attributedStringValue = RLPArtistAttr(dText, [NSFont systemFontOfSize:11.5], t.mut2, 0, 0);
+        NSFont *dateFont = [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+        date.font = dateFont;
+        date.textColor = t.mut2;
+        date.usesSingleLineMode = NO;
+        date.attributedStringValue = RLPArtistSingleLineAttr(dText, dateFont, t.mut2, 0, NSTextAlignmentRight);
+        date.alignment = NSTextAlignmentRight;
         date.maximumNumberOfLines = 1;
         date.lineBreakMode = NSLineBreakByTruncatingTail;
         [row addSubview:date];
 
         NSString *url = [m[@"url"] isKindOfClass:[NSString class]] ? m[@"url"] : @"";
-        RLPArtistChip *openChip = [[RLPArtistChip alloc] initWithFrame:NSZeroRect];
-        openChip.identifier = [NSString stringWithFormat:@"artist.sources.open.%ld", (long)idx];
-        openChip.filled = YES;
-        openChip.radius = 7.0;
-        [openChip setText:RLPTr(@"复制链接") color:t.text font:[NSFont systemFontOfSize:11]];
-        openChip.toolTip = url;
-        openChip.target = self;
-        openChip.action = @selector(onCopySourceURL:);
-        openChip.hidden = (url.length == 0);
-        [row addSubview:openChip];
-
         RLPArtistChip *copyChip = [[RLPArtistChip alloc] initWithFrame:NSZeroRect];
         copyChip.identifier = [NSString stringWithFormat:@"artist.sources.copy.%ld", (long)idx];
         copyChip.filled = YES;
         copyChip.radius = 7.0;
-        [copyChip setText:RLPTr(@"复制") color:t.text font:[NSFont systemFontOfSize:11]];
+        copyChip.padX = 11.0;
+        copyChip.leadingSymbol = @"doc.on.doc";
+        [copyChip setText:RLPTr(@"复制链接") color:t.text font:[NSFont systemFontOfSize:11 weight:NSFontWeightMedium]];
         copyChip.toolTip = url;
         copyChip.target = self;
         copyChip.action = @selector(onCopySourceURL:);
@@ -1567,7 +2245,16 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 #pragma mark - 取数（两条独立通道，序号守卫丢弃旧实体回包）
 
 - (void)activate {
-    if (!self.loaded) [self reloadData];
+    if (!self.loaded) {
+        [self reloadData];
+    } else if (self.view.window) {
+        NSString *cnt = (self.albums.count == 0)
+            ? [NSString stringWithFormat:@"0 %@", RLPTr(@"张专辑")]
+            : [NSString stringWithFormat:@"%ld %@ · %ld %@",
+               (long)self.albums.count, RLPTr(@"张专辑"),
+               (long)self.totalTracks, RLPTr(@"首")];
+        [self setSubtitle:cnt];
+    }
     [self loadAvatar];
     // 换实体后旧回包必须丢弃：两个 seq 各自独立（同 RLPKnowledgeView 的缺口1 做法）
     ++self.knowledgeSeq;
@@ -1780,6 +2467,8 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (void)reloadData {
     if (![RLPCoreClient shared].started) {
+        self.lastLoadFailed = NO;
+        self.loaded = NO;
         [self.albums removeAllObjects];
         self.albumCount = 0;
         self.totalTracks = 0;
@@ -1795,18 +2484,21 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     NSString *target = [self.artistName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (target.length == 0) target = RLPTr(@"未知艺术家");
 
+    self.lastLoadFailed = NO;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/lib/albums" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (!json || ![json[@"ok"] boolValue]) {
-            self_.loaded = YES;
+            self_.lastLoadFailed = YES;
+            self_.loaded = NO;
             [self_ setSubtitle:RLPTr(@"读取失败")];
             self_.emptyLabel.stringValue = RLPTr(@"读取失败");
             self_.emptyLabel.hidden = NO;
             [self_ relayoutPage];
             return;
         }
+        self_.lastLoadFailed = NO;
         self_.loaded = YES;
         NSArray<RLPAlbum *> *all = [RLPAlbum albumsFromJSON:json];
         NSMutableArray<RLPAlbum *> *filtered = [NSMutableArray array];
@@ -1834,12 +2526,16 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
         if (filtered.count == 0) {
             [self_ setSubtitle:[NSString stringWithFormat:@"0 %@", RLPTr(@"张专辑")]];
+            self_.statsLabel.stringValue = @"";
+            self_.statsLabel.hidden = YES;
             self_.emptyLabel.stringValue = RLPTr(@"这个艺术家还没有专辑");
             self_.emptyLabel.hidden = NO;
         } else {
             [self_ setSubtitle:[NSString stringWithFormat:@"%ld %@ · %ld %@",
                                 (long)filtered.count, RLPTr(@"张专辑"),
                                 (long)totalTracks, RLPTr(@"首")]];
+            [self_ updateAlbumsStatsText];
+            self_.statsLabel.hidden = NO;
             self_.emptyLabel.stringValue = @"";
             self_.emptyLabel.hidden = YES;
         }
@@ -1852,11 +2548,66 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (void)onBack:(id)sender { (void)sender; RLPRequestBack(); }
 
+- (void)updateAlbumsStatsText {
+    if (self.albumCount <= 0) {
+        self.statsLabel.stringValue = @"";
+        return;
+    }
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:[NSString stringWithFormat:@"%ld %@", (long)self.albumCount, RLPTr(@"张专辑")]];
+    if (self.totalTracks > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%ld %@", (long)self.totalTracks, RLPTr(@"首")]];
+    }
+    if (self.totalDuration > 0.5) {
+        const NSInteger sec = (NSInteger)llround(self.totalDuration);
+        const NSInteger h = sec / 3600, m = (sec % 3600) / 60, sc = sec % 60;
+        [parts addObject:(h > 0
+            ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)h, (long)m, (long)sc]
+            : [NSString stringWithFormat:@"%ld:%02ld", (long)m, (long)sc])];
+    }
+    self.statsLabel.stringValue = [parts componentsJoinedByString:@" · "];
+}
+
+- (void)enqueueRemainingAlbums:(NSArray<NSString *> *)keys index:(NSUInteger)idx {
+    if (idx >= keys.count) return;
+    NSString *k = keys[idx];
+    if (!k.length) { [self enqueueRemainingAlbums:keys index:idx + 1]; return; }
+    NSString *url = [NSString stringWithFormat:@"/api/lib/enqueue?k=%@", RLPEnc(k)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        [weakSelf enqueueRemainingAlbums:keys index:idx + 1];
+    }];
+}
+
+- (void)onPlayAllAlbums:(id)sender {
+    (void)sender;
+    if (!self.albums.count || ![RLPCoreClient shared].started) return;
+    NSMutableArray<NSString *> *keys = [NSMutableArray arrayWithCapacity:self.albums.count];
+    for (RLPAlbum *a in self.albums) {
+        if (a.key.length) [keys addObject:a.key];
+    }
+    if (!keys.count) return;
+    if (keys.count == 1) {
+        RLPPlayAlbum(keys[0], 0);
+        return;
+    }
+    NSString *body = [NSString stringWithFormat:@"k=%@&i=0", RLPEnc(keys[0])];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/lib/play" body:body completion:^(NSDictionary * _Nullable json) {
+        if (json && [json[@"ok"] boolValue]) {
+            [weakSelf enqueueRemainingAlbums:keys index:1];
+        }
+    }];
+}
+
 - (void)onScrollToAlbums:(id)sender {
     (void)sender;
-    if (!_pageScroll) return;
-    const NSRect f = _collection.frame;
-    [_pageScroll.contentView scrollToPoint:NSMakePoint(0, MAX(0.0, NSMinY(f) - 12.0))];
+    if (!_pageScroll || !_doc) return;
+    const NSRect f = (_albumsDivider && !_albumsDivider.hidden) ? _albumsDivider.frame : _collection.frame;
+    const CGFloat maxY = MAX(0.0, NSHeight(_doc.bounds) - NSHeight(_pageScroll.contentView.bounds));
+    const CGFloat targetY = MAX(0.0, MIN(maxY, NSMinY(f) - 16.0));
+    [_pageScroll.contentView scrollToPoint:NSMakePoint(0, targetY)];
     [_pageScroll reflectScrolledClipView:_pageScroll.contentView];
 }
 
@@ -1884,6 +2635,13 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (void)onRetry:(id)sender { [self onRefresh:sender]; }
 
+- (void)onClickSummaryStatus:(id)sender {
+    (void)sender;
+    if (self.summaryFailed && self.materials.count > 0) {
+        [self onRetry:nil];
+    }
+}
+
 - (void)onToggleBio:(id)sender {
     (void)sender;
     self.bioExpanded = !self.bioExpanded;
@@ -1905,6 +2663,14 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     NSPoint p = [g locationInView:self.collection];
     NSIndexPath *ip = [self.collection indexPathForItemAtPoint:p];
     if (!ip || ip.item < 0 || ip.item >= (NSInteger)self.albums.count) return;
+    NSCollectionViewItem *it = [self.collection itemAtIndexPath:ip];
+    if ([it isKindOfClass:[RLPArtistAlbumItem class]]) {
+        RLPArtistAlbumItem *ai = (RLPArtistAlbumItem *)it;
+        if (ai.playBadge && !ai.playBadge.hidden) {
+            const NSPoint bp = [g locationInView:ai.playBadge];
+            if (NSPointInRect(bp, ai.playBadge.bounds)) return;
+        }
+    }
     RLPAlbum *album = self.albums[(NSUInteger)ip.item];
     if (album.key.length) RLPRequestOpenAlbum(album.key);
 }
@@ -1913,6 +2679,7 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     self.avatarView.layer.backgroundColor = t.cvBg.CGColor;
     self.initialLabel.textColor = t.phText;
@@ -1926,18 +2693,69 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     // 文字颜色随主题重刷（reload 会重建字段行/芯片，颜色自然带上）
     if (!_doc) { /* 未建树，无需刷色 */ }
     else {
+        if ([_backBtn isKindOfClass:[RLPArtistChip class]]) {
+            [(RLPArtistChip *)_backBtn setText:RLPTr(@"返回艺术家列表")
+                                         color:t.mut
+                                          font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+        }
+        NSFont *eyebrowFont = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+        NSFont *nameFont = [NSFont systemFontOfSize:28 weight:NSFontWeightBold];
+        NSFont *cardTitleFont = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+        NSFont *albumsTitleFont = [NSFont systemFontOfSize:14.5 weight:NSFontWeightBold];
+        _eyebrowLabel.font = eyebrowFont;
         _eyebrowLabel.textColor = t.mut2;
+        _nameLabel.font = nameFont;
         _nameLabel.textColor = t.text;
+        _subLabel.font = [NSFont systemFontOfSize:12.5];
         _subLabel.textColor = t.mut;
         _statsLabel.textColor = t.mut;
-        _eyebrowLabel.attributedStringValue = RLPArtistAttr(RLPTr(@"ARTIST · 艺术家资料"),
-            [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold], t.mut2, 1.4, 0);
-        _nameLabel.attributedStringValue = RLPArtistAttr(_artistName.length ? _artistName : RLPTr(@"未知艺术家"),
-            [NSFont systemFontOfSize:26 weight:NSFontWeightBold], t.text, -0.4, 0);
-        for (NSButton *b in @[ _btnAlbums, _btnRefresh, _btnBackList ]) {
-            if (![b isKindOfClass:[NSButton class]]) continue;
-            b.attributedTitle = RLPArtistAttr(b.title, [NSFont systemFontOfSize:12], t.text, 0, 0);
+        _eyebrowLabel.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"ARTIST · 艺术家资料"),
+            eyebrowFont, t.mut2, 1.4, NSTextAlignmentLeft);
+        _nameLabel.attributedStringValue = RLPArtistSingleLineAttr(_artistName.length ? _artistName : RLPTr(@"未知艺术家"),
+            nameFont, t.text, -0.5, NSTextAlignmentLeft);
+        if ([_btnAlbums isKindOfClass:[RLPArtistChip class]]) {
+            [(RLPArtistChip *)_btnAlbums setText:RLPTr(@"查看专辑") color:t.text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]];
         }
+        if ([_btnRefresh isKindOfClass:[RLPArtistChip class]]) {
+            [(RLPArtistChip *)_btnRefresh setText:RLPTr(@"刷新资料") color:t.text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+        }
+        if ([_btnBackList isKindOfClass:[RLPArtistChip class]]) {
+            [(RLPArtistChip *)_btnBackList setText:RLPTr(@"返回列表") color:t.text2 font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+        }
+        if ([_summaryRetry isKindOfClass:[RLPArtistChip class]]) {
+            [(RLPArtistChip *)_summaryRetry setText:_summaryRetry.title color:t.text font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+        }
+        if ([_bioToggle isKindOfClass:[RLPArtistChip class]]) {
+            [(RLPArtistChip *)_bioToggle setText:_bioToggle.title color:t.text font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+        }
+        if (_bioFadeGrad) {
+            _bioFadeGrad.colors = @[(__bridge id)[t.bg2 colorWithAlphaComponent:0.0].CGColor,
+                                    (__bridge id)t.bg2.CGColor];
+        }
+        for (NSTextField *ct in @[ _summaryTitle ?: (id)[NSNull null], _bioTitle ?: (id)[NSNull null],
+                                   _stylesTitle ?: (id)[NSNull null], _sourcesTitle ?: (id)[NSNull null] ]) {
+            if ([ct isKindOfClass:[NSTextField class]]) {
+                ct.font = cardTitleFont;
+                ct.textColor = t.mut2;
+            }
+        }
+        _summaryTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"AI 整理"),
+            cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+        _bioTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"简介"),
+            cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+        _stylesTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"风格与相似"),
+            cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+        _sourcesTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"资料来源"),
+            cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+        _avatarView.layer.borderColor = t.line.CGColor;
+        _albumsDivider.layer.backgroundColor = t.line.CGColor;
+        _albumsTitle.font = albumsTitleFont;
+        _albumsTitle.textColor = t.text;
+        _albumsTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"唱片作品"),
+            albumsTitleFont, t.text, 0.2, NSTextAlignmentLeft);
+        [_playAllBtn setText:RLPTr(@"播放全部")
+                      color:[NSColor whiteColor]
+                       font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]];
     }
     [self.collection reloadData];
     [self refreshAllCards];
@@ -1948,31 +2766,70 @@ static CGFloat RLPArtistChipW(NSString *title, NSFont *font) {
     self.pageTitle = self.artistName.length ? self.artistName : RLPTr(@"艺术家");
     if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
-    _backBtn.title = RLPTr(@"返回艺术家列表");
-    _backBtn.image = [NSImage imageWithSystemSymbolName:@"chevron.left"
-                               accessibilityDescription:RLPTr(@"返回艺术家列表")];
-    _eyebrowLabel.attributedStringValue = RLPArtistAttr(RLPTr(@"ARTIST · 艺术家资料"),
-        [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold], t.mut2, 1.4, 0);
-    if (!self.artistName.length) {
-        _nameLabel.attributedStringValue = RLPArtistAttr(RLPTr(@"未知艺术家"),
-            [NSFont systemFontOfSize:26 weight:NSFontWeightBold], t.text, -0.4, 0);
+    if ([_backBtn isKindOfClass:[RLPArtistChip class]]) {
+        [(RLPArtistChip *)_backBtn setText:RLPTr(@"返回艺术家列表")
+                                     color:t.mut
+                                      font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+    } else {
+        _backBtn.title = RLPTr(@"返回艺术家列表");
     }
-    _btnAlbums.attributedTitle = RLPArtistAttr(RLPTr(@"查看专辑"), [NSFont systemFontOfSize:12], t.text, 0, 0);
-    _btnRefresh.attributedTitle = RLPArtistAttr(RLPTr(@"刷新资料"), [NSFont systemFontOfSize:12], t.text, 0, 0);
-    _btnBackList.attributedTitle = RLPArtistAttr(RLPTr(@"返回列表"), [NSFont systemFontOfSize:12], t.text, 0, 0);
-    _summaryTitle.attributedStringValue = RLPArtistAttr(RLPTr(@"AI 整理"),
-        [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.mut2, 1.0, 0);
-    _bioTitle.attributedStringValue = RLPArtistAttr(RLPTr(@"简介"),
-        [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.mut2, 1.0, 0);
-    _sourcesTitle.attributedStringValue = RLPArtistAttr(RLPTr(@"资料来源"),
-        [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.mut2, 1.0, 0);
-    _summaryRetry.attributedTitle = RLPArtistAttr(RLPTr(@"重试获取"), [NSFont systemFontOfSize:12], t.text, 0, 0);
-    if (![RLPCoreClient shared].started && !self.loaded) {
+    NSFont *eyebrowFont = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+    NSFont *nameFont = [NSFont systemFontOfSize:28 weight:NSFontWeightBold];
+    NSFont *cardTitleFont = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+    NSFont *albumsTitleFont = [NSFont systemFontOfSize:14.5 weight:NSFontWeightBold];
+    _eyebrowLabel.font = eyebrowFont;
+    _eyebrowLabel.textColor = t.mut2;
+    _eyebrowLabel.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"ARTIST · 艺术家资料"),
+        eyebrowFont, t.mut2, 1.4, NSTextAlignmentLeft);
+    if (!self.artistName.length) {
+        _nameLabel.font = nameFont;
+        _nameLabel.textColor = t.text;
+        _nameLabel.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"未知艺术家"),
+            nameFont, t.text, -0.5, NSTextAlignmentLeft);
+    }
+    [(RLPArtistChip *)_btnAlbums setText:RLPTr(@"查看专辑") color:t.text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]];
+    [(RLPArtistChip *)_btnRefresh setText:RLPTr(@"刷新资料") color:t.text font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+    [(RLPArtistChip *)_btnBackList setText:RLPTr(@"返回列表") color:t.text2 font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightMedium]];
+    for (NSTextField *ct in @[ _summaryTitle ?: (id)[NSNull null], _bioTitle ?: (id)[NSNull null],
+                               _stylesTitle ?: (id)[NSNull null], _sourcesTitle ?: (id)[NSNull null] ]) {
+        if ([ct isKindOfClass:[NSTextField class]]) {
+            ct.font = cardTitleFont;
+            ct.textColor = t.mut2;
+        }
+    }
+    _summaryTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"AI 整理"),
+        cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+    _bioTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"简介"),
+        cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+    _stylesTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"风格与相似"),
+        cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+    _sourcesTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"资料来源"),
+        cardTitleFont, t.mut2, 1.0, NSTextAlignmentLeft);
+    [(RLPArtistChip *)_summaryRetry setText:RLPTr(@"重试获取") color:t.text font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+    if ([_bioToggle isKindOfClass:[RLPArtistChip class]]) {
+        [(RLPArtistChip *)_bioToggle setText:(_bioExpanded ? RLPTr(@"收起简介") : RLPTr(@"展开全部")) color:t.text font:[NSFont systemFontOfSize:12 weight:NSFontWeightMedium]];
+    }
+    _albumsTitle.font = albumsTitleFont;
+    _albumsTitle.textColor = t.text;
+    _albumsTitle.attributedStringValue = RLPArtistSingleLineAttr(RLPTr(@"唱片作品"),
+        albumsTitleFont, t.text, 0.2, NSTextAlignmentLeft);
+    [_playAllBtn setText:RLPTr(@"播放全部")
+                  color:[NSColor whiteColor]
+                   font:[NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]];
+    [self updateAlbumsStatsText];
+    if (self.lastLoadFailed) {
+        [self setSubtitle:RLPTr(@"读取失败")];
+        self.emptyLabel.stringValue = RLPTr(@"读取失败");
+    } else if (![RLPCoreClient shared].started && !self.loaded) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         self.emptyLabel.stringValue = RLPTr(@"核心未启动");
     } else if (self.loaded && self.albums.count == 0) {
         [self setSubtitle:[NSString stringWithFormat:@"0 %@", RLPTr(@"张专辑")]];
         self.emptyLabel.stringValue = RLPTr(@"这个艺术家还没有专辑");
+    } else if (self.loaded && self.albums.count > 0) {
+        [self setSubtitle:[NSString stringWithFormat:@"%ld %@ · %ld %@",
+                           (long)self.albums.count, RLPTr(@"张专辑"),
+                           (long)self.totalTracks, RLPTr(@"首")]];
     }
     // 重建依赖 RLPTr 的卡片内容
     [self refreshAllCards];

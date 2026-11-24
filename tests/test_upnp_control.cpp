@@ -591,6 +591,118 @@ int main() {
         std::remove(tmpPath);
     }
 
+    // ================= 7.5) Progressive HTTP 供源（边写入边供源） =================
+    std::printf("\n-- 7.5 Progressive HTTP 供源（边写边读 / HEAD 立即返回 / Range 等待 / stop 唤醒）--\n");
+    {
+        const size_t N = 262144; // 256 KiB
+        std::vector<uint8_t> expect(N);
+        for (size_t i = 0; i < N; ++i)
+            expect[i] = (uint8_t)((i * 17u + (i >> 8) * 13u + 9u) & 0xFFu);
+
+        const char* progPath = "rta_prog_stream.bin";
+        {
+            FILE* fw = std::fopen(progPath, "wb");
+            if (fw) {
+                std::fwrite(expect.data(), 1, 16384, fw);
+                std::fflush(fw);
+                std::fclose(fw);
+            }
+        }
+
+        auto prog = std::make_shared<ProgressiveFileState>();
+        prog->filePath = progPath;
+        prog->totalSize = (int64_t)N;
+        prog->publish(16384, false);
+
+        UpnpHttpServer server;
+        const uint16_t port = 19107;
+        if (server.start(port, "127.0.0.1")) {
+            const std::string sp = server.register_progressive_file(prog, "audio/wav");
+            const std::string base = "http://127.0.0.1:" + std::to_string(port) + sp;
+
+            // (a) HEAD 在仅写完 16 KiB 时立即返回 200 且带完整 Content-Length=262144
+            {
+                upnp_os::socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                upnp_os::set_timeout(s, SO_RCVTIMEO, 2000);
+                sockaddr_in a{};
+                a.sin_family = AF_INET;
+                a.sin_port = htons(port);
+                a.sin_addr.s_addr = ::inet_addr("127.0.0.1");
+                bool ok = (s != upnp_os::kInvalidSocket) && (upnp_os::io_connect(s, (sockaddr*)&a, sizeof(a)) == 0);
+                std::string rawHead;
+                if (ok) {
+                    const std::string req = "HEAD " + sp + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+                    upnp_os::io_send(s, req.data(), (int)req.size());
+                    char b[2048];
+                    int r = 0;
+                    while ((r = upnp_os::io_recv(s, b, sizeof(b))) > 0) rawHead.append(b, (size_t)r);
+                }
+                if (s != upnp_os::kInvalidSocket) upnp_os::close_socket(s);
+                ck(rawHead.find("200 OK") != std::string::npos &&
+                   rawHead.find("Content-Length: 262144") != std::string::npos,
+                   "Progressive HEAD 在预缓冲阶段即刻返回 200 且声明总长 262144", rawHead);
+            }
+
+            // (b) 慢速分块写入线程 + 客户端同时 GET 全流与未来偏移 Range 206
+            std::thread writer([&]() {
+                FILE* fw = std::fopen(progPath, "ab");
+                size_t off = 16384;
+                while (off < N) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                    const size_t step = std::min<size_t>(16384, N - off);
+                    if (fw) {
+                        std::fwrite(expect.data() + off, 1, step, fw);
+                        std::fflush(fw);
+                    }
+                    off += step;
+                    prog->publish((int64_t)off, off >= N);
+                }
+                if (fw) std::fclose(fw);
+            });
+
+            HttpResponse rFutureRange;
+            std::thread rangeReader([&]() {
+                rFutureRange = http_get(base, {"Range: bytes=196608-262143"}, 8000);
+            });
+            HttpResponse rFull = http_get(base, {}, 8000);
+
+            writer.join();
+            rangeReader.join();
+
+            ck(rFull.status == 200 && rFull.body == expect,
+               "Progressive GET 边写边读全流与期望字节逐字节一致",
+               "status=" + std::to_string(rFull.status) + " len=" + std::to_string(rFull.body.size()));
+            ck(rFutureRange.status == 206 && rFutureRange.body.size() == 65536 &&
+               rFutureRange.body == std::vector<uint8_t>(expect.begin() + 196608, expect.begin() + 262144),
+               "Progressive Range 206 等待后续偏移发布后准确返回 64KB 切片",
+               "status=" + std::to_string(rFutureRange.status) + " len=" + std::to_string(rFutureRange.body.size()));
+
+            // (c) 未完成的 Progressive 流遇到 abort()+stop() 时必须立即唤醒退出（不卡死）
+            auto stalledProg = std::make_shared<ProgressiveFileState>();
+            stalledProg->filePath = progPath;
+            stalledProg->totalSize = (int64_t)N + 65536;
+            stalledProg->publish(1024, false); // 永远不写到尾
+            const std::string spStall = server.register_progressive_file(stalledProg, "audio/wav");
+            const std::string stallUrl = "http://127.0.0.1:" + std::to_string(port) + spStall;
+            HttpResponse rStall;
+            std::thread stallReader([&]() {
+                rStall = http_get(stallUrl, {"Range: bytes=262144-327679"}, 8000);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            const auto tStop0 = std::chrono::steady_clock::now();
+            stalledProg->abort("cancelled");
+            server.stop();
+            stallReader.join();
+            const double stopSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStop0).count();
+            ck(stopSec < 1.0 && !server.is_running(),
+               "Progressive abort()+stop() 立即唤醒阻塞等待并安全停机",
+               std::to_string(stopSec) + "s");
+        } else {
+            ck(false, "Progressive HTTP 测试服务启动（127.0.0.1:19107）", "端口被占用");
+        }
+        std::remove(progPath);
+    }
+
     // ================= 8) RenderingControl 音量（L-3）=================
     // 对应 debug/20261027-03-UPnP音量无效：投放时音量条无效的三层缺失之一 ——
     // upnp_control.h 里只有 AVTransport + ConnectionManager，没有 RenderingControl。

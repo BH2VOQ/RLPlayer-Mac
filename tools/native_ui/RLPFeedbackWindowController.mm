@@ -24,6 +24,7 @@
 #include <random>
 
 @interface RLPFeedbackWindowController ()
+@property (nonatomic, strong) NSScrollView *bodyScroll;
 @property (nonatomic, strong) NSTextView *body;
 @property (nonatomic, strong) NSSwitch *attachDiag;
 @property (nonatomic, strong) NSButton *submit;
@@ -58,12 +59,40 @@
                                                  selector:@selector(applyLanguage)
                                                      name:RLPLanguageDidChangeNotification
                                                    object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(applyTheme)
+                                                     name:RLPThemeDidChangeNotification
+                                                   object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    NSWindow *w = self.window;
+    if (w) {
+        NSAppearanceName appName = !t.isLight ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua;
+        w.appearance = [NSAppearance appearanceNamed:appName];
+        w.backgroundColor = t.bg;
+        NSView *root = w.contentView;
+        if (root) {
+            root.wantsLayer = YES;
+            root.layer.backgroundColor = t.bg.CGColor;
+        }
+    }
+    self.hintLabel.textColor = t.mut;
+    self.bodyScroll.drawsBackground = YES;
+    self.bodyScroll.backgroundColor = t.bg2;
+    self.body.font = t.body;
+    self.body.textColor = t.text;
+    self.body.backgroundColor = t.bg2;
+    self.body.insertionPointColor = t.accent;
+    self.diagLabel.textColor = t.text;
+    self.status.textColor = t.mut;
 }
 
 - (void)applyLanguage {
@@ -88,15 +117,26 @@
     self.hintLabel = hint;
     [root addSubview:hint];
 
-    NSScrollView *sc = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    NSScrollView *sc = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 240)];
     sc.hasVerticalScroller = YES;
+    sc.drawsBackground = YES;
+    sc.backgroundColor = t.bg2;
     sc.borderType = NSBezelBorder;
     sc.translatesAutoresizingMaskIntoConstraints = NO;
-    self.body = [[NSTextView alloc] initWithFrame:NSZeroRect];
+    self.bodyScroll = sc;
+    self.body = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, 240)];
+    self.body.minSize = NSMakeSize(0.0, 240.0);
+    self.body.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+    self.body.verticallyResizable = YES;
+    self.body.horizontallyResizable = NO;
+    self.body.autoresizingMask = NSViewWidthSizable;
+    self.body.richText = NO;
     self.body.font = t.body;
     self.body.textColor = t.text;
     self.body.backgroundColor = t.bg2;
     self.body.automaticQuoteSubstitutionEnabled = NO;
+    self.body.textContainer.containerSize = NSMakeSize(520.0, CGFLOAT_MAX);
+    self.body.textContainer.widthTracksTextView = YES;
     sc.documentView = self.body;
     [root addSubview:sc];
 
@@ -105,6 +145,10 @@
     self.attachDiag.translatesAutoresizingMaskIntoConstraints = NO;
     NSTextField *diagLabel = RLPLabel(RLPTr(@"附诊断包（版本/系统/日志，已脱敏）"), t.small, t.text);
     diagLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    diagLabel.maximumNumberOfLines = 2;
+    diagLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [diagLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.diagLabel = diagLabel;
     [root addSubview:self.attachDiag];
     [root addSubview:diagLabel];
@@ -132,6 +176,7 @@
         [self.attachDiag.leadingAnchor constraintEqualToAnchor:sc.leadingAnchor],
         [self.attachDiag.topAnchor constraintEqualToAnchor:sc.bottomAnchor constant:12],
         [diagLabel.leadingAnchor constraintEqualToAnchor:self.attachDiag.trailingAnchor constant:8],
+        [diagLabel.trailingAnchor constraintLessThanOrEqualToAnchor:root.trailingAnchor constant:-20],
         [diagLabel.centerYAnchor constraintEqualToAnchor:self.attachDiag.centerYAnchor],
         [self.submit.trailingAnchor constraintEqualToAnchor:root.trailingAnchor constant:-20],
         [self.submit.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-16],
@@ -139,9 +184,11 @@
         [self.status.trailingAnchor constraintEqualToAnchor:self.submit.leadingAnchor constant:-12],
         [self.status.centerYAnchor constraintEqualToAnchor:self.submit.centerYAnchor],
     ]];
+    [self applyTheme];
 }
 
 - (void)showAndFocus {
+    [self applyTheme];
     [self showWindow:nil];
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.body];

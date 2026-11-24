@@ -298,6 +298,7 @@
 @property (nonatomic, copy) NSString *opraLastQuery;
 @property (nonatomic, strong) NSTextField *bypassLabel;
 @property (nonatomic, strong) NSTextField *preampLabel;
+@property (nonatomic, strong) NSTextField *preampDbLabel;
 @property (nonatomic, strong) NSTextField *presetSectionLabel;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *presetActionButtons;
 @property (nonatomic, strong) NSButton *autoPreButton;
@@ -504,7 +505,8 @@ static NSString *RLPEQLiveFieldText(NSTextField *field) {
     self.preamp.action = @selector(onPreampEnter:);
     [[self.preamp.widthAnchor constraintEqualToConstant:64] setActive:YES];
     [top addArrangedSubview:self.preamp];
-    [top addArrangedSubview:RLPLabel(@"dB", t.small, t.mut)];
+    self.preampDbLabel = RLPLabel(@"dB", t.small, t.mut);
+    [top addArrangedSubview:self.preampDbLabel];
     [self.stack addArrangedSubview:top];
 
     self.status = RLPLabel(@"", t.small, t.mut);
@@ -1531,10 +1533,27 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
     // 表格已移除（用户要求），这里不再有可上色的表格。
+    self.bypassLabel.textColor = t.text;
+    self.preampLabel.textColor = t.text;
+    self.preampDbLabel.textColor = t.mut;
     self.status.textColor = t.mut;
+    self.presetSectionLabel.textColor = t.text;
+    self.opraTitleLabel.textColor = t.text;
+    self.opraDescLabel.textColor = t.mut;
+    self.opraGuide.textColor = t.mut;
+    self.opraSelectedTitle.textColor = t.text;
     self.opraStatus.textColor = t.mut;
     self.opraInfo.textColor = t.mut;
+    [self.fader applyTheme];
+    [self.inspector applyTheme];
     [self syncInspectorForBand:self.inspector.bandIndex];
+    for (RLPOpraModelCard *c in self.opraModelCardViews) {
+        [c applyTheme];
+        [c setNeedsDisplay:YES];
+    }
+    for (RLPOpraPresetCard *c in self.opraPresetCardViews) {
+        [c applyTheme];
+    }
 }
 
 #pragma mark - 嵌入设置页（去掉本视图自己的滚动，交给整页滚动）
@@ -1787,6 +1806,7 @@ static NSArray<NSDictionary *> *RLPOpraFilter(NSArray<NSDictionary *> *index, NS
     self.opraSearchButton.title = RLPTr(@"搜索");
     self.opraCopyChip.toolTip = RLPTr(@"复制 OPRA 项目官网链接");
     self.opraGuide.stringValue = RLPTr(@"点击卡片选中");
+    [self.fader applyLanguage];
     [self.inspector applyLanguage];
     for (RLPOpraModelCard *c in self.opraModelCardViews) {
         [c setNeedsDisplay:YES];

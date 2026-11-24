@@ -119,7 +119,8 @@
         [_coverView.leadingAnchor constraintEqualToAnchor:v.leadingAnchor],
         [_coverView.trailingAnchor constraintEqualToAnchor:v.trailingAnchor],
         [_coverView.topAnchor constraintEqualToAnchor:v.topAnchor],
-        [_coverView.heightAnchor constraintEqualToConstant:180],
+        // 封面 1:1 正方形（对齐专辑卡与 web aspect-ratio:1，消除非正方形裁切与底部 6pt 截断）
+        [_coverView.heightAnchor constraintEqualToAnchor:_coverView.widthAnchor],
         [_placeholderLabel.centerXAnchor constraintEqualToAnchor:_coverView.centerXAnchor],
         [_placeholderLabel.centerYAnchor constraintEqualToAnchor:_coverView.centerYAnchor],
         [_playBadge.trailingAnchor constraintEqualToAnchor:_coverView.trailingAnchor constant:-8],
@@ -219,11 +220,19 @@
     NSButton *_refreshBtn;
     NSButton *_pingBtn;
     NSString *_lastEmptyReason;
+    NSString *_lastEmptyReasonZhKey;
+    NSString *_lastSubtitleZhKey;
     BOOL _hasLoaded;
+    CGFloat _lastLayoutWidth;
+    BOOL _relayouting;
 }
 @end
 
 @implementation RLPStreamingViewController
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"流媒体")];
@@ -265,6 +274,10 @@
     [toolbar addView:_viewToggle inGravity:NSStackViewGravityLeading];
 
     _pathBreadcrumb = RLPLabel(@"", [NSFont systemFontOfSize:12], RLPTheme.current.mut);
+    _pathBreadcrumb.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _pathBreadcrumb.maximumNumberOfLines = 1;
+    [_pathBreadcrumb setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
     [toolbar addView:_pathBreadcrumb inGravity:NSStackViewGravityLeading];
 
     toolbar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -276,11 +289,16 @@
     _tableView.dataSource = self;
     _tableView.headerView = nil;
     _tableView.rowHeight = 40;
+    _tableView.usesAlternatingRowBackgroundColors = NO;
+    _tableView.backgroundColor = RLPTheme.current.bg;
+    if (@available(macOS 11.0, *)) _tableView.style = NSTableViewStylePlain;
+    _tableView.columnAutoresizingStyle = NSTableViewLastColumnOnlyAutoresizingStyle;
     // 单击即触发（web 行 onclick 同语义）；双击保留兼容。
     _tableView.action = @selector(rowClicked:);
     _tableView.doubleAction = @selector(rowClicked:);
     _tableView.target = self;
     NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"main"];
+    col.resizingMask = NSTableColumnAutoresizingMask;
     [_tableView addTableColumn:col];
     _listScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     _listScroll.documentView = _tableView;
@@ -288,14 +306,22 @@
     _listScroll.drawsBackground = NO;
     _listScroll.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_listScroll];
+    if (_listScroll.contentView) {
+        _listScroll.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(clipViewFrameDidChange:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:_listScroll.contentView];
+    }
 
     // ---- 网格视图 ----
     NSCollectionViewFlowLayout *layout = [[NSCollectionViewFlowLayout alloc] init];
-    layout.itemSize = NSMakeSize(168, 214);
-    layout.minimumInteritemSpacing = 14;
+    layout.itemSize = NSMakeSize(152, 194);
+    layout.minimumInteritemSpacing = 16;
     layout.minimumLineSpacing = 16;
     layout.sectionInset = NSEdgeInsetsMake(4, 4, 16, 4);
-    _grid = [[NSCollectionView alloc] initWithFrame:NSZeroRect];
+    _grid = [[NSCollectionView alloc] initWithFrame:NSMakeRect(0, 0, 674, 520)];
+    _grid.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _grid.collectionViewLayout = layout;
     _grid.dataSource = self;
     _grid.delegate = self;
@@ -304,9 +330,17 @@
     _gridScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     _gridScroll.documentView = _grid;
     _gridScroll.hasVerticalScroller = YES;
+    _gridScroll.autohidesScrollers = YES;
     _gridScroll.drawsBackground = NO;
     _gridScroll.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:_gridScroll];
+    if (_gridScroll.contentView) {
+        _gridScroll.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(clipViewFrameDidChange:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:_gridScroll.contentView];
+    }
 
     // ---- 未配置服务器的空态卡（web：'还没有可浏览的流媒体服务器' + 说明 + 去设置里配置/重试）----
     _emptyCard = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -320,11 +354,17 @@
                                       [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
                                       RLPTheme.current.text);
         title.identifier = @"remote.empty.title";
+        title.maximumNumberOfLines = 0;
+        title.lineBreakMode = NSLineBreakByWordWrapping;
+        [title setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
         title.translatesAutoresizingMaskIntoConstraints = NO;
         NSTextField *hint = RLPLabel(@"", [NSFont systemFontOfSize:12.5], RLPTheme.current.mut);
         hint.identifier = @"remote.empty.hint";
         hint.maximumNumberOfLines = 0;
         hint.lineBreakMode = NSLineBreakByWordWrapping;
+        [hint setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
         hint.translatesAutoresizingMaskIntoConstraints = NO;
         NSButton *go = [NSButton buttonWithTitle:RLPTr(@"去设置里配置") target:self action:@selector(onGoConfigureServer:)];
         go.bezelStyle = NSBezelStyleRounded;
@@ -353,9 +393,16 @@
             [_emptyCard.bottomAnchor constraintEqualToAnchor:go.bottomAnchor constant:20],
         ]];
     }
-    [self.contentView addConstraint:[_emptyCard.widthAnchor constraintEqualToConstant:560]];
-    [self.contentView addConstraint:[_emptyCard.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor]];
-    [self.contentView addConstraint:[_emptyCard.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:40]];
+    NSLayoutConstraint *emptyPrefW = [_emptyCard.widthAnchor constraintEqualToConstant:560];
+    emptyPrefW.priority = 450; // 低于 NSLayoutPriorityWindowSizeStayPut(500)，窄窗下收窄不顶窗
+    [NSLayoutConstraint activateConstraints:@[
+        emptyPrefW,
+        [_emptyCard.widthAnchor constraintLessThanOrEqualToConstant:560],
+        [_emptyCard.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.contentView.leadingAnchor constant:16],
+        [_emptyCard.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+        [_emptyCard.centerXAnchor constraintEqualToAnchor:self.contentView.centerXAnchor],
+        [_emptyCard.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:40],
+    ]];
 
     [NSLayoutConstraint activateConstraints:@[
         [toolbar.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
@@ -396,7 +443,11 @@
         _backButton.hidden = NO;
         _viewToggle.hidden = NO;
     }
-    if (configured) return;
+    if (configured) {
+        _lastEmptyReason = nil;
+        _lastEmptyReasonZhKey = nil;
+        return;
+    }
     _lastEmptyReason = [reason copy];
     _emptyHint.stringValue = [NSString stringWithFormat:@"%@\n%@",
         reason.length ? reason : RLPTr(@"还没有流媒体服务器"),
@@ -417,10 +468,124 @@
     [self reloadData];
 }
 
+- (CGFloat)effectiveGridWidth {
+    if (_gridScroll && _gridScroll.contentView && _gridScroll.contentView.bounds.size.width > 1.0) {
+        return _gridScroll.contentView.bounds.size.width;
+    }
+    const CGFloat viewW = self.contentView.bounds.size.width;
+    if (viewW > 33.0) return viewW - 32.0;
+    return 0.0;
+}
+
+- (void)relayoutGridForWidth:(CGFloat)w {
+    if (w <= 1.0 || ![_grid.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]) return;
+    NSCollectionViewFlowLayout *l = (NSCollectionViewFlowLayout *)_grid.collectionViewLayout;
+    const CGFloat pad = 4.0, gap = 16.0, minW = 152.0;
+    const CGFloat avail = MAX(80.0, w - pad * 2.0);
+    NSInteger cols = (avail >= minW) ? (NSInteger)floor((avail + gap) / (minW + gap)) : 1;
+    if (cols < 1) cols = 1;
+    const CGFloat itemW = (avail >= minW) ? floor((avail - gap * (cols - 1)) / cols) : floor(avail);
+    const CGFloat itemH = itemW + 42.0;
+    const BOOL widthChanged = fabs(_lastLayoutWidth - w) >= 0.5;
+    const BOOL itemChanged = fabs(l.itemSize.width - itemW) >= 0.5 || fabs(l.itemSize.height - itemH) >= 0.5;
+    const BOOL colWidthMismatch = fabs(_grid.frame.size.width - w) >= 0.5;
+    if (!widthChanged && !itemChanged && !colWidthMismatch) return;
+    _lastLayoutWidth = w;
+    l.itemSize = NSMakeSize(itemW, itemH);
+    if (colWidthMismatch) {
+        NSRect cf = _grid.frame;
+        cf.size.width = w;
+        _grid.frame = cf;
+    }
+    [l invalidateLayout];
+}
+
+- (void)syncListColumnWidth {
+    if (!_tableView || !_listScroll || _tableView.tableColumns.count == 0) return;
+    CGFloat avail = NSWidth(_listScroll.contentView.bounds);
+    if (avail <= 1.0 && NSWidth(self.contentView.bounds) > 33.0) {
+        avail = NSWidth(self.contentView.bounds) - 32.0;
+    }
+    if (avail <= 1.0) return;
+    NSTableColumn *col = _tableView.tableColumns[0];
+    BOOL changed = NO;
+    if (fabs(col.width - avail) >= 0.5) {
+        col.width = avail;
+        changed = YES;
+    }
+    NSRect tf = _tableView.frame;
+    if (fabs(tf.size.width - avail) >= 0.5) {
+        tf.size.width = avail;
+        _tableView.frame = tf;
+        changed = YES;
+    }
+    if (changed) [_tableView tile];
+}
+
+- (void)clipViewFrameDidChange:(NSNotification *)note {
+    (void)note;
+    if (_relayouting) return;
+    _relayouting = YES;
+    if (_listScroll && !_listScroll.hidden) {
+        [self syncListColumnWidth];
+    }
+    if (_gridScroll && !_gridScroll.hidden && _gridScroll.contentView) {
+        const CGFloat w = _gridScroll.contentView.bounds.size.width;
+        if (w > 1.0) {
+            [self relayoutGridForWidth:w];
+            [_grid setNeedsLayout:YES];
+            [self.view setNeedsLayout:YES];
+        }
+    }
+    _relayouting = NO;
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    [self syncListColumnWidth];
+    const CGFloat w = [self effectiveGridWidth];
+    if (w > 1.0) [self relayoutGridForWidth:w];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    if (_relayouting) return;
+    _relayouting = YES;
+    [self syncListColumnWidth];
+    for (int pass = 0; pass < 2; ++pass) {
+        const CGFloat w = [self effectiveGridWidth];
+        if (w <= 1.0) break;
+        NSCollectionViewFlowLayout *l = [_grid.collectionViewLayout isKindOfClass:[NSCollectionViewFlowLayout class]]
+            ? (NSCollectionViewFlowLayout *)_grid.collectionViewLayout : nil;
+        const CGFloat prevItemW = l ? l.itemSize.width : 0.0;
+        const CGFloat prevColW = _grid.frame.size.width;
+        const CGFloat prevLastW = _lastLayoutWidth;
+        [self relayoutGridForWidth:w];
+        const BOOL changed = (l && fabs(l.itemSize.width - prevItemW) >= 0.5) ||
+                             fabs(_grid.frame.size.width - prevColW) >= 0.5 ||
+                             fabs(_lastLayoutWidth - prevLastW) >= 0.5;
+        if (!_gridScroll || _gridScroll.hidden) break;
+        if (changed || pass == 0) {
+            [_gridScroll layoutSubtreeIfNeeded];
+        } else {
+            break;
+        }
+        const CGFloat nextW = [self effectiveGridWidth];
+        if (fabs(nextW - w) < 0.5) break;
+    }
+    _relayouting = NO;
+}
+
 - (void)applyViewMode {
     _gridScroll.hidden = !_gridMode;
     _listScroll.hidden = _gridMode;
     _viewToggle.selectedSegment = _gridMode ? 0 : 1;
+    if (_gridMode) {
+        const CGFloat w = [self effectiveGridWidth];
+        if (w > 1.0) [self relayoutGridForWidth:w];
+    } else {
+        [self syncListColumnWidth];
+    }
 }
 
 - (void)viewToggleChanged:(NSSegmentedControl *)sender {
@@ -452,26 +617,33 @@
 
 - (void)reloadData {
     [super reloadData];
+    _lastSubtitleZhKey = nil;
+    _lastEmptyReasonZhKey = nil;
     NSUInteger seq = ++_requestSeq;
+    __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared getJSON:@"/api/src/config" completion:^(NSDictionary * _Nullable json) {
-        if (seq != self->_requestSeq) return;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_->_requestSeq) return;
         if (!json || ![json[@"ok"] boolValue]) {
-            self->_items = nil;
-            [self reloadItems];
-            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
-                          ? json[@"error"] : RLPTr(@"浏览失败");
-            [self setSubtitle:err];
-            [self showEmptyStateForConfigured:NO reason:err];
+            self_->_items = nil;
+            [self_ reloadItems];
+            NSString *rawErr = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : nil;
+            self_->_lastSubtitleZhKey = rawErr ? nil : @"浏览失败";
+            self_->_lastEmptyReasonZhKey = rawErr ? nil : @"浏览失败";
+            NSString *err = rawErr ?: RLPTr(@"浏览失败");
+            [self_ setSubtitle:err];
+            [self_ showEmptyStateForConfigured:NO reason:err];
             return;
         }
 
-        self->_servers = [json[@"servers"] isKindOfClass:[NSArray class]] ? json[@"servers"] : @[];
-        [self->_serverPicker removeAllItems];
+        self_->_servers = [json[@"servers"] isKindOfClass:[NSArray class]] ? json[@"servers"] : @[];
+        [self_->_serverPicker removeAllItems];
         NSString *activeId = [json[@"active"] isKindOfClass:[NSString class]] ? json[@"active"] : @"";
         NSInteger activeIdx = -1;
-        for (NSInteger i = 0; i < (NSInteger)self->_servers.count; ++i) {
-            NSDictionary *s = self->_servers[(NSUInteger)i];
-            [self->_serverPicker addItemWithTitle:s[@"name"] ?: @""];
+        for (NSInteger i = 0; i < (NSInteger)self_->_servers.count; ++i) {
+            NSDictionary *s = self_->_servers[(NSUInteger)i];
+            [self_->_serverPicker addItemWithTitle:s[@"name"] ?: @""];
             if (activeIdx < 0) {
                 BOOL isAct = [s[@"active"] respondsToSelector:@selector(boolValue)] && [s[@"active"] boolValue];
                 NSString *sid = [s[@"id"] isKindOfClass:[NSString class]] ? s[@"id"] : @"";
@@ -480,65 +652,80 @@
                 }
             }
         }
-        if (activeIdx >= 0 && activeIdx < self->_serverPicker.numberOfItems) {
-            [self->_serverPicker selectItemAtIndex:activeIdx];
+        if (activeIdx >= 0 && activeIdx < self_->_serverPicker.numberOfItems) {
+            [self_->_serverPicker selectItemAtIndex:activeIdx];
         }
 
-        if (![json[@"configured"] boolValue] || self->_servers.count == 0) {
-            self->_items = nil;
-            [self reloadItems];
-            [self setSubtitle:RLPTr(@"未配置服务器")];
-            [self showEmptyStateForConfigured:NO reason:RLPTr(@"还没有流媒体服务器")];
+        if (![json[@"configured"] boolValue] || self_->_servers.count == 0) {
+            self_->_items = nil;
+            [self_ reloadItems];
+            self_->_lastSubtitleZhKey = @"未配置服务器";
+            self_->_lastEmptyReasonZhKey = @"还没有流媒体服务器";
+            [self_ setSubtitle:RLPTr(@"未配置服务器")];
+            [self_ showEmptyStateForConfigured:NO reason:RLPTr(@"还没有流媒体服务器")];
             return;
         }
-        [self showEmptyStateForConfigured:YES reason:@""];
-        [self->_breadcrumbStack removeAllObjects];
-        [self updateBreadcrumbDisplay];
+        [self_ showEmptyStateForConfigured:YES reason:@""];
+        [self_->_breadcrumbStack removeAllObjects];
+        [self_ updateBreadcrumbDisplay];
 
-        [self browseId:@""];
+        [self_ browseId:@""];
     }];
     // 显示偏好：读 remoteview（web 同一键），读不到保持网格缺省。
     [RLPCoreClient.shared getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
         NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
         NSString *rv = [kv[@"remoteview"] isKindOfClass:[NSString class]] ? kv[@"remoteview"] : nil;
         if (!rv.length) return;
         BOOL wantGrid = ![rv isEqualToString:@"list"];
-        if (wantGrid != self->_gridMode) {
-            self->_gridMode = wantGrid;
-            [self applyViewMode];
-            [self reloadItems];
+        if (wantGrid != self_->_gridMode) {
+            self_->_gridMode = wantGrid;
+            [self_ applyViewMode];
+            [self_ reloadItems];
         }
     }];
 }
 
 - (void)browseId:(NSString *)key {
     NSUInteger seq = ++_requestSeq;
+    _lastSubtitleZhKey = nil;
+    _lastEmptyReasonZhKey = nil;
     NSString *url = [NSString stringWithFormat:@"/api/src/browse?id=%@", RLPEnc(key ?: @"")];
+    __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared getJSON:url completion:^(NSDictionary * _Nullable json) {
-        if (seq != self->_requestSeq) return;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || seq != self_->_requestSeq) return;
         if (!json || ![json[@"ok"] boolValue]) {
-            self->_items = nil;
-            [self reloadItems];
-            NSString *err = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
-                          ? json[@"error"] : RLPTr(@"浏览失败");
-            [self setSubtitle:err];
-            [self showEmptyStateForConfigured:NO reason:err];
+            self_->_items = nil;
+            [self_ reloadItems];
+            NSString *rawErr = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                          ? json[@"error"] : nil;
+            self_->_lastSubtitleZhKey = rawErr ? nil : @"浏览失败";
+            self_->_lastEmptyReasonZhKey = rawErr ? nil : @"浏览失败";
+            NSString *err = rawErr ?: RLPTr(@"浏览失败");
+            [self_ setSubtitle:err];
+            [self_ showEmptyStateForConfigured:NO reason:err];
             return;
         }
 
         NSString *err = [json[@"err"] isKindOfClass:[NSString class]] ? json[@"err"] : @"";
         NSArray *items = [json[@"items"] isKindOfClass:[NSArray class]] ? json[@"items"] : @[];
         if (err.length > 0 && items.count == 0) {
-            self->_items = nil;
-            [self reloadItems];
-            [self setSubtitle:err];
-            [self showEmptyStateForConfigured:NO reason:err];
+            self_->_items = nil;
+            [self_ reloadItems];
+            self_->_lastSubtitleZhKey = nil;
+            self_->_lastEmptyReasonZhKey = nil;
+            [self_ setSubtitle:err];
+            [self_ showEmptyStateForConfigured:NO reason:err];
             return;
         }
-        self->_items = items;
-        [self showEmptyStateForConfigured:YES reason:@""];
-        [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)self->_items.count]];
-        [self reloadItems];
+        self_->_lastSubtitleZhKey = nil;
+        self_->_lastEmptyReasonZhKey = nil;
+        self_->_items = items;
+        [self_ showEmptyStateForConfigured:YES reason:@""];
+        [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)self_->_items.count]];
+        [self_ reloadItems];
     }];
 }
 
@@ -652,8 +839,13 @@
     text.orientation = NSUserInterfaceLayoutOrientationVertical;
     text.alignment = NSLayoutAttributeLeading;
     text.spacing = 1;
+    [text setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSTextField *name = RLPLabel(item[@"t"] ?: @"", [NSFont systemFontOfSize:13], t.text);
     name.lineBreakMode = NSLineBreakByTruncatingTail;
+    name.maximumNumberOfLines = 1;
+    [name setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSString *sub;
     if ([item[@"dir"] boolValue]) {
         sub = RLPTr(@"文件夹");
@@ -665,6 +857,9 @@
     }
     NSTextField *subLabel = RLPLabel(sub, [NSFont systemFontOfSize:11], t.mut);
     subLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    subLabel.maximumNumberOfLines = 1;
+    [subLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
     [text addArrangedSubview:name];
     [text addArrangedSubview:subLabel];
     [cell addArrangedSubview:text];
@@ -693,10 +888,29 @@
 
 - (void)applyTheme {
     [super applyTheme];
-    _tableView.backgroundColor = RLPTheme.current.bg;
-    _listScroll.backgroundColor = RLPTheme.current.bg;
+    if (!self.isViewLoaded) return;
+    RLPTheme *t = [RLPTheme current];
+    _tableView.backgroundColor = t.bg;
+    _listScroll.backgroundColor = t.bg;
     _grid.backgroundColors = @[[NSColor clearColor]];
+    _pathBreadcrumb.textColor = t.mut;
+    _emptyTitle.textColor = t.text;
+    _emptyHint.textColor = t.mut;
+    NSIndexSet *tSel = [_tableView.selectedRowIndexes copy];
+    NSPoint tOrigin = _listScroll ? _listScroll.contentView.bounds.origin : NSZeroPoint;
+    NSSet<NSIndexPath *> *gSel = [_grid.selectionIndexPaths copy];
+    NSPoint gOrigin = _gridScroll ? _gridScroll.contentView.bounds.origin : NSZeroPoint;
     [self reloadItems];
+    if (tSel.count) [_tableView selectRowIndexes:tSel byExtendingSelection:NO];
+    if (_listScroll) {
+        [_listScroll.contentView scrollToPoint:tOrigin];
+        [_listScroll reflectScrolledClipView:_listScroll.contentView];
+    }
+    if (gSel.count) _grid.selectionIndexPaths = gSel;
+    if (_gridScroll) {
+        [_gridScroll.contentView scrollToPoint:gOrigin];
+        [_gridScroll reflectScrolledClipView:_gridScroll.contentView];
+    }
 }
 
 - (void)activate { [super activate]; }
@@ -713,11 +927,15 @@
     _emptyGoBtn.title = RLPTr(@"去设置里配置");
     _emptyRetryBtn.title = RLPTr(@"重试");
     if (!_emptyCard.hidden) {
-        NSString *r = _lastEmptyReason.length ? _lastEmptyReason : RLPTr(@"还没有流媒体服务器");
+        NSString *r = _lastEmptyReasonZhKey.length
+            ? RLPTr(_lastEmptyReasonZhKey)
+            : (_lastEmptyReason.length ? _lastEmptyReason : RLPTr(@"还没有流媒体服务器"));
         _emptyHint.stringValue = [NSString stringWithFormat:@"%@\n%@", r,
             RLPTr(@"支持 Navidrome / Subsonic / Emby（只取原始文件，不转码）。先在「设置 → 流媒体」添加并启用一台服务器，保存后回到这里即可浏览。")];
     }
-    if (_servers.count == 0 && !_emptyCard.hidden) {
+    if (_lastSubtitleZhKey.length) {
+        [self setSubtitle:RLPTr(_lastSubtitleZhKey)];
+    } else if (_servers.count == 0 && !_emptyCard.hidden) {
         [self setSubtitle:RLPTr(@"未配置服务器")];
     } else if (_items.count > 0) {
         [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 项"), (long)_items.count]];

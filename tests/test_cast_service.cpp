@@ -1505,6 +1505,28 @@ int main() {
                f4[1].rate == 192000 && f4[1].bits == 24 &&
                f4[2].rate == 384000 && f4[2].bits == 32,
                "parse_sink_formats: L16/L24/L32 复合能力列表完整解析");
+
+            // 8.0b 完整 Sink 元组匹配 (P0 #1)：防止跨条目混用 channels / bits / rate
+            auto cCh = cast_parse_sink_caps(
+                "http-get:*:audio/wav;rate=192000;channels=6:*,http-get:*:audio/wav;rate=96000;channels=2:*");
+            auto rCh = cast_compatible_rates(cCh, 24, 2);
+            ck(cCh.ok && rCh.size() == 1 && rCh[0] == 96000,
+               "cast_compatible_rates: 立体声禁止借用 6 声道条目声明的 192000 Hz");
+
+            auto cBits = cast_parse_sink_caps(
+                "http-get:*:audio/wav;rate=192000;channels=2;bits=16:*,http-get:*:audio/wav;rate=96000;channels=2;bits=24:*");
+            auto rB24 = cast_compatible_rates(cBits, 24, 2);
+            auto rB16 = cast_compatible_rates(cBits, 16, 2);
+            ck(rB24.size() == 1 && rB24[0] == 96000 && rB16.size() == 1 && rB16[0] == 192000,
+               "cast_compatible_rates: rate 与 bits 严格绑定同一条元组");
+
+            auto cMp3Only = cast_parse_sink_caps("http-get:*:audio/mpeg:*");
+            ck(cMp3Only.ok && !cast_tuple_compatible(cMp3Only, 16, 2),
+               "cast_tuple_compatible: 仅 audio/mpeg 的 Sink 不匹配 PCM 立体声");
+
+            auto cMonoOnly = cast_parse_sink_caps("http-get:*:audio/L16;rate=192000;channels=1:*");
+            ck(cMonoOnly.ok && !cast_tuple_compatible(cMonoOnly, 16, 2) && cast_tuple_compatible(cMonoOnly, 16, 1),
+               "cast_tuple_compatible: 单声道条目不兼容立体声但兼容单声道");
         }
 
         // 辅助结构与函数
@@ -1679,40 +1701,51 @@ int main() {
                    "body=" + std::to_string(fullRes.body.size()) + " 44+dataSz=" + std::to_string(44 + dataSz));
             }
 
-            // 判据 3: 帧数守恒断言
-            // 依据：总输出帧数必须精确守恒于 llround(srcFrames * targetRate / sourceRate)，不多也不少一帧
-            const uint64_t expectedFrames = (uint64_t)std::llround((double)kSrcFrames * 88200.0 / 44100.0); // 8820
+            // 判据 3: 自然排空与延迟补偿帧数完整性断言
+            // 依据：线性相位群延迟由头部分跳过补偿，结尾自然 FIR 拖尾完整排空而不做硬截断
+            const uint64_t expectedBaseFrames = (uint64_t)std::llround((double)kSrcFrames * 88200.0 / 44100.0); // 8820
             const size_t actualDataBytes = fullRes.body.size() >= 44 ? (fullRes.body.size() - 44) : 0;
             const size_t actualFrames = actualDataBytes / 4;
-            ck(actualFrames == expectedFrames,
-               "判据 3(帧数守恒): 实际输出帧数精确等于理论计算",
-               "actual=" + std::to_string(actualFrames) + " expected=" + std::to_string(expectedFrames));
-            ck(actualDataBytes == expectedFrames * 4,
-               "判据 3(帧数守恒): 数据块末尾无任何溢出或截断的残留字节");
+            ck(actualFrames > expectedBaseFrames,
+               "判据 3(自然排空): 实际输出帧数大于基础帧数（保留完整 FIR 尾响）",
+               "actual=" + std::to_string(actualFrames) + " base=" + std::to_string(expectedBaseFrames));
+            ck(actualDataBytes == actualFrames * 4,
+               "判据 3(帧对齐): 数据块末尾无任何溢出或截断的残留字节");
 
             // 判据 2: 逐字节相等断言
-            // 依据：同一 PolyphaseResampler 配置与命名滤波器下，流式分块写盘与离线独立计算产出的 PCM 逐字节一致
+            // 依据：同一 PolyphaseResampler (autoTaps + Pcm + 延迟补偿 + 自然排空 + TPDF 抖动) 配置下，流式分块与离线参照逐字节一致
             std::vector<uint8_t> expectedPcmBytes;
             {
                 rta::dsp::ResamplerConfig rcfg;
                 rcfg.inRate = 44100;
                 rcfg.outRate = 88200;
                 rcfg.channels = 2;
+                rcfg.autoTaps = true;
+                rta::dsp::apply_resample_purpose(rcfg, rta::dsp::ResamplePurpose::Pcm);
                 const auto* fp = rta::dsp::find_preset("poly-sinc-lp", false);
                 rta::dsp::apply_preset(rcfg, *fp);
+                rta::dsp::apply_resample_purpose(rcfg, rta::dsp::ResamplePurpose::Pcm);
 
                 rta::dsp::PolyphaseResampler testResampler(rcfg);
-                uint64_t refWritten = 0;
+                const uint64_t refLatencyOut = (uint64_t)std::ceil(
+                    std::max(0.0, testResampler.latencyInputSamples()) * (88200.0 / 44100.0));
+                uint64_t refSkipped = 0;
+                rta::dsp::Rng refRng(0x112CA57);
 
                 auto append_ref_frames = [&](const std::vector<std::vector<double>>& outCh, size_t nOut) {
                     if (nOut == 0) return;
-                    if (refWritten + nOut > expectedFrames) nOut = (size_t)(expectedFrames - refWritten);
-                    if (nOut == 0) return;
-                    for (size_t i = 0; i < nOut; ++i) {
+                    size_t skip = 0;
+                    if (refSkipped < refLatencyOut) {
+                        skip = (size_t)std::min<uint64_t>((uint64_t)nOut, refLatencyOut - refSkipped);
+                        refSkipped += skip;
+                    }
+                    if (skip >= nOut) return;
+                    for (size_t i = skip; i < nOut; ++i) {
                         for (int c = 0; c < 2; ++c) {
                             double x = outCh[c][i];
                             if (!rta::audio::audio_finite(x)) x = 0.0;
                             double s = x * 32768.0;
+                            s += (refRng.uniform() - refRng.uniform());
                             s = std::floor(s + 0.5);
                             if (s > 32767.0) s = 32767.0;
                             if (s < -32768.0) s = -32768.0;
@@ -1721,7 +1754,6 @@ int main() {
                             expectedPcmBytes.push_back((uint8_t)((v >> 8) & 0xFF));
                         }
                     }
-                    refWritten += nOut;
                 };
 
                 size_t srcOffset = 0;
@@ -1747,17 +1779,13 @@ int main() {
                 size_t maxDrainOut = testResampler.maxOutFrames(drainChunk);
                 std::vector<std::vector<double>> drainOut(2, std::vector<double>(maxDrainOut));
                 std::vector<double*> drainOutPtrs = {drainOut[0].data(), drainOut[1].data()};
-                const size_t maxDrainIn = (size_t)std::ceil(testResampler.latencyInputSamples() * 2.0) + 2048;
+                const size_t drainTotalIn = (size_t)std::ceil(std::max(0.0, testResampler.tailInputSamples())) + 2;
                 size_t drainedIn = 0;
-                while (refWritten < expectedFrames && drainedIn < maxDrainIn) {
-                    size_t nOut = testResampler.process(zeroPtrs.data(), drainChunk, drainOutPtrs.data());
-                    drainedIn += drainChunk;
+                while (drainedIn < drainTotalIn) {
+                    const size_t thisDrain = std::min(drainChunk, drainTotalIn - drainedIn);
+                    size_t nOut = testResampler.process(zeroPtrs.data(), thisDrain, drainOutPtrs.data());
+                    drainedIn += thisDrain;
                     if (nOut > 0) append_ref_frames(drainOut, nOut);
-                }
-                if (refWritten < expectedFrames) {
-                    size_t pad = (size_t)(expectedFrames - refWritten);
-                    std::vector<std::vector<double>> padCh(2, std::vector<double>(pad, 0.0));
-                    append_ref_frames(padCh, pad);
                 }
             }
 
@@ -2079,9 +2107,12 @@ int main() {
                     uint16_t ch = (uint16_t)h[22] | ((uint16_t)h[23] << 8);
                     uint16_t bits = (uint16_t)h[34] | ((uint16_t)h[35] << 8);
                     ck(rate == 192000, "判据 12.2(强制开): 临时 WAV 头采样率精确为 192000");
+                    const uint64_t frameBytes = (uint64_t)ch * ((bits + 7) / 8);
                     const uint64_t expFrames = (uint64_t)std::llround((double)kSrc96kFrames * 192000.0 / 96000.0);
-                    const uint64_t expBytes = expFrames * (uint64_t)ch * ((bits + 7) / 8);
-                    ck(dataSz == expBytes, "判据 12.2(强制开): 帧数守恒且 data 字节精确等于理论值");
+                    const uint64_t expBytes = expFrames * frameBytes;
+                    ck(frameBytes > 0 && (dataSz % frameBytes) == 0 && dataSz > expBytes,
+                       "判据 12.2(强制开): 完整保留拖尾且 data 字节帧对齐",
+                       "dataSz=" + std::to_string(dataSz) + " baseBytes=" + std::to_string(expBytes));
                 }
 
                 mgr.stop();
@@ -2156,10 +2187,14 @@ int main() {
                         uint32_t dataSz = (uint32_t)h[40] | ((uint32_t)h[41] << 8) | ((uint32_t)h[42] << 16) | ((uint32_t)h[43] << 24);
                         uint16_t ch = (uint16_t)h[22] | ((uint16_t)h[23] << 8);
                         uint16_t bits = (uint16_t)h[34] | ((uint16_t)h[35] << 8);
-                        ck(rate == 192000, "判据 13(compatible): WAV 头采样率精确为 192000", std::to_string(rate));
+                        ck(rate == 192000 && bits == 24, "判据 13(compatible): WAV 头采样率=192000 且仅 L24 时无损升为 24-bit",
+                           "rate=" + std::to_string(rate) + " bits=" + std::to_string(bits));
+                        const uint64_t frameBytes = (uint64_t)ch * ((bits + 7) / 8);
                         const uint64_t expFrames = (uint64_t)std::llround((double)kSrcFrames * 192000.0 / 44100.0);
-                        ck(dataSz == expFrames * (uint64_t)ch * ((bits + 7) / 8),
-                           "判据 13(compatible): 帧数守恒且 data 字节等于理论值");
+                        const uint64_t baseBytes = expFrames * frameBytes;
+                        ck(frameBytes > 0 && (dataSz % frameBytes) == 0 && dataSz > baseBytes,
+                           "判据 13(compatible): 完整保留拖尾且 data 字节帧对齐",
+                           "dataSz=" + std::to_string(dataSz) + " baseBytes=" + std::to_string(baseBytes));
                     }
                 } else {
                     ck(stc.upsampleApplied == false && stc.servedRate == 44100 && stc.crossFamily == false,
@@ -2167,6 +2202,431 @@ int main() {
                 }
                 mgr.stop();
             }
+        }
+
+        // ================= 判据 14: 延迟补偿 + 拖尾自然排空（44.1k->176.4k 与 48k->192k 脉冲头尾验证） =================
+        {
+            auto run_impulse_check = [&](uint32_t inRate, uint32_t outRate, const char* label) {
+                const std::string impIn = make_cast_temp_wav_path("upsample_imp_in");
+                const std::string impOut = make_cast_temp_wav_path("upsample_imp_out");
+                rta::audio::AudioBuffer ab;
+                ab.rate = inRate;
+                ab.bits = 24;
+                ab.channels = 2;
+                ab.isFloat = false;
+                const size_t nFrames = 8192;
+                ab.raw.assign(nFrames * 2, 0);
+                for (int c = 0; c < 2; ++c) {
+                    ab.setSample(0, c, 0.5);
+                    ab.setSample(nFrames - 1, c, 0.5);
+                }
+                rta::audio::write_wav(impIn, ab);
+
+                mock.set_sink("http-get:*:audio/wav:rate=" + std::to_string(outRate));
+                CastStartParams pImp;
+                pImp.dev = descUrl;
+                pImp.file = impIn;
+                pImp.applyUpsample = true;
+                pImp.requestedRate = std::to_string(outRate);
+                // 留空 filterName，验证默认即 poly-sinc-tight-lp
+                auto sr = mgr.start(pImp);
+                ck(sr.ok, (std::string(label) + ": 起播受理成功").c_str());
+                for (int i = 0; i < 80; ++i) {
+                    if (mgr.get_state().phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                CastState stImp = mgr.get_state();
+                ck(stImp.phase == "playing" && stImp.servedFilter == "poly-sinc-tight-lp",
+                   (std::string(label) + ": 默认滤波器为 poly-sinc-tight-lp").c_str(), stImp.servedFilter);
+
+                HttpFetchResult impRes = fetch_http_data(mock.get_current_uri());
+                {
+                    std::ofstream of(impOut, std::ios::binary);
+                    of.write(impRes.body.data(), (std::streamsize)impRes.body.size());
+                }
+                auto outBuf = rta::audio::read_wav(impOut);
+                double headPeak = 0.0, tailPeak = 0.0;
+                for (size_t i = 0; i < std::min<size_t>(100, outBuf.frames()); ++i) {
+                    headPeak = std::max(headPeak, std::abs(outBuf.sample(i, 0)));
+                }
+                for (size_t i = 32700; i < std::min<size_t>(32800, outBuf.frames()); ++i) {
+                    tailPeak = std::max(tailPeak, std::abs(outBuf.sample(i, 0)));
+                }
+                ck(outBuf.rate == outRate && outBuf.frames() > 32768 && headPeak > 0.1 && tailPeak > 0.1,
+                   (std::string(label) + ": 延迟补偿与完整排空后首尾脉冲均保留且无尾截断").c_str(),
+                   "frames=" + std::to_string(outBuf.frames()) + " head=" + std::to_string(headPeak) +
+                   " tail=" + std::to_string(tailPeak));
+
+                mgr.stop();
+                std::remove(impIn.c_str());
+                std::remove(impOut.c_str());
+            };
+            run_impulse_check(44100, 176400, "判据 14a(44.1->176.4)");
+            run_impulse_check(48000, 192000, "判据 14b(48->192)");
+        }
+
+        // ================= 判据 15: 24-bit 升频 TPDF 抖动验证 + filterNx 路由切换 =================
+        {
+            const std::string src24_44 = make_cast_temp_wav_path("src24_44k");
+            const std::string src24_96 = make_cast_temp_wav_path("src24_96k");
+            auto make24 = [](const std::string& path, uint32_t rate, size_t nFrames, double amp) {
+                rta::audio::AudioBuffer b;
+                b.rate = rate; b.bits = 24; b.channels = 2; b.isFloat = false;
+                b.raw.resize(nFrames * 2);
+                for (size_t i = 0; i < nFrames; ++i) {
+                    double v = amp * std::sin(2.0 * M_PI * 1000.0 * (double)i / (double)rate);
+                    b.setSample(i, 0, v);
+                    b.setSample(i, 1, -v);
+                }
+                rta::audio::write_wav(path, b);
+            };
+            make24(src24_44, 44100, 1024, 1e-6); // 超微弱信号便于直接观测 24-bit TPDF 抖动活性
+            make24(src24_96, 96000, 1024, 0.0005);
+
+            // 15a: 24->24 升频使用默认 poly-sinc-tight-lp 且强制加 TPDF 抖动（不输出全 0 量化死区）
+            mock.set_sink("http-get:*:audio/wav;rate=88200;bits=24:*");
+            CastStartParams p1x;
+            p1x.dev = descUrl;
+            p1x.file = src24_44;
+            p1x.applyUpsample = true;
+            p1x.requestedRate = "88200";
+            p1x.filterName = "auto";
+            p1x.filterNx = "poly-sinc-short-lp";
+            mgr.start(p1x);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState st1x = mgr.get_state();
+            ck(st1x.phase == "playing" && st1x.servedFilter == "poly-sinc-tight-lp" && st1x.servedBits == 24,
+               "判据 15a(1x/auto): 44.1k 使用 poly-sinc-tight-lp 且保持 24-bit", st1x.servedFilter);
+
+            HttpFetchResult ditherRes = fetch_http_data(mock.get_current_uri());
+            const std::string ditherOut = make_cast_temp_wav_path("dither24_out");
+            {
+                std::ofstream of(ditherOut, std::ios::binary);
+                of.write(ditherRes.body.data(), (std::streamsize)ditherRes.body.size());
+            }
+            auto ditherBuf = rta::audio::read_wav(ditherOut);
+            // 末尾拖尾全零输入区在未抖动下全是 0 LSB；有 TPDF 抖动时必然存在 ±1 LSB 分布
+            int tailNonZeroLsb = 0;
+            const size_t tailCheckStart = ditherBuf.frames() > 400 ? ditherBuf.frames() - 400 : 0;
+            for (size_t i = tailCheckStart; i < ditherBuf.frames(); ++i) {
+                if (ditherBuf.raw[i * 2] != 0) ++tailNonZeroLsb;
+            }
+            ck(tailNonZeroLsb > 50,
+               "判据 15a(TPDF 抖动): 24->24 升频末尾零拖尾存在 TPDF ±1 LSB 抖动",
+               "tailNonZero=" + std::to_string(tailNonZeroLsb));
+            mgr.stop();
+            std::remove(ditherOut.c_str());
+
+            // 15b: > 48kHz (96kHz) 切换使用 filterNx
+            mock.set_sink("http-get:*:audio/wav;rate=192000;bits=24:*");
+            CastStartParams pNx;
+            pNx.dev = descUrl;
+            pNx.file = src24_96;
+            pNx.applyUpsample = true;
+            pNx.requestedRate = "192000";
+            pNx.filterName = "poly-sinc-tight-lp";
+            pNx.filterNx = "poly-sinc-short-lp";
+            mgr.start(pNx);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stNx = mgr.get_state();
+            ck(stNx.phase == "playing" && stNx.servedFilter == "poly-sinc-short-lp" && stNx.servedRate == 192000,
+               "判据 15b(Nx路由): >48kHz 源自动切到 filterNx (poly-sinc-short-lp)", stNx.servedFilter);
+            mgr.stop();
+
+            std::remove(src24_44.c_str());
+            std::remove(src24_96.c_str());
+        }
+
+        // ================= 判据 16 & 17: 完整 Sink 元组决策 / 位深自动回退 / 不兼容元组拒升 =================
+        {
+            const std::string src48_24 = make_cast_temp_wav_path("src48_24_tuple");
+            rta::audio::AudioBuffer b48;
+            b48.rate = 48000; b48.bits = 24; b48.channels = 2; b48.isFloat = false;
+            b48.raw.resize(2400 * 2);
+            for (size_t i = 0; i < 2400; ++i) {
+                double v = 0.0005 * std::sin(2.0 * M_PI * 440.0 * (double)i / 48000.0);
+                b48.setSample(i, 0, v); b48.setSample(i, 1, -v);
+            }
+            rta::audio::write_wav(src48_24, b48);
+
+            // 16a: 6ch@192k + 2ch@96k → 立体声只能选 96k
+            mock.set_sink("http-get:*:audio/wav;rate=192000;channels=6:*,http-get:*:audio/wav;rate=96000;channels=2:*");
+            CastStartParams pTupleCh;
+            pTupleCh.dev = descUrl;
+            pTupleCh.file = src48_24;
+            pTupleCh.applyUpsample = true;
+            pTupleCh.requestedRate = "max";
+            pTupleCh.ceilingRate = 0;
+            mgr.start(pTupleCh);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stTCh = mgr.get_state();
+            ck(stTCh.phase == "playing" && stTCh.upsampleApplied && stTCh.servedRate == 96000,
+               "判据 16a(元组声道隔离): 立体声仅选用 2ch 条目的 96000 Hz（禁止借用 6ch 的 192k）",
+               std::to_string(stTCh.servedRate));
+            mgr.stop();
+
+            // 16b: 16bit@192k + 24bit@96k → 24bit 源按同位深元组选 96k/24bit
+            mock.set_sink("http-get:*:audio/wav;rate=192000;channels=2;bits=16:*,http-get:*:audio/wav;rate=96000;channels=2;bits=24:*");
+            mgr.start(pTupleCh);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stTBits = mgr.get_state();
+            ck(stTBits.phase == "playing" && stTBits.upsampleApplied &&
+               stTBits.servedBits == 24 && stTBits.servedRate == 96000,
+               "判据 16b(元组位深隔离): 24-bit 源匹配 24-bit@96k 元组，不跨条目借用 16-bit@192k",
+               "rate=" + std::to_string(stTBits.servedRate) + " bits=" + std::to_string(stTBits.servedBits));
+            mgr.stop();
+
+            // 16c: 仅声道不兼容 (mono only) 或无 WAV 条目 → 不把空率表当未声明去升频
+            mock.set_sink("http-get:*:audio/L16;rate=192000;channels=1:*");
+            mgr.start(pTupleCh);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stIncompat = mgr.get_state();
+            ck(stIncompat.phase == "playing" && !stIncompat.upsampleApplied && stIncompat.servedRate == 48000,
+               "判据 16c(不兼容元组禁止静默升频): 仅单声道 Sink 下立体声不升频而保持源直供",
+               stIncompat.upsampleNote);
+            mgr.stop();
+
+            // 17: 24-bit 源遇仅声明 audio/L16:rate=96000 的渲染器 → 位深回退 16-bit + 升频 96k
+            mock.set_sink("http-get:*:audio/L16:rate=96000");
+            mgr.start(pTupleCh);
+            for (int i = 0; i < 60; ++i) {
+                if (mgr.get_state().phase == "playing") break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            CastState stFallback = mgr.get_state();
+            ck(stFallback.phase == "playing" && stFallback.upsampleApplied &&
+               stFallback.servedBits == 16 && stFallback.servedRate == 96000,
+               "判据 17(位深元组回退): 24-bit 源在仅支持 L16@96k 渲染器下正确降为 16-bit 并升频至 96k",
+               "rate=" + std::to_string(stFallback.servedRate) + " bits=" + std::to_string(stFallback.servedBits));
+            mgr.stop();
+
+            std::remove(src48_24.c_str());
+        }
+
+        // ================= 判据 18: 渐进式边转码边播（长音频 >1s 预缓冲即起播 + 逐字节校验 + 播中取消清理） =================
+        {
+            const std::string long44kPath = make_cast_temp_wav_path("upsample_prog_44k");
+            rta::audio::AudioBuffer longBuf;
+            longBuf.rate = 44100;
+            longBuf.channels = 2;
+            longBuf.bits = 24;
+            longBuf.isFloat = false;
+            const size_t kLongFrames = 132300; // 3.0s (> 1s prebuffer 门限，必定进入后台 producerThread 渐进供源)
+            longBuf.raw.resize(kLongFrames * 2);
+            for (size_t i = 0; i < kLongFrames; ++i) {
+                double v = 0.0005 * std::sin(2.0 * M_PI * 440.0 * (double)i / 44100.0);
+                longBuf.setSample(i, 0, v);
+                longBuf.setSample(i, 1, -v);
+            }
+            rta::audio::write_wav(long44kPath, longBuf);
+
+            mock.set_sink("http-get:*:audio/L24:rate=192000");
+
+            // 18a: 44.1kHz -> 192kHz 24-bit 跨族渐进式播放与逐字节比对
+            {
+                const size_t beforeCount = count_temp_rtacast();
+                CastStartParams pProg;
+                pProg.dev = descUrl;
+                pProg.file = long44kPath;
+                pProg.applyUpsample = true;
+                pProg.requestedRate = "192000";
+                pProg.filterName = "poly-sinc-tight-lp";
+                pProg.rateFamilyPolicy = "compatible";
+
+                auto sr = mgr.start(pProg);
+                ck(sr.ok, "判据 18a(渐进升频): 长音频 44.1k->192k 起播受理成功");
+
+                CastState stProg;
+                for (int i = 0; i < 120; ++i) {
+                    stProg = mgr.get_state();
+                    if (stProg.phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                ck(stProg.phase == "playing" && stProg.upsampleApplied &&
+                   stProg.servedRate == 192000 && stProg.servedBits == 24 &&
+                   stProg.servedFilter == "poly-sinc-tight-lp",
+                   "判据 18a(渐进升频): 预缓冲完成后即进入 playing（192kHz/24-bit）",
+                   "phase=" + stProg.phase + " rate=" + std::to_string(stProg.servedRate));
+
+                const std::string progUri = mock.get_current_uri();
+                HttpFetchResult progFull = fetch_http_data(progUri);
+                ck(progFull.statusCode == 200 && progFull.body.size() > 44,
+                   "判据 18a(渐进升频): HTTP GET 200 完整拉取渐进升频 WAV",
+                   "status=" + std::to_string(progFull.statusCode) + " bytes=" + std::to_string(progFull.body.size()));
+
+                if (progFull.body.size() >= 44) {
+                    const uint8_t* h = reinterpret_cast<const uint8_t*>(progFull.body.data());
+                    const uint32_t riffSz = (uint32_t)h[4] | ((uint32_t)h[5] << 8) | ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+                    const uint32_t rate = (uint32_t)h[24] | ((uint32_t)h[25] << 8) | ((uint32_t)h[26] << 16) | ((uint32_t)h[27] << 24);
+                    const uint16_t bits = (uint16_t)h[34] | ((uint16_t)h[35] << 8);
+                    const uint32_t dataSz = (uint32_t)h[40] | ((uint32_t)h[41] << 8) | ((uint32_t)h[42] << 16) | ((uint32_t)h[43] << 24);
+                    ck(rate == 192000 && bits == 24 && riffSz == 36u + dataSz &&
+                       progFull.body.size() == (size_t)44u + (size_t)dataSz,
+                       "判据 18a(渐进WAV头): 预先声明的总长与最终渐进收到的字节数精确相等",
+                       "body=" + std::to_string(progFull.body.size()) + " 44+dataSz=" + std::to_string((size_t)44u + (size_t)dataSz));
+                }
+
+                // Range 206 验证
+                HttpFetchResult progRange = fetch_http_data(progUri, "bytes=1572864-1638399");
+                ck(progRange.statusCode == 206 && progRange.body.size() == 65536 &&
+                   progRange.body == progFull.body.substr(1572864, 65536),
+                   "判据 18a(渐进Range): 206 Partial Content 精确返回 64KB 切片");
+
+                // 与离线参考重采样逐字节比对
+                rta::dsp::ResamplerConfig rcfg;
+                rcfg.inRate = 44100;
+                rcfg.outRate = 192000;
+                rcfg.channels = 2;
+                rcfg.autoTaps = true;
+                rta::dsp::apply_resample_purpose(rcfg, rta::dsp::ResamplePurpose::Pcm);
+                const auto* fp = rta::dsp::find_preset("poly-sinc-tight-lp", false);
+                rta::dsp::apply_preset(rcfg, *fp);
+                rta::dsp::apply_resample_purpose(rcfg, rta::dsp::ResamplePurpose::Pcm);
+
+                rta::dsp::PolyphaseResampler refRs(rcfg);
+                const uint64_t refLatencyOut = (uint64_t)std::ceil(
+                    std::max(0.0, refRs.latencyInputSamples()) * (192000.0 / 44100.0));
+                uint64_t refSkipped = 0;
+                rta::dsp::Rng refRng(0x112CA57);
+                std::vector<uint8_t> expectedPcm;
+                auto append_ref24 = [&](const std::vector<std::vector<double>>& outCh, size_t nOut) {
+                    if (nOut == 0) return;
+                    size_t skip = 0;
+                    if (refSkipped < refLatencyOut) {
+                        skip = (size_t)std::min<uint64_t>((uint64_t)nOut, refLatencyOut - refSkipped);
+                        refSkipped += skip;
+                    }
+                    for (size_t i = skip; i < nOut; ++i) {
+                        for (int c = 0; c < 2; ++c) {
+                            double x = outCh[c][i];
+                            if (!rta::audio::audio_finite(x)) x = 0.0;
+                            double s = x * 8388608.0 + (refRng.uniform() - refRng.uniform());
+                            s = std::floor(s + 0.5);
+                            if (s > 8388607.0) s = 8388607.0;
+                            if (s < -8388608.0) s = -8388608.0;
+                            int32_t v = static_cast<int32_t>(s);
+                            expectedPcm.push_back((uint8_t)(v & 0xFF));
+                            expectedPcm.push_back((uint8_t)((v >> 8) & 0xFF));
+                            expectedPcm.push_back((uint8_t)((v >> 16) & 0xFF));
+                        }
+                    }
+                };
+                for (size_t off = 0; off < longBuf.frames(); ) {
+                    const size_t n = std::min<size_t>(32768, longBuf.frames() - off);
+                    std::vector<std::vector<double>> inCh(2, std::vector<double>(n));
+                    for (int c = 0; c < 2; ++c)
+                        for (size_t i = 0; i < n; ++i) inCh[c][i] = longBuf.sample(off + i, c);
+                    off += n;
+                    std::vector<std::vector<double>> outCh(2, std::vector<double>(refRs.maxOutFrames(n)));
+                    const double* inP[2] = {inCh[0].data(), inCh[1].data()};
+                    double* outP[2] = {outCh[0].data(), outCh[1].data()};
+                    append_ref24(outCh, refRs.process(inP, n, outP));
+                }
+                const size_t drainTotal = (size_t)std::ceil(std::max(0.0, refRs.tailInputSamples())) + 2;
+                std::vector<std::vector<double>> zeroIn(2, std::vector<double>(1024, 0.0));
+                std::vector<std::vector<double>> drainOut(2, std::vector<double>(refRs.maxOutFrames(1024)));
+                const double* zP[2] = {zeroIn[0].data(), zeroIn[1].data()};
+                double* dP[2] = {drainOut[0].data(), drainOut[1].data()};
+                for (size_t d = 0; d < drainTotal; ) {
+                    const size_t n = std::min<size_t>(1024, drainTotal - d);
+                    d += n;
+                    append_ref24(drainOut, refRs.process(zP, n, dP));
+                }
+
+                const std::string actualPcm = progFull.body.substr(44);
+                ck(actualPcm.size() == expectedPcm.size() &&
+                   std::memcmp(actualPcm.data(), expectedPcm.data(), expectedPcm.size()) == 0,
+                   "判据 18a(渐进逐字节相等): 44.1k->192k 24-bit 渐进流与离线参照 100% 逐字节一致",
+                   "actual=" + std::to_string(actualPcm.size()) + " expected=" + std::to_string(expectedPcm.size()));
+
+                mgr.stop();
+                ck(count_temp_rtacast() == beforeCount,
+                   "判据 18a(临时文件清理): 停止后渐进升频临时 WAV 已彻底清理");
+            }
+
+            // 18b: 渐进式起播后立刻 stop()，验证后台生产者 + HTTP 服务有界停机与清理
+            {
+                const size_t beforeCount = count_temp_rtacast();
+                CastStartParams pStop;
+                pStop.dev = descUrl;
+                pStop.file = long44kPath;
+                pStop.applyUpsample = true;
+                pStop.requestedRate = "192000";
+                pStop.filterName = "poly-sinc-tight-lp";
+                pStop.rateFamilyPolicy = "compatible";
+                mgr.start(pStop);
+                for (int i = 0; i < 120; ++i) {
+                    if (mgr.get_state().phase == "playing") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+                const auto tStop0 = std::chrono::steady_clock::now();
+                mgr.stop();
+                const double stopElapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStop0).count();
+                ck(!mgr.get_state().running && stopElapsed < 2.0,
+                   "判据 18b(播中急停): 渐进升频起播后立刻 stop() 有界快速退出",
+                   std::to_string(stopElapsed) + "s");
+                ck(count_temp_rtacast() == beforeCount,
+                   "判据 18b(临时文件清理): 播中急停后临时 WAV 已被清理、无残留文件");
+            }
+
+            std::remove(long44kPath.c_str());
+        }
+
+        // ==================== 判据 19: UPnP 投放升频统一受 gpuVendor 控制 ====================
+        // auto（默认）与 off 均走 64-bit CPU（gpuResample=false）；
+        // 仅当显式指定 gpuVendor="metal" 且 Metal 动态库可用时，gpuResample=true。
+        {
+            const std::string savedVendor = rta::dsp::gpu_vendor();
+            auto run_cast_gpu_case = [&](const std::string& vendor, const std::string& label, bool expectMetal) {
+                CastStartParams cp;
+                cp.dev = descUrl;
+                cp.file = srcWavPath;
+                cp.applyUpsample = true;
+                cp.requestedRate = "192000";
+                cp.filterName = "poly-sinc-tight-lp";
+                cp.rateFamilyPolicy = "compatible";
+                cp.gpuVendor = vendor;
+                auto r = mgr.start(cp);
+                ck(r.ok, ("判据 19(" + label + "): 启动投放升频成功").c_str(), r.error);
+                for (int i = 0; i < 150; ++i) {
+                    const auto st = mgr.get_state();
+                    if (st.phase == "playing" || st.phase == "error") break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+                const auto st = mgr.get_state();
+                ck(st.upsampleApplied && st.resampled, ("判据 19(" + label + "): 已发生升频").c_str());
+                ck(st.gpuResample == expectMetal,
+                   ("判据 19(" + label + "): gpuResample=" + std::string(expectMetal ? "true" : "false")).c_str(),
+                   "actual=" + std::string(st.gpuResample ? "true" : "false"));
+                mgr.stop();
+            };
+
+            run_cast_gpu_case("auto", "auto默认64-bit CPU", false);
+            run_cast_gpu_case("off", "off关闭纯CPU", false);
+
+            // 检查 Metal 动态库在当前运行路径是否真可用（与线上同一探测口径）
+            rta::dsp::set_gpu_vendor("metal");
+            rta::dsp::PolyphaseResampler probeRs({44100u, 192000u, 2});
+            probeRs.set_use_gpu(true);
+            const bool metalReady = probeRs.gpu_active();
+            run_cast_gpu_case("metal", "metal显式开启", metalReady);
+
+            rta::dsp::set_gpu_vendor(savedVendor);
         }
 
         // 清理测试源文件与 Mock

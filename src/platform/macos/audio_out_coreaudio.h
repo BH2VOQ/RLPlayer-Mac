@@ -1405,8 +1405,9 @@ public:
     OSStatus last_render_query() const {
         std::lock_guard<std::mutex> lk(mu_);
         if (!unit_) return kAudio_ParamError;
-        UInt32 n = sizeof(OSStatus);
-        return ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Output, 0, nullptr, &n);
+        OSStatus status = noErr;
+        UInt32 n = sizeof(status);
+        return ::AudioUnitGetProperty(unit_, kAudioUnitProperty_LastRenderError, kAudioUnitScope_Output, 0, &status, &n);
     }
     bool restart_io() {
         std::lock_guard<std::mutex> lk(mu_);

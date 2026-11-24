@@ -124,7 +124,6 @@
 // classic 风格顶栏是 52（html[data-uistyle=classic] #app grid-template-rows:52px）。
 static const CGFloat kSidebarWidth = 226.0;   // --sidew
 static const CGFloat kPlaybackHeight = 66.0;  // .bar height
-static const CGFloat kTopbarHeight = 60.0;    // .top height（classic 52，见 topbarHeight()）
 static void * const kRLPRightDrawerKVOContext = (void *)&kRLPRightDrawerKVOContext;
 
 static char kRLPScrollBaseBottomInsetKey;
@@ -148,11 +147,13 @@ static void RLPResetTopPageScroll(NSView *root) {
     NSMutableArray<NSScrollView *> *ss = [NSMutableArray array];
     RLPCollectTopLevelScrollViews(root, ss);
     for (NSScrollView *sv in ss) {
-        if (sv.isHiddenOrHasHiddenAncestor || !sv.contentView) continue;
+        if (sv.isHiddenOrHasHiddenAncestor || !sv.contentView || !sv.documentView) continue;
         NSRect vis = sv.documentVisibleRect;
+        const NSRect docF = sv.documentView.frame;
+        const CGFloat clipH = sv.contentView.bounds.size.height;
         const CGFloat topY = sv.documentView.isFlipped
-            ? 0.0
-            : MAX(0.0, sv.documentView.frame.size.height - sv.contentView.bounds.size.height);
+            ? -sv.contentInsets.top
+            : MAX(NSMinY(docF), NSMaxY(docF) - clipH + sv.contentInsets.top);
         if (fabs(vis.origin.y - topY) > 0.5) {
             [sv.contentView scrollToPoint:NSMakePoint(vis.origin.x, topY)];
             [sv reflectScrolledClipView:sv.contentView];
@@ -429,6 +430,7 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 
     self = [super initWithWindow:win];
     if (!self) return nil;
+    win.delegate = self;
 
     NSView *root = win.contentView;
     root.wantsLayer = YES;
@@ -703,6 +705,9 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
 }
 
 - (void)dealloc {
+    if (self.isWindowLoaded && self.window.delegate == self) {
+        self.window.delegate = nil;
+    }
     [_rightDrawer removeObserver:self forKeyPath:@"tab" context:kRLPRightDrawerKVOContext];
     [_rightDrawer removeObserver:self forKeyPath:@"hidden" context:kRLPRightDrawerKVOContext];
     [_searchDebounce invalidate];
@@ -1433,13 +1438,18 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     self.playbackBar.layer.shadowOffset = CGSizeMake(0, -6);
     self.pageTitle.textColor = t.text;
     self.pageCount.textColor = t.mut;
-    // **所有缓存页**都要刷，不只是当前页：否则切到浅色后再点别的导航项，
-    // 那一页还是深色的（用户实测的"主页还是黑的"就是这个）。
-    for (NSString *key in self.pageCache) {
-        NSViewController *vc = self.pageCache[key];
+    // **所有缓存页、详情返回栈与 worksPage** 都要刷，不只是当前页：
+    // 否则切主题后点返回（popDetail），弹回的页面或 worksPage 还是旧主题。
+    NSMutableOrderedSet<NSViewController *> *themePages = [NSMutableOrderedSet orderedSetWithArray:self.pageCache.allValues];
+    for (NSDictionary *entry in self.rowStack) {
+        NSViewController *vc = entry[@"vc"];
+        if ([vc isKindOfClass:NSViewController.class]) [themePages addObject:vc];
+    }
+    if (self.worksPage) [themePages addObject:self.worksPage];
+    if (self.currentContent) [themePages addObject:self.currentContent];
+    for (NSViewController *vc in themePages) {
         if ([vc respondsToSelector:@selector(applyTheme)]) [(id)vc applyTheme];
     }
-    if ([self.currentContent respondsToSelector:@selector(applyTheme)]) [(id)self.currentContent applyTheme];
     [self.pageHost setNeedsLayout:YES];
     [self.pageHost layoutSubtreeIfNeeded];
     [(RLPPageHostView *)self.pageHost syncScrollInsets];
@@ -1506,7 +1516,8 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
         resolvedTitle = RLPTr(@"正在播放");
     } else if ([self.currentContent isKindOfClass:[RLPWorksViewController class]]) {
         resolvedTitle = RLPTr(@"古典作品 · 演绎版本");
-    } else if ([self.currentContent isKindOfClass:[RLPPlaylistsViewController class]]) {
+    } else if ([self.currentContent isKindOfClass:[RLPPlaylistsViewController class]] ||
+               [self.currentContent isKindOfClass:[RLPTracksViewController class]]) {
         resolvedTitle = [(id)self.currentContent pageTitle];
     } else {
         for (NSString *ck in self.pageCache) {
@@ -1606,6 +1617,10 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
                         ![self_.uiMode isEqualToString:self_.confirmedUiMode]) {
                         [self_ applyUiModeDisplay:self_.confirmedUiMode navigateToStation:navigate];
                     }
+                    [[NSNotificationCenter defaultCenter]
+                        postNotificationName:RLPSettingsChangedNotification
+                                      object:self_
+                                    userInfo:@{ @"modeSwitch": @YES }];
                 }
                 return;
             }
@@ -1677,11 +1692,38 @@ static void RLPConvergeAndWriteBackMainWindowFrame(NSWindow *win) {
     });
 }
 
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    // 视觉瞬间关窗（与 tools/mac_host.mm 同口径）：
+    // 只置 alphaValue=0 而不调用 orderOut:，确保 AppKit 仍触发 applicationShouldTerminateAfterLastWindowClosed:。
+    if (sender) sender.alphaValue = 0.0;
+    [self stopAllActivity];
+    id core = [RLPCoreClient shared];
+    if ([core respondsToSelector:@selector(prepareForShutdown)]) {
+        [core prepareForShutdown];
+    }
+    return YES;
+}
+
 - (void)stopAllActivity {
     [self.playbackBar stopPolling];
     [self.rightDrawer deactivate];
     [self.npPage stopPolling];
     [self stopScanPolling];
+    [self.searchDebounce invalidate];
+    self.searchDebounce = nil;
+    if ([self.currentContent respondsToSelector:@selector(stopPolling)]) {
+        [(id)self.currentContent stopPolling];
+    } else if ([self.currentContent respondsToSelector:@selector(deactivate)]) {
+        [(id)self.currentContent deactivate];
+    }
+    for (NSViewController *vc in self.pageCache.allValues) {
+        if (vc == self.currentContent) continue;
+        if ([vc respondsToSelector:@selector(stopPolling)]) {
+            [(id)vc stopPolling];
+        } else if ([vc respondsToSelector:@selector(deactivate)]) {
+            [(id)vc deactivate];
+        }
+    }
 }
 
 - (void)schedulePageInsetsSync {

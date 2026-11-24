@@ -226,6 +226,8 @@
 @property (nonatomic, assign, readwrite) BOOL polling;
 @property (nonatomic, strong) NSButton *qTab;
 @property (nonatomic, strong) NSButton *lTab;
+@property (nonatomic, strong) NSLayoutConstraint *qTabWidthConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *lTabWidthConstraint;
 @property (nonatomic, strong) NSTextField *count;
 @property (nonatomic, strong) NSButton *clearBtn;
 @property (nonatomic, strong) NSScrollView *qScroll;
@@ -247,7 +249,11 @@
 @property (nonatomic, assign) NSInteger lyricRetry;
 @property (nonatomic, strong) NSTimer *lyricTimer;
 @property (nonatomic, assign) NSInteger activeLine;
+@property (nonatomic, assign) double lastPos;
 @property (nonatomic, assign) double dur;
+@property (nonatomic, copy, nullable) NSString *lHintKey;
+@property (nonatomic, copy, nullable) NSString *lHintErr;
+@property (nonatomic, copy, nullable) NSString *lyricMsgKey;
 @property (nonatomic, strong) NSMutableArray<RLPDrawerLyricRow *> *lyricRows;
 /// 歌词 AI：翻译/音译/假名/繁体应用前的原文（"恢复原文"用）。
 @property (nonatomic, copy) NSArray<RLPLyricLine *> *originalLyricLines;
@@ -399,6 +405,10 @@
     b.translatesAutoresizingMaskIntoConstraints = NO;
     b.wantsLayer = YES;
     [b.heightAnchor constraintEqualToConstant:24].active = YES;   // 4+16+4
+    NSLayoutConstraint *wc = [b.widthAnchor constraintEqualToConstant:52];
+    wc.active = YES;
+    if ([ident isEqualToString:@"right.tab.q"]) self.qTabWidthConstraint = wc;
+    else if ([ident isEqualToString:@"right.tab.l"]) self.lTabWidthConstraint = wc;
     return b;
 }
 
@@ -442,7 +452,15 @@
         // 无边框按钮改 attributedTitle 后 intrinsic 宽度会塌成 0（实测：胶囊完全看不见）。
         // 显式按文字宽度 + web .rtab 的左右 padding 10px 给宽度。
         const CGFloat tw = [b.title sizeWithAttributes:attrs].width;
-        [b.widthAnchor constraintEqualToConstant:ceil(tw) + 20].active = YES;
+        NSLayoutConstraint *wc = (b == self.qTab) ? self.qTabWidthConstraint : self.lTabWidthConstraint;
+        if (wc) {
+            wc.constant = ceil(tw) + 20;
+        } else {
+            wc = [b.widthAnchor constraintEqualToConstant:ceil(tw) + 20];
+            wc.active = YES;
+            if (b == self.qTab) self.qTabWidthConstraint = wc;
+            else self.lTabWidthConstraint = wc;
+        }
     }
     self.qScroll.hidden = !q;
     self.lScroll.hidden = q;
@@ -627,9 +645,13 @@
     [a addButtonWithTitle:RLPTr(@"取消")];
     a.alertStyle = NSAlertStyleWarning;
     if ([a runModal] != NSAlertFirstButtonReturn) return;
+    __weak __typeof__(self) w = self;
     [[RLPCoreClient shared] postJSON:@"/api/clear" body:nil completion:^(NSDictionary * _Nullable j) {
-        [self loadQueue];
-        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:self];
+        (void)j;
+        __typeof__(self) s = w;
+        if (!s) return;
+        [s loadQueue];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPQueueChangedNotification object:s];
     }];
 }
 
@@ -647,7 +669,7 @@
         self.originalLyricLines = nil;
         self.lyricAiApplied = NO;
         self.lyricAiBusy = NO;
-        [self renderLyricMessage:RLPTr(@"还没有播放曲目")];
+        [self renderLyricMessageForKey:@"noTrack"];
         return;
     }
     if (!isRetry) {
@@ -658,6 +680,10 @@
         self.originalLyricLines = nil;
         self.lyricAiApplied = NO;
         self.lyricAiBusy = NO;
+        self.lHintKey = nil;
+        self.lHintErr = nil;
+        self.lHint.stringValue = @"";
+        self.lHint.hidden = YES;
     }
     // lyricFile 必须在「无歌词」分支之前就记下：否则 loadQueue 的换曲检测会把它当成
     // 新曲，每秒重渲染一次空态（网络曲目就是这条路径）。
@@ -667,7 +693,7 @@
         self.originalLyricLines = nil;
         self.lyricAiApplied = NO;
         self.lyricAiBusy = NO;
-        [self renderLyricMessage:RLPTr(@"网络曲目暂无歌词")];
+        [self renderLyricMessageForKey:@"net"];
         return;
     }
     __weak __typeof__(self) w = self;
@@ -688,17 +714,35 @@
         if ([s.lyricFile isEqualToString:file] && s.lyricRetry < 6) {
             NSTimeInterval wait = waits[s.lyricRetry];
             s.lyricRetry++;
-            [s renderLyricMessage:[RLPTr(@"歌词加载中…") stringByAppendingFormat:@"\n%@", RLPTr(@"正在等后台补全（首次播放新曲目时可能要几秒）")]];
+            [s renderLyricMessageForKey:@"loading"];
             [s.lyricTimer invalidate];
             s.lyricTimer = [NSTimer scheduledTimerWithTimeInterval:wait repeats:NO block:^(NSTimer *tm) {
+                (void)tm;
                 __typeof__(self) s2 = w;
                 if (!s2) return;
                 if ([s2.lyricFile isEqualToString:file]) [s2 loadLyricsForCurrent:YES];
             }];
             return;
         }
-        [s renderLyricMessage:[RLPTr(@"没有歌词") stringByAppendingFormat:@"\n%@", RLPTr(@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全")]];
+        [s renderLyricMessageForKey:@"none"];
     }];
+}
+
+- (void)renderLyricMessageForKey:(NSString *)key {
+    self.lyricMsgKey = key;
+    NSString *msg = @"";
+    if ([key isEqualToString:@"noTrack"]) {
+        msg = RLPTr(@"还没有播放曲目");
+    } else if ([key isEqualToString:@"net"]) {
+        msg = RLPTr(@"网络曲目暂无歌词");
+    } else if ([key isEqualToString:@"loading"]) {
+        msg = [RLPTr(@"歌词加载中…") stringByAppendingFormat:@"\n%@",
+               RLPTr(@"正在等后台补全（首次播放新曲目时可能要几秒）")];
+    } else {
+        msg = [RLPTr(@"没有歌词") stringByAppendingFormat:@"\n%@",
+               RLPTr(@"同名 .lrc 文件、内嵌歌词，或播放时自动在线补全")];
+    }
+    [self renderLyricMessage:msg];
 }
 
 - (void)renderLyricMessage:(NSString *)msg {
@@ -706,6 +750,9 @@
         [self.lStack removeArrangedSubview:v]; [v removeFromSuperview];
     }
     [self.lyricRows removeAllObjects];
+    self.lHintKey = nil;
+    self.lHintErr = nil;
+    self.lHint.stringValue = @"";
     self.lHint.hidden = YES;
     NSTextField *l = RLPLabel(msg, [NSFont systemFontOfSize:12], [RLPTheme current].mut2);
     l.identifier = @"right.ly.none";
@@ -716,14 +763,28 @@
 }
 
 - (void)renderLyrics {
+    self.lyricMsgKey = nil;
     for (NSView *v in [self.lStack.arrangedSubviews copy]) {
         [self.lStack removeArrangedSubview:v]; [v removeFromSuperview];
     }
     [self.lyricRows removeAllObjects];
     const BOOL timed = [RLPLyrics isTimed:self.lines];
     // 纯文本歌词给显式提示（web：否则"不滚"看起来像坏了）
-    self.lHint.stringValue = timed ? @"" : RLPTr(@"纯文本歌词（无时间轴）· 不会自动跟随滚动");
-    self.lHint.hidden = timed || ![self.tab isEqualToString:@"l"];
+    if (timed) {
+        if ([self.lHintKey isEqualToString:@"untimed"] || !self.lHint.stringValue.length) {
+            self.lHintKey = nil;
+            self.lHintErr = nil;
+            self.lHint.stringValue = @"";
+            self.lHint.hidden = YES;
+        } else {
+            self.lHint.hidden = ![self.tab isEqualToString:@"l"];
+        }
+    } else {
+        self.lHintKey = @"untimed";
+        self.lHintErr = nil;
+        self.lHint.stringValue = RLPTr(@"纯文本歌词（无时间轴）· 不会自动跟随滚动");
+        self.lHint.hidden = ![self.tab isEqualToString:@"l"];
+    }
     __weak __typeof__(self) w = self;
     for (RLPLyricLine *line in self.lines) {
         RLPDrawerLyricRow *row = [[RLPDrawerLyricRow alloc] initWithText:line.text timed:line.t];
@@ -820,6 +881,12 @@
     self.lHint.stringValue = msg ?: @"";
 }
 
+- (void)showLyricHintKey:(NSString *)key err:(nullable NSString *)err text:(NSString *)msg {
+    self.lHintKey = key;
+    self.lHintErr = err;
+    [self showLyricHint:msg];
+}
+
 - (void)lyricAiTranslateLang:(NSMenuItem *)item {
     NSString *code = [item.representedObject isKindOfClass:[NSString class]] ? (NSString *)item.representedObject : @"zh";
     [self runLyricAiTask:@"translate" lang:code];
@@ -835,10 +902,10 @@
 /// 这里不重试：AI 调用按次计费，失败就失败，用户再点一次才有意义。
 - (void)runLyricAiTask:(NSString *)task lang:(NSString *)lang {
     if (self.lyricAiBusy) return;
-    if (![RLPCoreClient shared].started) { [self showLyricHint:RLPTr(@"核心未启动，稍后再试")]; return; }
+    if (![RLPCoreClient shared].started) { [self showLyricHintKey:@"nostart" err:nil text:RLPTr(@"核心未启动，稍后再试")]; return; }
     // 已应用过 AI 时以"原文"为基准再处理（否则会在译文上再翻一遍，越翻越偏）。
     NSArray<RLPLyricLine *> *base = self.lyricAiApplied ? self.originalLyricLines : self.lines;
-    if (!base.count) { [self showLyricHint:RLPTr(@"这首曲目没有歌词")]; return; }
+    if (!base.count) { [self showLyricHintKey:@"nolyrics" err:nil text:RLPTr(@"这首曲目没有歌词")]; return; }
 
     NSMutableArray<NSString *> *texts = [NSMutableArray arrayWithCapacity:base.count];
     for (RLPLyricLine *l in base) [texts addObject:(l.text ?: @"")];
@@ -846,7 +913,8 @@
 
     NSString *reqFile = [self.lyricFile copy];
     self.lyricAiBusy = YES;
-    [self showLyricHint:([task isEqualToString:@"translate"] ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"))];
+    const BOOL isTr = [task isEqualToString:@"translate"];
+    [self showLyricHintKey:(isTr ? @"busy_tr" : @"busy_ai") err:nil text:(isTr ? RLPTr(@"正在翻译歌词…") : RLPTr(@"正在处理歌词…"))];
     __weak __typeof__(self) w = self;
     [[RLPCoreClient shared] postJSON:@"/api/lyrics/ai" body:body completion:^(NSDictionary * _Nullable j) {
         __typeof__(self) s = w;
@@ -856,15 +924,16 @@
         NSString *err = nil;
         NSArray<RLPLyricLine *> *applied = [RLPLyrics linesFromAiResponse:j appliedTo:base error:&err];
         if (!applied) {
-            [s showLyricHint:[RLPTr(@"歌词处理失败") stringByAppendingFormat:@"：%@", (err ?: RLPTr(@"未知错误"))]];
+            [s showLyricHintKey:@"fail" err:err text:[RLPTr(@"歌词处理失败") stringByAppendingFormat:@"：%@", (err ?: RLPTr(@"未知错误"))]];
             return;
         }
         if (!s.lyricAiApplied) { s.originalLyricLines = base; s.lyricAiApplied = YES; }
         s.lines = applied;
         s.activeLine = -1;
         [s renderLyrics];   // 时间戳没变 ⟹ 高亮/滚动/点行跳转全部照旧
+        [s updatePosition:s.lastPos duration:s.dur];
         const BOOL cached = [j[@"fromCache"] respondsToSelector:@selector(boolValue)] && [j[@"fromCache"] boolValue];
-        [s showLyricHint:(cached ? RLPTr(@"已载入（缓存）") : RLPTr(@"完成"))];
+        [s showLyricHintKey:(cached ? @"cached" : @"done") err:nil text:(cached ? RLPTr(@"已载入（缓存）") : RLPTr(@"完成"))];
     }];
 }
 
@@ -875,7 +944,8 @@
     self.lyricAiApplied = NO;
     self.activeLine = -1;
     [self renderLyrics];
-    [self showLyricHint:RLPTr(@"已恢复原文")];
+    [self updatePosition:self.lastPos duration:self.dur];
+    [self showLyricHintKey:@"restored" err:nil text:RLPTr(@"已恢复原文")];
 }
 
 - (void)lyricCopyAll:(id)sender {
@@ -885,10 +955,11 @@
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
     [pb setString:[rows componentsJoinedByString:@"\n"] forType:NSPasteboardTypeString];
-    [self showLyricHint:RLPTr(@"歌词已复制")];
+    [self showLyricHintKey:@"copied" err:nil text:RLPTr(@"歌词已复制")];
 }
 
 - (void)updatePosition:(double)pos duration:(double)dur {
+    self.lastPos = pos;
     self.dur = dur;
     if (![self.tab isEqualToString:@"l"] || ![RLPLyrics isTimed:self.lines]) return;
     const NSInteger idx = [RLPLyrics activeIndex:self.lines position:pos];
@@ -938,17 +1009,70 @@
     self.lHint.textColor = t.mut2;
     [self refreshTabs];
     [self renderQueue];
-    if (self.lines.count) [self renderLyrics];
+    if (self.lines.count) {
+        const NSInteger prevActive = self.activeLine;
+        [self renderLyrics];
+        if (prevActive >= 0 && prevActive < (NSInteger)self.lyricRows.count) {
+            self.activeLine = prevActive;
+            self.lyricRows[(NSUInteger)prevActive].active = YES;
+        }
+    } else {
+        for (NSView *v in self.lStack.arrangedSubviews) {
+            if ([v isKindOfClass:[NSTextField class]] && [v.identifier isEqualToString:@"right.ly.none"]) {
+                ((NSTextField *)v).textColor = t.mut2;
+            }
+        }
+    }
 }
 
 - (void)applyLanguage {
     [self.qTab setTitle:RLPTr(@"队列")];
     [self.lTab setTitle:RLPTr(@"歌词")];
     [self.clearBtn setTitle:RLPTr(@"清除")];
+    [self refreshTabs];
+    _lyricAiMenu = nil;
+    NSMenu *menu = [self lyricAiMenu];
+    self.lStack.menu = menu;
+    self.lScroll.menu = menu;
+    for (RLPDrawerLyricRow *row in self.lyricRows) {
+        [row setContextMenu:menu];
+    }
     self.count.stringValue = [NSString stringWithFormat:RLPTr(@"共 %lu 首"), (unsigned long)self.items.count];
     if (!self.items.count) [self renderQueue];
-    if (!self.lines.count) [self loadLyricsForCurrent:NO];
-    else if (self.lHint.stringValue.length) {
+    if (!self.lines.count) {
+        if (self.lyricMsgKey.length) {
+            [self renderLyricMessageForKey:self.lyricMsgKey];
+        } else if ([RLPCoreClient shared].started && [self.tab isEqualToString:@"l"]) {
+            [self loadLyricsForCurrent:NO];
+        } else {
+            NSString *file = [self currentTrackPath];
+            if (!file.length) {
+                [self renderLyricMessageForKey:@"noTrack"];
+            } else if ([file hasPrefix:@"http://"] || [file hasPrefix:@"https://"]) {
+                [self renderLyricMessageForKey:@"net"];
+            } else {
+                [self renderLyricMessageForKey:@"none"];
+            }
+        }
+    } else if ([self.lHintKey isEqualToString:@"busy_tr"]) {
+        self.lHint.stringValue = RLPTr(@"正在翻译歌词…");
+    } else if ([self.lHintKey isEqualToString:@"busy_ai"]) {
+        self.lHint.stringValue = RLPTr(@"正在处理歌词…");
+    } else if ([self.lHintKey isEqualToString:@"nostart"]) {
+        self.lHint.stringValue = RLPTr(@"核心未启动，稍后再试");
+    } else if ([self.lHintKey isEqualToString:@"nolyrics"]) {
+        self.lHint.stringValue = RLPTr(@"这首曲目没有歌词");
+    } else if ([self.lHintKey isEqualToString:@"cached"]) {
+        self.lHint.stringValue = RLPTr(@"已载入（缓存）");
+    } else if ([self.lHintKey isEqualToString:@"done"]) {
+        self.lHint.stringValue = RLPTr(@"完成");
+    } else if ([self.lHintKey isEqualToString:@"restored"]) {
+        self.lHint.stringValue = RLPTr(@"已恢复原文");
+    } else if ([self.lHintKey isEqualToString:@"copied"]) {
+        self.lHint.stringValue = RLPTr(@"歌词已复制");
+    } else if ([self.lHintKey isEqualToString:@"fail"]) {
+        self.lHint.stringValue = [RLPTr(@"歌词处理失败") stringByAppendingFormat:@"：%@", (self.lHintErr ?: RLPTr(@"未知错误"))];
+    } else if (self.lHint.stringValue.length && ![RLPLyrics isTimed:self.lines]) {
         self.lHint.stringValue = RLPTr(@"纯文本歌词（无时间轴）· 不会自动跟随滚动");
     }
 }

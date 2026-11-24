@@ -195,8 +195,8 @@ var ADV = {
   trim0: 0, trim1: 0, trim2: 0, trim3: 0, trim4: 0, trim5: 0, trim6: 0, trim7: 0,
   // 输入
   inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '',
-  // 投放升频（1.1.3）：默认关；上限 192000
-  cast_upsample: '0', cast_upsample_ceiling: '192000', cast_upsample_force: '0',
+  // 投放升频（1.1.3+）：默认关；上限默认 auto（跟随渲染器声明）
+  cast_upsample: '0', cast_upsample_ceiling: 'auto', cast_upsample_force: '0',
   // SDM（DSD 输出）专用滤波器：空 = 沿用 PCM 页那一组
   sdmFilt: '', sdmFiltNx: ''
 };
@@ -4003,6 +4003,28 @@ function playPath(f, cs, ce, quiet) {
     return j;
   });
 }
+function playQueueTrack(idx, f, cs, ce) {
+  if (!f) return Promise.resolve();
+  var dev = devMixOf(ADV.device);
+  if (isAirPlayDevice(dev)) {
+    var out = outModeOf();
+    if (out === 'dsd') {
+      toast('AirPlay 不支持 DoP/Native DSD 输出；如需播放请将输出模式设为 PCM');
+      return Promise.resolve({ ok: false, error: 'AirPlay 不支持 DoP/Native DSD 输出' });
+    }
+  }
+  S.lastCur = f;
+  S.metaSeq = (S.metaSeq || 0) + 1;
+  if (D('npt')) D('npt').textContent = nam(f);
+  if (D('npart')) D('npart').textContent = '';
+  var qidx = (typeof idx === 'number' && isFinite(idx) && idx >= 0) ? ('&index=' + Math.floor(idx)) : '';
+  return api('/api/play', 'file=' + encodeURIComponent(f) + cueQuery(cs, ce) + qidx).then(function (j) {
+    if (j && j.ok === false) { toast(j.error || '播放失败'); return j; }
+    toast('开始播放');
+    loadQ();
+    return j;
+  });
+}
 function addPath(f) {
   api('/api/add', 'file=' + encodeURIComponent(f)).then(function () { toast('已加入队列'); loadQ(); });
 }
@@ -4059,7 +4081,7 @@ function loadQ() {
       e.onclick = function (ev) {
         if (ev.target.classList.contains('qdel')) return;
         var c = (S.q.cues || [])[i] || [-1, -1];
-        playPath(S.q.items[i], c[0], c[1]);
+        playQueueTrack(i, S.q.items[i], c[0], c[1]);
       };
       var d = e.querySelector('.qdel');
       if (d) d.onclick = function (ev) {
@@ -4124,7 +4146,7 @@ function showQueueRowMenu(i, ev) {
       closeQueueRowMenu();
       if (a === 'play') {
         var c = (S.q.cues || [])[idx] || [-1, -1];
-        playPath(items[idx], c[0], c[1]);
+        playQueueTrack(idx, items[idx], c[0], c[1]);
         return;
       }
       if (a === 'addsq') {
@@ -4757,7 +4779,7 @@ function saveSettings(immediate) {
     var e = D(p[0]);
     var v = e ? ((e.type === 'checkbox') ? (e.checked ? '1' : '0') : e.value) : (ADV[p[1]] !== undefined ? ADV[p[1]] : '');
     if (v === '' && p[1] === 'cast_upsample') v = '0';
-    if (v === '' && p[1] === 'cast_upsample_ceiling') v = '192000';
+    if (v === '' && p[1] === 'cast_upsample_ceiling') v = 'auto';
     if (body) body += '&';
     body += p[1] + '=' + encodeURIComponent(v);
   });
@@ -4806,10 +4828,70 @@ function saveSettings(immediate) {
         // ⟹ 不发这个键，免得把用户已存的顺序覆盖成空串。
         + (META_ORDER.length ? ('&metasrcorder=' + META_ORDER.join(',')) : '');
   clearTimeout(window._setT);
+  var handleSetResp = function (j) {
+    if (j && j.ok && j.kv) {
+      var kv = j.kv;
+      if (kv.rate !== undefined && kv.rate !== ADV.rate) {
+        ADV.rate = kv.rate;
+        setSelectValue(D('sRate'), kv.rate);
+        setSelectValue(D('sp_rate'), kv.rate);
+      }
+      if (kv.dsd !== undefined) {
+        var dsdVal = (typeof migrateDsdPack === 'function') ? migrateDsdPack(kv.dsd) : kv.dsd;
+        ADV.dsd = dsdVal;
+        setSelectValue(D('sDSD'), dsdVal);
+        if (D('sp_outmode') && typeof outModeOf === 'function') D('sp_outmode').value = outModeOf();
+        if (D('sp_dsdrate') && typeof dsdRateOf === 'function') D('sp_dsdrate').value = dsdRateOf();
+        if (D('sp_dsdpk') && typeof dsdPackOf === 'function') D('sp_dsdpk').value = dsdPackOf();
+        if (typeof applyDsdState === 'function') applyDsdState();
+      }
+      if (kv.shaper !== undefined && kv.shaper !== ADV.shaper) {
+        ADV.shaper = kv.shaper;
+        setSelectValue(D('sShap'), kv.shaper);
+        setSelectValue(D('sp_shaper'), kv.shaper);
+      }
+      if (kv.directsdm !== undefined) {
+        var dirOn = (kv.directsdm === '1' || kv.directsdm === 'true');
+        ADV.directsdm = dirOn ? 1 : 0;
+        if (D('sp_directsdm')) D('sp_directsdm').checked = dirOn;
+      }
+      if (kv.modfamily !== undefined) {
+        ADV.modfamily = kv.modfamily;
+        setSelectValue(D('sp_modfamily'), kv.modfamily);
+      }
+      if (kv.modorder !== undefined) {
+        ADV.modorder = parseInt(kv.modorder, 10) || ADV.modorder;
+        setSelectValue(D('sp_modorder'), kv.modorder);
+      }
+      if (kv.modcut !== undefined) {
+        ADV.modcut = parseFloat(kv.modcut) || 0;
+        if (D('sp_modcut')) D('sp_modcut').value = String(kv.modcut);
+      }
+      if (D('presetBitPerfect') || D('presetPcm') || D('presetDsd')) {
+        var dsdNum = parseInt(String(kv.dsd || '0').replace(/[^0-9]/g, ''), 10) || 0;
+        var rt = String(kv.rate || 'src');
+        var flt = String(kv.filter || '');
+        var effProf = (dsdNum > 0) ? 'dsd'
+                    : ((rt !== 'src' && rt !== 'follow' && rt !== '') ? 'pcm'
+                    : (!flt ? 'bitperfect' : ''));
+        ['presetBitPerfect', 'presetPcm', 'presetDsd'].forEach(function (id) {
+          if (D(id)) D(id).classList.remove('on');
+        });
+        if (effProf === 'bitperfect' && D('presetBitPerfect')) D('presetBitPerfect').classList.add('on');
+        else if (effProf === 'pcm' && D('presetPcm')) D('presetPcm').classList.add('on');
+        else if (effProf === 'dsd' && D('presetDsd')) D('presetDsd').classList.add('on');
+      }
+    }
+    if (typeof syncCastUpsampleInfo === 'function') syncCastUpsampleInfo();
+  };
+  var sendSet = function () {
+    var p = api('/api/settings', body);
+    if (p && typeof p.then === 'function') p.then(handleSetResp).catch(function () {});
+  };
   if (immediate) {
-    api('/api/settings', body);
+    sendSet();
   } else {
-    window._setT = setTimeout(function () { api('/api/settings', body); }, 300);
+    window._setT = setTimeout(sendSet, 300);
   }
   if (typeof syncCastUpsampleInfo === 'function') syncCastUpsampleInfo();
 }
@@ -4868,6 +4950,12 @@ function loadSettings() {
     if (kv.rate === undefined) {
       if (D('sRate')) D('sRate').value = 'follow';
     }
+    if (kv.filter === undefined && D('sFilt') && D('sFilt').options.length) D('sFilt').selectedIndex = 0;
+    if (kv.filterNx === undefined && D('sFiltNx') && D('sFiltNx').options.length) D('sFiltNx').selectedIndex = 0;
+    if (kv.shaper === undefined && D('sShap') && D('sShap').options.length) D('sShap').selectedIndex = 0;
+    if (kv.dsd === undefined && D('sDSD')) D('sDSD').value = '0';
+    if (kv.isp === undefined && D('sIsp')) D('sIsp').checked = true;
+    if (kv.twostage === undefined && D('s2s')) D('s2s').checked = true;
     // conf 里存的是 dB；滑块是位置刻度 ⟹ 必须换算（否则 -25.5 dB 会被塞进 0..1000 的滑块里变成 0）
     // volNormalize：老配置可能存着旧曲线的 -60（低于 v3 的 -55 曲线底）⟹ 收成 -120 真静音，
     // 否则滑块摆在最左端、后端却按 0.1% 振幅出声（与标签/位置自相矛盾）。
@@ -4877,6 +4965,7 @@ function loadSettings() {
       syncVolUi();
     }
     if (kv.loudness !== undefined) { D('sLoud').checked = (kv.loudness === '1'); S.loud = D('sLoud').checked; }
+    else { if (D('sLoud')) D('sLoud').checked = false; S.loud = false; }
     // 高级参数
     if (kv.device !== undefined) ADV.device = kv.device;
     if (kv.bits !== undefined) {
@@ -4925,8 +5014,25 @@ function loadSettings() {
     if (kv.directsdm !== undefined) ADV.directsdm = (kv.directsdm === '1') ? 1 : 0;
     if (kv.dsdkind !== undefined) ADV.dsdKind = kv.dsdkind || 'fir';
     if (kv.dsdconv !== undefined) ADV.dsdConv = kv.dsdconv || 'narrow';
-    if (kv.opraproduct !== undefined) ADV.opraproduct = kv.opraproduct;
-    if (kv.oprapreset !== undefined) ADV.oprapreset = kv.oprapreset;
+    if (kv.opraproduct !== undefined) ADV.opraproduct = kv.opraproduct; else ADV.opraproduct = '';
+    if (kv.oprapreset !== undefined) ADV.oprapreset = kv.oprapreset; else ADV.oprapreset = '';
+    if (kv.taps === undefined) ADV.taps = 0;
+    if (kv.atten === undefined) ADV.atten = 0;
+    if (kv.transition === undefined) ADV.transition = 0;
+    if (kv.phase === undefined) ADV.phase = '';
+    if (kv.modorder === undefined) ADV.modorder = 5;
+    if (kv.modfamily === undefined) ADV.modfamily = 'dsd';
+    if (kv.modcut === undefined) ADV.modcut = 0;
+    if (kv.moddith === undefined) ADV.moddith = -1;
+    if (kv.eq === undefined) ADV.eq = '';
+    if (kv.ir === undefined) ADV.ir = '';
+    if (kv.irgpu === undefined) ADV.irgpu = 0;
+    if (kv.sdmfilt === undefined) ADV.sdmFilt = '';
+    if (kv.sdmfiltnx === undefined) ADV.sdmFiltNx = '';
+    if (kv.directsdm === undefined) ADV.directsdm = 0;
+    if (kv.dsdkind === undefined) ADV.dsdKind = 'fir';
+    if (kv.dsdconv === undefined) ADV.dsdConv = 'narrow';
+    if (kv.trim === undefined) { for (var ti = 0; ti < 8; ti++) ADV['trim' + ti] = 0; }
     // 元数据补全（P1.5）：metaon/metallm 从设置键读；源开关不在这里读 ——
     // 由 fillMetaProviders 走 /api/providers（同一 conf 的注册表视图，含旧键迁移）
     if (kv.metaon !== undefined) META.on = (kv.metaon === '1') ? 1 : 0;
@@ -5358,7 +5464,8 @@ function loadDeviceList(force) {
       ADV.device = this.value;
       var picked = devMixOf(this.value);
       if (bk === 'coreaudio') loadRates();   // 只有 CoreAudio 独占能查设备支持的采样率
-      saveSettings();
+      saveSettings(true);
+      if (typeof loadPresetCaps === 'function') loadPresetCaps(true);
       repaintTrims();
       applyAirPlayUIConstraints();
       // 1.1.2 AP-1.3：AirPlay 只能共享输出。这里只**提示**，不偷偷改用户的设置 ——
@@ -5375,7 +5482,11 @@ function loadDeviceList(force) {
 }
 
 function loadRates() {
-  api('/api/rates' + (ADV.device ? ('?device=' + encodeURIComponent(ADV.device)) : '')).then(function (j) {
+  var bk = (D('sp_backend') && D('sp_backend').value) || ADV.backend || 'coreaudio';
+  var ratesUrl = (bk === 'upnp')
+    ? ('/api/rates?backend=upnp' + (ADV.upnpDev ? ('&upnpdev=' + encodeURIComponent(ADV.upnpDev)) : ''))
+    : ('/api/rates' + (ADV.device ? ('?device=' + encodeURIComponent(ADV.device)) : ''));
+  api(ratesUrl).then(function (j) {
     var list = j.rates || [];
     if (!list.length) return;
     var max = list[list.length - 1];
@@ -6978,14 +7089,16 @@ function showChain() {
       if (p.upsampleApplied === true) {
         // 显示**实际用的**滤波器（后端 servedFilter）；它和用户填的名字不同，说明发生了回退，
         // 回退原因已写在后端 note 里 —— 此处绝不显示用户填的、但实际没用上的名字。
-        var filtName = p.servedFilter || p.filter || (D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp';
+        var filtName = p.servedFilter || p.filter || (D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-tight-lp';
         var outR = p.servedRate || p.outRate || 0;
         nodes.push({
           k: '采样率转换',
           v: '本机升频 ' + p.inRate + ' \u2192 ' + outR + ' Hz \u00b7 ' + filtName + '（投放供源）'
-             + (p.upsampleForced === true ? ' \u00b7 强制（渲染器未声明该速率）' : ''),
-          badge: 'PCM-PCM 升频',
-          kind: 'dsp'
+             + (p.upsampleForced === true ? ' \u00b7 强制（渲染器未声明该速率）' : '')
+             + (sigGpuUsed ? '  \u00b7  GPU' : ''),
+          gpu: !!sigGpuUsed,
+          badge: sigGpuUsed ? 'GPU 升频' : 'PCM-PCM 升频',
+          kind: sigGpuUsed ? 'gpu' : 'dsp'
         });
       } else if (p.upsampleNote) {
         nodes.push({
@@ -7589,7 +7702,9 @@ function syncUpnpDev(value) {
   ADV.upnpDev = value || '';
   if (D('sp_cast_dev') && D('sp_cast_dev').value !== value) D('sp_cast_dev').value = value;
   if (D('sp_upnp_dev') && D('sp_upnp_dev').value !== value) D('sp_upnp_dev').value = value;
-  saveSettings();
+  saveSettings(true);
+  if (typeof loadRates === 'function') loadRates();
+  if (typeof loadPresetCaps === 'function') loadPresetCaps(true);
 }
 function scanCastDevices(force) {
   var msg = D('sp_cast_devmsg');
@@ -9376,7 +9491,7 @@ function llmSaveModel(v) {
 function syncCastUpsampleInfo() {
   var rEl = D('sp_cast_up_currate'), fEl = D('sp_cast_up_curfilt');
   var r = (D('sRate') && D('sRate').value) || ADV.rate || 'follow';
-  var f = (D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp';
+  var f = (D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-tight-lp';
   if (rEl) rEl.textContent = r;
   if (fEl) fEl.textContent = f;
 }
@@ -10021,9 +10136,9 @@ function renderSettingsPage() {
              // macOS 唯一正确的 GPU 路径是 Apple Metal。可用性不在这里写死 ——
              // 由 /api/gpu 返回的 metal / metalUsable 字段决定，缺失即按不可用处理。
              opt('auto', '自动', ADV.gpuvendor || 'auto') +
-             opt('metal', 'Apple Metal（GPU 加速）', ADV.gpuvendor || 'auto') +
+             opt('metal', 'Apple Metal（只保留，效果差）', ADV.gpuvendor || 'auto') +
              opt('off', '关闭（纯 CPU）', ADV.gpuvendor || 'auto'),
-             '自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同')
+             '自动 = 本地与 UPnP 升频及默认卷积均走 64-bit CPU（NEON + vDSP，精度更高）；Apple Metal（只保留，效果差）= 本地与 UPnP 升频及卷积均强制走 Metal（单精度 32-bit，不推荐）；关闭 = 全部纯 CPU')
        + '<div class="sfld wide"><div id=sp_gpumsg class=hint></div></div>')
      // 2026-10-24（用户 261024-01 #5/#6）：
      //   ① 「流媒体服务器」整组搬去新增的「流媒体」页签（这里不再保留副本，避免重复 id）；
@@ -10087,16 +10202,16 @@ function renderSettingsPage() {
        + '<div class="sfld wide"><div class=hint id=sp_cast_devmsg>点「重新发现」扫描局域网里的 MediaRenderer</div></div>'
        + chk('cast_up', '投放时应用本机升频', (ADV.cast_upsample == 1 || ADV.cast_upsample === '1'), '只在 UPnP/DLNA 投放生效；本机播放的升频设置不变', true)
        + sel('cast_ceil', '投放升频上限',
-             opt('96000', '96000', ADV.cast_upsample_ceiling || '192000') +
-             opt('192000', '192000', ADV.cast_upsample_ceiling || '192000') +
-             opt('384000', '384000', ADV.cast_upsample_ceiling || '192000') +
-             opt('768000', '768000', ADV.cast_upsample_ceiling || '192000'),
-             '默认 192000')
+             opt('auto', '自动（跟随设备）', ADV.cast_upsample_ceiling || 'auto') + opt('96000', '96000', ADV.cast_upsample_ceiling || 'auto') +
+             opt('192000', '192000', ADV.cast_upsample_ceiling || 'auto') +
+             opt('384000', '384000', ADV.cast_upsample_ceiling || 'auto') +
+             opt('768000', '768000', ADV.cast_upsample_ceiling || 'auto'),
+             '默认自动（跟随设备）')
        + chk('cast_force', '强制目标率（忽略渲染器声明）',
              (ADV.cast_upsample_force == 1 || ADV.cast_upsample_force === '1'),
              '默认关闭。只有渲染器没有声明更高速率时才需要它：勾选后仍按「同族整数倍 + 上限」升频，但供出去的速率未经设备声明验证，可能被拒播；界面上会标注「强制」。', true)
        + '<div class="sfld wide"><div class=hint style="color:var(--warn, #eab308)">开启后投放不再是 bit-perfect（渲染器收到的已不是源文件原样）</div></div>'
-       + '<div class="sfld wide"><div class=hint id=sp_cast_up_info>投放升频复用这两项设置：当前目标采样率 <b id=sp_cast_up_currate>' + esc((D('sRate') && D('sRate').value) || ADV.rate || 'follow') + '</b> · 滤波器 <b id=sp_cast_up_curfilt>' + esc((D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-lp') + '</b></div></div>'
+       + '<div class="sfld wide"><div class=hint id=sp_cast_up_info>投放升频复用这两项设置：当前目标采样率 <b id=sp_cast_up_currate>' + esc((D('sRate') && D('sRate').value) || ADV.rate || 'follow') + '</b> · 滤波器 <b id=sp_cast_up_curfilt>' + esc((D('sFilt') && D('sFilt').value) || ADV.filter || 'poly-sinc-tight-lp') + '</b></div></div>'
        + '<div class="sfld wide" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px">'
        + '<button class="btn pri" id=sp_cast_push>推送当前曲</button>'
        + '<button class=btn id=sp_cast_stop disabled>停止投放</button>'
@@ -10390,11 +10505,13 @@ function renderSettingsPage() {
   // 输出后端 / 声道 / 微调
   D('sp_backend').onchange = function () {
     ADV.backend = this.value;
-    saveSettings();
+    saveSettings(true);
     backendHint();
     applyBackendState();
     loadDeviceList();        // CoreAudio 列端点，UPnP/Null 没有本地设备
     repaintTrims();
+    loadRates();
+    loadPresetCaps(true);
     // 261024-01 #9/#11：切到 UPnP 时自动发现目标（用户不用手填设备地址）
     // 2026-10-25（用户指令「不可用的要隐藏」）：NAA 已从后端下拉移除，对应分支一并删除；
     // discoverNaa() 本体保留（无副作用），但不再有 UI 入口。
@@ -10610,9 +10727,9 @@ function renderSettingsPage() {
         // metalUsable 才是「真的能跑」（动态库在 + rta_gpu_available() 返回 1）；
         // 只有 metal 而没有 metalUsable = 文件在但本机跑不起来（例如核函数编译失败）。
         if (o.value === 'metal') {
-          o.text = !(j && j.metal) ? 'Apple Metal（GPU 加速）· 后端库未就位'
-                 : (j.metalUsable === false ? 'Apple Metal（GPU 加速）· 已就位，本机未检测到可用 Metal 设备（会自动回退）'
-                                            : 'Apple Metal（GPU 加速）· 后端已就位');
+          o.text = !(j && j.metal) ? 'Apple Metal（只保留，效果差）· 后端库未就位'
+                 : (j.metalUsable === false ? 'Apple Metal（只保留，效果差）· 已就位，本机未检测到可用 Metal 设备（会自动回退）'
+                                            : 'Apple Metal（只保留，效果差）· 后端已就位');
         }
       });
     }
@@ -10629,7 +10746,7 @@ function renderSettingsPage() {
     //     ③ 库在且能跑                   → 已就位
     var irl = D('sp_irgpu_lbl');
     if (irl) {
-      irl.textContent = '卷积走 GPU 硬件加速（' +
+      irl.textContent = 'Metal 卷积（只保留，效果差；' +
         (!(j && j.metal) ? '后端库未打包'
          : (j.metalUsable === false ? '后端已就位，本机不可用（会回退 CPU）' : '后端已就位')) + '）';
     }
@@ -10646,7 +10763,7 @@ function renderSettingsPage() {
     // ★ 2026-11-09：hogExclusive 也要写（= 1，与默认一致）。漏掉它时 ADV.hogExclusive
     //   会变成 undefined，/api/play 的 hogexcl=0 —— 「恢复默认」反而把用户悄悄踢出独占，
     //   与"默认开启"自相矛盾。
-    ADV = { device: '', bits: 0, taps: 0, atten: 0, transition: 0, phase: '', modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: S.theme, modorder: 5, modfamily: 'dsd', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
+    ADV = { device: '', bits: 0, gpuvendor: 'auto', taps: 0, atten: 0, transition: 0, phase: '', modcut: 0, moddith: -1, ir: '', irgpu: 0, ramp: 0, theme: S.theme, modorder: 5, modfamily: 'dsd', directsdm: 0, dsdKind: 'fir', dsdConv: 'narrow',
             backend: 'coreaudio', hogExclusive: 1, channels: 0, naaHost: '', autoanl: 0,
             inBackend: 'none', inDev: '', inOffset: 0, inBuf: 100, inMonitor: 0, inSeconds: 0, inOut: '' };
     // 1.1.4：「恢复默认」必须把**内存里的**自动分析开关一并关掉 —— 复选框会跟着 ADV 重建为未勾选，
@@ -11143,7 +11260,7 @@ function calSettingsHtml() {
   h += sgroup('房间校正 IR（WAV 脉冲响应）', '把房间 / 耳机脉冲响应用 FIR 卷积叠进播放链路',
       '<div class="sfld wide"><label>IR 脉冲响应卷积文件（WAV）' + tip('留空 = 不做卷积；支持立体声 / 多声道 FIR 房间校正') + '</label>'
     + '<input type=text id=sp_ir value="' + esc(ADV.ir || '') + '" placeholder="' + (SEP === '/' ? '/Users/你的用户名/Music/room.wav' : 'D:\\Music\\room.wav') + '"></div>'
-    + chk('sp_irgpu', '卷积走 GPU 硬件加速（检测中…）', ADV.irgpu == 1,
+    + chk('sp_irgpu', 'Metal 卷积（只保留，效果差；检测中…）', ADV.irgpu == 1,
           '⚠️ macOS 上不建议开启：实测（Apple M4）卷积走 GPU 在任何 IR 长度下都比 CPU 慢 3.4~8.3 倍。'
           + '原因是 mac 的 GPU 后端把 FFT 留在 CPU、GPU 只做逐点复数乘加，而生产每块只有 4096 样，'
           + '远低于 GPU 的盈亏平衡点（实测需 n≥32768 才翻盘）。'
@@ -12586,7 +12703,7 @@ function renderQueuePage() {
       e.onclick = function (ev) {
         if (ev.target.classList.contains('qdel')) return;
         var c = (S.q.cues || [])[i] || [-1, -1];
-        playPath(S.q.items[i], c[0], c[1]);
+        playQueueTrack(i, S.q.items[i], c[0], c[1]);
       };
       e.ondragstart = function (ev) { ev.dataTransfer.setData('text/plain', String(i)); ev.dataTransfer.effectAllowed = 'move'; };
       e.ondragover = function (ev) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; };

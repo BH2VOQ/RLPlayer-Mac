@@ -180,6 +180,128 @@ int main() {
         handle(make_req("POST", "/api/settings", "dsd=0&dsdnative=0"), ct);
     }
 
+    // ---- 5. pro vs listen 后端配置 & PEQ 完全隔离 ----
+    {
+        std::string ct;
+        // 当前在 pro：配置一组独立 DSP 参数与 PEQ preamp=+3.5
+        const std::string spPro = handle(make_req("POST", "/api/settings",
+            "uimode=pro&filter=poly-sinc-long-lp&rate=192000&loudness=1&dsd=0"), ct);
+        ck(spPro.find("\"ok\":true") != std::string::npos, "Case 5a: pro 模式设置落盘");
+        const std::string pqPro = handle(make_req("POST", "/api/peq", "bypass=0&preamp=3.5"), ct);
+        ck(pqPro.find("\"ok\":true") != std::string::npos, "Case 5b: pro 模式设置 PEQ");
+
+        // 切到 listen：listen 不得被 pro 的 filter/rate/loudness 或 PEQ 污染，也不得暴露 mode.* 内部键
+        const std::string swListen = handle(make_req("POST", "/api/settings", "uimode=listen"), ct);
+        ck(swListen.find("\"ok\":true") != std::string::npos &&
+           swListen.find("\"mode.") == std::string::npos,
+           "Case 5c: 切回 listen 成功且响应隐藏内部 mode.* 键", swListen);
+        const std::string gListen = handle(make_req("GET", "/api/settings"), ct);
+        ck(gListen.find("\"uimode\":\"listen\"") != std::string::npos &&
+           gListen.find("\"backend\":\"null\"") != std::string::npos &&
+           gListen.find("poly-sinc-long-lp") == std::string::npos &&
+           gListen.find("\"192000\"") == std::string::npos &&
+           gListen.find("\"mode.") == std::string::npos,
+           "Case 5d: listen 未被 pro DSP 参数污染，且全局 backend 保留", gListen);
+        ck(g_peq && g_peq->settings().bypass && std::abs(g_peq->settings().preampDb) < 0.01,
+           "Case 5e: 切到 listen 后 PEQ 切为 listen 独立状态");
+
+        // 在 listen 设置另一组参数与 PEQ preamp=-2.0
+        handle(make_req("POST", "/api/settings", "filter=sinc-M&rate=96000&loudness=0"), ct);
+        handle(make_req("POST", "/api/peq", "bypass=0&preamp=-2.0"), ct);
+        ck(params_snapshot().filter == "sinc-M" && params_snapshot().rate == "96000",
+           "Case 5f: listen 模式新参数即时刷新到 g_params");
+
+        // 切回 pro：完整恢复 pro 的参数与 PEQ
+        handle(make_req("POST", "/api/settings", "uimode=pro"), ct);
+        const std::string gProBack = handle(make_req("GET", "/api/settings"), ct);
+        ck(gProBack.find("poly-sinc-long-lp") != std::string::npos &&
+           gProBack.find("\"192000\"") != std::string::npos &&
+           gProBack.find("\"loudness\":\"1\"") != std::string::npos,
+           "Case 5g: 切回 pro 后完整恢复 pro 独立配置", gProBack);
+        ck(g_peq && !g_peq->settings().bypass && std::abs(g_peq->settings().preampDb - 3.5) < 0.05,
+           "Case 5h: 切回 pro 后恢复 pro 独立 PEQ");
+        ck(params_snapshot().filter == "poly-sinc-long-lp" && params_snapshot().rate == "192000",
+           "Case 5i: 切回 pro 后 g_params 同步恢复 pro 设置");
+    }
+
+    // ---- 6. 队列下一曲 DSP 快照刷新 + 预解码缓存失效 ----
+    {
+        std::string ct;
+        const unsigned long long gen0 = g_settingsGen.load(std::memory_order_acquire);
+        {
+            std::lock_guard<std::mutex> lk(g_pre.mtx);
+            g_pre.path = "/tmp/fake-next-track.flac";
+            g_pre.gen = gen0;
+            g_pre.buf.raw.assign(16, 1024);
+        }
+        handle(make_req("POST", "/api/settings", "filter=sinc-L&dsd=0&loudness=0"), ct);
+        const unsigned long long gen1 = g_settingsGen.load(std::memory_order_acquire);
+        ck(gen1 > gen0, "Case 6a: 修改设置后递增 g_settingsGen 并作废预解码缓存");
+        const auto staleTaken = prefetch_take("/tmp/fake-next-track.flac");
+        ck(staleTaken.raw.empty(), "Case 6b: 过期代次的预解码缓存不可再被下一曲复用");
+
+        PlayParams pit;
+        pit.backend = "null";
+        pit.volume = -120.0;
+        pit.filter = "stale-filter";
+        pit.dsd = 256;
+        pit.loudness = true;
+        apply_dsp_settings_snapshot(pit, params_snapshot());
+        ck(pit.filter == "sinc-L" && pit.dsd == 0 && !pit.loudness &&
+           pit.backend == "null" && pit.volume == -120.0,
+           "Case 6c: 下一曲快照同步最新 DSP 模式同时保留设备/音量会话");
+    }
+
+    // ---- 7. 设备切换自动识别 PCM / DSD bit 率，含降级、恢复与未点击预设按钮时的自动推断 ----
+    {
+        rlapp::set_coreaudio_caps_probe_override_for_test(
+            true, "pa-dsd256", "PA DAC 256",
+            {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000});
+        rlapp::set_coreaudio_caps_probe_override_for_test(
+            true, "pa-dsd128", "PA DAC 128",
+            {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000});
+        rlapp::set_coreaudio_caps_probe_override_for_test(
+            true, "pa-pcm96", "PA PCM 96",
+            {44100, 48000, 88200, 96000});
+        rlapp::set_coreaudio_caps_probe_override_for_test(
+            true, "pa-airplay", "PA AirPlay",
+            {44100}, true, true);
+
+        std::string ct;
+        handle(make_req("POST", "/api/settings", "backend=coreaudio&device=pa-dsd256&upnpdev=&volume=-120"), ct);
+        const std::string ap = handle(make_req("POST", "/api/preset/apply?profile=dsd"), ct);
+        const std::string st = handle(make_req("POST", "/api/settings", "filter=poly-sinc-gauss-long"), ct);
+        ck(ap.find("\"profile\":\"dsd\"") != std::string::npos && conf_get("ui_profile", "") == "dsd" &&
+           st.find("\"ui_profile\":\"dsd\"") != std::string::npos,
+           "Case 7a: preset apply 设置 ui_profile 且调整听音风格时保留 ui_profile", st);
+
+        const std::string sw128 = handle(make_req("POST", "/api/settings", "device=pa-dsd128"), ct);
+        const std::string sw96  = handle(make_req("POST", "/api/settings", "device=pa-pcm96"), ct);
+        const std::string swAir = handle(make_req("POST", "/api/settings", "device=pa-airplay"), ct);
+        const std::string sw256 = handle(make_req("POST", "/api/settings", "device=pa-dsd256"), ct);
+        ck(sw128.find("\"dsd\":\"128\"") != std::string::npos &&
+           sw96.find("\"dsd\":\"0\"") != std::string::npos &&
+           sw96.find("\"rate\":\"96000\"") != std::string::npos &&
+           swAir.find("\"dsd\":\"0\"") != std::string::npos &&
+           swAir.find("\"rate\":\"src\"") != std::string::npos &&
+           sw256.find("\"dsd\":\"256\"") != std::string::npos,
+           "Case 7b: 设备切换自动降档 DSD128 -> PCM96k -> AirPlay src -> 切回自动恢复 DSD256", sw256);
+
+        // 手动改 rate 清除 ui_profile，但后续切设备仍可基于最后一次升频状态自动推断与恢复
+        const std::string manEdit = handle(make_req("POST", "/api/settings", "rate=48000&dsd=0"), ct);
+        const std::string manTo128 = handle(make_req("POST", "/api/settings", "device=pa-dsd128"), ct);
+        const std::string manToAir = handle(make_req("POST", "/api/settings", "device=pa-airplay"), ct);
+        const std::string manBack96 = handle(make_req("POST", "/api/settings", "device=pa-pcm96"), ct);
+        ck(manEdit.find("\"ui_profile\":\"\"") != std::string::npos &&
+           manTo128.find("\"rate\":\"384000\"") != std::string::npos &&
+           manToAir.find("\"rate\":\"src\"") != std::string::npos &&
+           manBack96.find("\"rate\":\"96000\"") != std::string::npos,
+           "Case 7c: 手动修改采样率清除 ui_profile 后，切设备/AirPlay 仍自动跟踪与恢复 PCM 升频上限", manBack96);
+
+        rlapp::set_coreaudio_caps_probe_override_for_test(false, "", "", {});
+        handle(make_req("POST", "/api/settings", "backend=null&device=&upnpdev=&dsd=0&rate=src"), ct);
+    }
+
     fs::remove_all(tmpDir, ec);
     if (g_fails == 0) std::printf("\n[ALL PASS] test_preset_apply_contract 全部通过\n");
     else               std::printf("\n[FAILED] %d 项未通过\n", g_fails);

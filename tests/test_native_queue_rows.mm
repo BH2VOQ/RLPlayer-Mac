@@ -438,6 +438,75 @@ int main() {
                "Q4c 空队列时不崩且无选中行",
                [NSString stringWithFormat:@"rows=%ld sel=%ld", (long)qTable.numberOfRows, (long)qTable.selectedRow]);
 
+            // v2.0.3 Q5: 窄窗(454pt) + 英文环境下顶部工具栏自动折行、不重叠、不裁切；主题切换更新 sortLabel
+            qv.frame = NSMakeRect(0, 0, 454, 640);
+            [qv layoutSubtreeIfNeeded];
+            Pump(0.05);
+
+            NSView *barView = [qvc valueForKey:@"barView"];
+            NSTextField *sortLbl = [qvc valueForKey:@"sortLabel"];
+            NSPopUpButton *sortPop = [qvc valueForKey:@"sortPopup"];
+            NSArray<NSButton *> *actBtns = [qvc valueForKey:@"actionButtons"];
+            NSMutableArray<NSView *> *barCtrls = [NSMutableArray array];
+            if (sortLbl) [barCtrls addObject:sortLbl];
+            if (sortPop) [barCtrls addObject:sortPop];
+            for (NSButton *b in actBtns) [barCtrls addObject:b];
+
+            auto barNoOverflowOrOverlap = ^BOOL(NSString **diag) {
+                if (!barView || NSWidth(barView.bounds) < 100.0) {
+                    if (diag) *diag = @"barView missing";
+                    return NO;
+                }
+                for (NSUInteger i = 0; i < barCtrls.count; ++i) {
+                    NSRect a = barCtrls[i].frame;
+                    if (NSMinX(a) < -0.5 || NSMaxX(a) > NSWidth(barView.bounds) + 1.0 ||
+                        NSMinY(a) < -0.5 || NSMaxY(a) > NSHeight(barView.bounds) + 1.0) {
+                        if (diag) *diag = [NSString stringWithFormat:@"outOfBounds[%lu]=%@ bar=%@",
+                                           (unsigned long)i, NSStringFromRect(a), NSStringFromRect(barView.bounds)];
+                        return NO;
+                    }
+                    for (NSUInteger j = i + 1; j < barCtrls.count; ++j) {
+                        NSRect b = barCtrls[j].frame;
+                        if (NSIntersectsRect(a, b)) {
+                            if (diag) *diag = [NSString stringWithFormat:@"overlap[%lu,%lu]=%@ vs %@",
+                                               (unsigned long)i, (unsigned long)j, NSStringFromRect(a), NSStringFromRect(b)];
+                            return NO;
+                        }
+                    }
+                }
+                return YES;
+            };
+
+            NSString *zhDiag = @"ok";
+            BOOL zhBarOk = barNoOverflowOrOverlap(&zhDiag);
+            Ck(zhBarOk && NSHeight(barView.bounds) > 30.0,
+               "v2.0.3 Q5a 播放队列 454pt 窄窗下工具栏自动折行且不溢出不重叠",
+               [NSString stringWithFormat:@"%@ bar=%@", zhDiag, NSStringFromRect(barView.bounds)]);
+
+            RLPSetLanguage(@"en");
+            [(id)qvc applyLanguage];
+            [qvc.view layoutSubtreeIfNeeded];
+            Pump(0.03);
+            NSString *enDiag = @"ok";
+            BOOL enBarOk = barNoOverflowOrOverlap(&enDiag);
+            Ck(enBarOk && NSHeight(barView.bounds) > 30.0,
+               "v2.0.3 Q5b 播放队列切英文且 454pt 窄窗下工具栏自动重排不溢出不重叠",
+               [NSString stringWithFormat:@"%@ bar=%@", enDiag, NSStringFromRect(barView.bounds)]);
+
+            [RLPTheme setThemeName:@"dark"];
+            [(id)qvc applyTheme];
+            Ck(SameColor(sortLbl.textColor, [RLPTheme current].mut2) &&
+               SameColor(qTable.backgroundColor, [RLPTheme current].bg),
+               "v2.0.3 Q5c 播放队列切暗黑主题同步刷新 sortLabel 与表格背景色",
+               @"");
+
+            RLPSetLanguage(@"zh");
+            [(id)qvc applyLanguage];
+            [RLPTheme setThemeName:@"light"];
+            [(id)qvc applyTheme];
+            qv.frame = NSMakeRect(0, 0, 900, 640);
+            [qv layoutSubtreeIfNeeded];
+
             g_queueOverride = nil;
             g_statusOverride = nil;
         }

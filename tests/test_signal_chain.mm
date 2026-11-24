@@ -150,6 +150,16 @@ int main() {
         RLPSignalNode *castR = Find([RLPSignalChain nodesForResponse:castResp], @"采样率转换");
         CK([castR.badge isEqualToString:@"投放旁路"] && [castR.value containsString:@"poly-sinc-short"],
            "C6c 投放升频显示实际 servedFilter（不显示没用上的用户设置）", castR.value ?: @"nil");
+        NSMutableDictionary *castGpuP = [castP mutableCopy];
+        castGpuP[@"gpuUsed"] = @YES;
+        NSMutableDictionary *castGpuResp = [base mutableCopy];
+        castGpuResp[@"path"] = castGpuP;
+        RLPSignalNode *castGpuR = Find([RLPSignalChain nodesForResponse:castGpuResp], @"采样率转换");
+        CK([castGpuR.badge isEqualToString:@"GPU 升频"] &&
+           castGpuR.kind == RLPSignalNodeGpu &&
+           [castGpuR.value containsString:@"GPU"],
+           "C6d 投放升频实际走 GPU ⟹ GPU 升频 + RLPSignalNodeGpu",
+           castGpuR.badge ?: @"nil");
 
         // ---- C7 bit-perfect 其它态 ----
         NSMutableDictionary *noP = [base[@"path"] mutableCopy]; noP[@"bitPerfect"] = @"no";

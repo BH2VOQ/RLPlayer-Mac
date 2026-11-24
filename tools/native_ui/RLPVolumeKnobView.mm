@@ -135,7 +135,6 @@ double RLPVolKnobDbFromAngleDegrees(double degrees) {
 
     // 轨道：整段 270° 弧（-135° → +135°），stroke 4、圆头
     const CGFloat strokeW = 4.0 * s;
-    const CGFloat arcR = kArcRadius * s;
     NSBezierPath *track = [NSBezierPath bezierPath];
     // 用足够多的小段逼近弧，避免 NSBezierPath 三次曲线在两端的圆头差异
     const NSInteger seg = 96;

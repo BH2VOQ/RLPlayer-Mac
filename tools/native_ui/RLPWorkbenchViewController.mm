@@ -86,6 +86,58 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     [pop setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 }
 
+static NSString *RLPWorkbenchTrimStr(id _Nullable v) {
+    if (![v isKindOfClass:[NSString class]]) return @"";
+    return [(NSString *)v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSArray<NSDictionary<NSString *, NSString *> *> *RLPWorkbenchNormalizeUpnpDevices(NSArray * _Nullable rawDevices) {
+    if (![rawDevices isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *out = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenIds = [NSMutableSet set];
+    for (id item in rawDevices) {
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *d = (NSDictionary *)item;
+        NSString *location = RLPWorkbenchTrimStr(d[@"location"]);
+        NSString *rawId = RLPWorkbenchTrimStr(d[@"id"]);
+        NSString *friendly = RLPWorkbenchTrimStr(d[@"friendlyName"]);
+        NSString *name = RLPWorkbenchTrimStr(d[@"name"]);
+        NSString *host = RLPWorkbenchTrimStr(d[@"host"]);
+        NSString *model = RLPWorkbenchTrimStr(d[@"model"]);
+        NSString *kind = [RLPWorkbenchTrimStr(d[@"kind"]) lowercaseString];
+        NSString *devId = location.length ? location
+                        : (rawId.length ? rawId
+                        : (friendly.length ? friendly
+                        : (name.length ? name : host)));
+        if (!devId.length || [seenIds containsObject:devId]) continue;
+        [seenIds addObject:devId];
+
+        NSString *baseName = friendly.length ? friendly
+                           : (name.length ? name
+                           : (host.length ? host : RLPTr(@"未知设备")));
+        if ([devId hasPrefix:@"airplay://"] && !kind.length) kind = @"airplay";
+        else if (!kind.length) kind = @"upnp";
+        NSString *tag = [kind isEqualToString:@"airplay"] ? @"AirPlay" : @"UPnP";
+        NSString *prefixed = ([baseName hasPrefix:@"[UPnP]"] || [baseName hasPrefix:@"[AirPlay]"])
+            ? baseName
+            : [NSString stringWithFormat:@"[%@] %@", tag, baseName];
+        NSString *displayName = prefixed;
+        if (model.length && ![baseName isEqualToString:model] && [model rangeOfString:baseName].location == NSNotFound &&
+            ![kind isEqualToString:@"airplay"]) {
+            displayName = [NSString stringWithFormat:@"%@ (%@)", prefixed, model];
+        }
+        [out addObject:@{
+            @"id": devId,
+            @"name": displayName,
+            @"shortName": baseName,
+            @"kind": kind,
+            @"host": host,
+            @"model": model,
+        }];
+    }
+    return out;
+}
+
 @interface RLPWorkbenchViewController () <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSStackView *stack;
@@ -109,6 +161,9 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 @property (nonatomic, strong) NSTextField *heroSpecLabel;
 @property (nonatomic, strong) NSButton *trackPlayBtn;
 @property (nonatomic, strong) NSStackView *topDeviceBar;
+@property (nonatomic, strong) NSTextField *topBackendLabel;
+@property (nonatomic, strong) NSSegmentedControl *topBackendSeg;
+@property (nonatomic, strong) NSButton *topHogCheck;
 @property (nonatomic, strong) NSTextField *topDeviceLabel;
 @property (nonatomic, strong) NSPopUpButton *topDevicePopup;
 @property (nonatomic, strong) NSButton *topDeviceRefreshBtn;
@@ -222,6 +277,13 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 @property (nonatomic, strong) NSPopUpButton *ratePopup;
 @property (nonatomic, strong) NSPopUpButton *rateFamilyPopup;
 @property (nonatomic, strong) NSPopUpButton *devicePopup;
+@property (nonatomic, strong) NSLayoutConstraint *devicePopupWidthConstraint;
+@property (nonatomic, strong) NSStackView *upnpWrap;
+@property (nonatomic, strong) NSLayoutConstraint *upnpWrapWidthConstraint;
+@property (nonatomic, strong) NSTextField *upnpLabel;
+@property (nonatomic, strong) NSPopUpButton *upnpDevicePopup;
+@property (nonatomic, strong) NSButton *upnpScanBtn;
+@property (nonatomic, strong) NSTextField *upnpStatusLabel;
 @property (nonatomic, strong) NSPopUpButton *backendPopup;
 @property (nonatomic, strong) NSButton *hogCheck;
 // 输出高级折叠（保留 wb.more.toggle 兼容测试）
@@ -281,6 +343,7 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 @property (nonatomic, copy) NSDictionary *settings;
 @property (nonatomic, copy) NSArray<NSDictionary *> *filters;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
+@property (nonatomic, copy) NSArray<NSDictionary<NSString *, NSString *> *> *upnpDevices;
 @property (nonatomic, copy) NSArray<NSNumber *> *rates;
 @property (nonatomic, copy) NSDictionary *status;
 @property (nonatomic, strong) NSPopover *popover;
@@ -291,6 +354,14 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 @property (nonatomic, assign) NSUInteger ratesSeq;
 @property (nonatomic, assign) NSUInteger devicesSeq;
 @property (nonatomic, assign) NSUInteger deviceWriteSeq;
+@property (nonatomic, assign) NSUInteger upnpDevicesSeq;
+@property (nonatomic, assign) NSUInteger upnpWriteSeq;
+@property (nonatomic, assign) BOOL upnpDevicesLoaded;
+@property (nonatomic, assign) BOOL upnpDiscovering;
+@property (nonatomic, assign) BOOL upnpDiscoveryFailed;
+@property (nonatomic, copy, nullable) NSString *upnpHint;
+@property (nonatomic, copy, nullable) NSString *pendingBackend;
+@property (nonatomic, assign) NSUInteger backendWriteSeq;
 @property (nonatomic, assign) NSUInteger profilesSeq;
 @property (nonatomic, assign) NSUInteger signalSeq;
 @property (nonatomic, assign) NSUInteger peqReadSeq;
@@ -312,6 +383,13 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 - (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
 - (void)populateDevicePopups;
 - (void)syncDeviceSelectionOnly;
+- (BOOL)isUpnpBackend;
+- (NSString *)currentEffectiveBackend;
+- (void)reloadUpnpDevicesForce:(BOOL)force;
+- (void)applyUpnpDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
+- (void)populateUpnpPopups;
+- (void)syncUpnpSelectionOnly;
+- (void)refreshUpnpStatusText;
 - (void)reloadAll;
 - (void)refreshChain;
 - (void)refreshAB;
@@ -330,7 +408,6 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
 - (void)addFullWidth:(NSView *)v toStack:(NSStackView *)target height:(CGFloat)h;
 - (void)refreshTrackCard;
 - (void)refreshMonitor;
-- (void)syncEqOnCheck;
 @end
 
 @implementation RLPWorkbenchViewController
@@ -352,6 +429,7 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         _abSlots = [NSMutableArray array];
         _profiles = [NSMutableArray array];
         _profileActive = @"";
+        _upnpDevices = @[];
         _rackWidthConstraints = [NSMutableArray array];
         _monitorValueLabels = [NSMutableDictionary dictionary];
         _langUpdaters = [NSMutableArray array];
@@ -717,20 +795,68 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     [rightCol addArrangedSubview:topRow];
     [topRow.widthAnchor constraintEqualToAnchor:rightCol.widthAnchor].active = YES;
 
-    // 顶部显眼输出设备切换器留在 Hero 内，与输出规格卡的 devicePopup 共享同一状态
+    // 顶部显眼输出后端与设备切换器留在 Hero 内，与输出规格卡的 backendPopup / devicePopup / hogCheck 共享同一状态
     NSStackView *devBar = [[NSStackView alloc] init];
-    devBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    devBar.alignment = NSLayoutAttributeCenterY;
-    devBar.spacing = 8;
+    devBar.orientation = NSUserInterfaceLayoutOrientationVertical;
+    devBar.alignment = NSLayoutAttributeLeading;
+    devBar.spacing = 6;
     devBar.wantsLayer = YES;
     devBar.layer.backgroundColor = t.cardAlt.CGColor;
     devBar.layer.borderWidth = 1;
     devBar.layer.borderColor = t.hairline.CGColor;
     devBar.layer.cornerRadius = t.rSm;
-    devBar.edgeInsets = NSEdgeInsetsMake(6, 10, 6, 10);
+    devBar.edgeInsets = NSEdgeInsetsMake(8, 10, 8, 10);
     devBar.identifier = @"wb.top.devicebar";
-    [devBar.heightAnchor constraintGreaterThanOrEqualToConstant:38].active = YES;
+    [devBar.heightAnchor constraintGreaterThanOrEqualToConstant:68].active = YES;
     self.topDeviceBar = devBar;
+
+    NSStackView *backendRow = [[NSStackView alloc] init];
+    backendRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    backendRow.alignment = NSLayoutAttributeCenterY;
+    backendRow.spacing = 8;
+    backendRow.identifier = @"wb.top.backendrow";
+
+    self.topBackendLabel = RLPLabel(RLPTr(@"后端"), [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.text);
+    self.topBackendLabel.identifier = @"wb.top.backendlabel";
+    self.topBackendLabel.tag = 0;
+    [self.topBackendLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topBackendLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.headerLabels addObject:self.topBackendLabel];
+
+    self.topBackendSeg = [NSSegmentedControl segmentedControlWithLabels:@[RLPTr(@"硬件直通"), RLPTr(@"系统混音"), RLPTr(@"UPnP 投放")]
+                                                           trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                 target:self
+                                                                 action:@selector(onTopBackendChanged:)];
+    self.topBackendSeg.identifier = @"wb.top.backend";
+    self.topBackendSeg.controlSize = NSControlSizeSmall;
+    self.topBackendSeg.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    self.topBackendSeg.segmentDistribution = NSSegmentDistributionFit;
+    self.topBackendSeg.toolTip = RLPTr(@"输出后端");
+    [self.topBackendSeg setToolTip:RLPTr(@"硬件直通（独占）") forSegment:0];
+    [self.topBackendSeg setToolTip:RLPTr(@"系统混音（共享）") forSegment:1];
+    [self.topBackendSeg setToolTip:RLPTr(@"UPnP 投放") forSegment:2];
+    [self.topBackendSeg setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topBackendSeg setContentCompressionResistancePriority:490 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.topHogCheck = [NSButton checkboxWithTitle:RLPTr(@"独占 Hog") target:self action:@selector(onHogChanged:)];
+    self.topHogCheck.identifier = @"wb.top.hog";
+    self.topHogCheck.controlSize = NSControlSizeSmall;
+    self.topHogCheck.font = t.small;
+    self.topHogCheck.toolTip = RLPTr(@"独占 Hog");
+    if ([self.topHogCheck.cell isKindOfClass:[NSButtonCell class]]) {
+        ((NSButtonCell *)self.topHogCheck.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+    }
+    [self.topHogCheck setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.topHogCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSView *backendSpacer = [[NSView alloc] init];
+    [backendSpacer setContentHuggingPriority:50 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [backendSpacer setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [backendRow addArrangedSubview:self.topBackendLabel];
+    [backendRow addArrangedSubview:self.topBackendSeg];
+    [backendRow addArrangedSubview:self.topHogCheck];
+    [backendRow addArrangedSubview:backendSpacer];
 
     self.topDeviceLabel = RLPLabel(RLPTr(@"输出设备"), [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold], t.text);
     self.topDeviceLabel.identifier = @"wb.top.devicelabel";
@@ -769,10 +895,21 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     [devSpacer setContentHuggingPriority:50 forOrientation:NSLayoutConstraintOrientationHorizontal];
     [devSpacer setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    [devBar addArrangedSubview:self.topDeviceLabel];
-    [devBar addArrangedSubview:self.topDevicePopup];
-    [devBar addArrangedSubview:self.topDeviceRefreshBtn];
-    [devBar addArrangedSubview:devSpacer];
+    NSStackView *deviceRow = [[NSStackView alloc] init];
+    deviceRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    deviceRow.alignment = NSLayoutAttributeCenterY;
+    deviceRow.spacing = 8;
+    deviceRow.identifier = @"wb.top.devicerow";
+
+    [deviceRow addArrangedSubview:self.topDeviceLabel];
+    [deviceRow addArrangedSubview:self.topDevicePopup];
+    [deviceRow addArrangedSubview:self.topDeviceRefreshBtn];
+    [deviceRow addArrangedSubview:devSpacer];
+
+    [devBar addArrangedSubview:backendRow];
+    [devBar addArrangedSubview:deviceRow];
+    [backendRow.widthAnchor constraintEqualToAnchor:devBar.widthAnchor constant:-20].active = YES;
+    [deviceRow.widthAnchor constraintEqualToAnchor:devBar.widthAnchor constant:-20].active = YES;
     [rightCol addArrangedSubview:devBar];
     [devBar.widthAnchor constraintEqualToAnchor:rightCol.widthAnchor].active = YES;
     [self populateDevicePopups];
@@ -787,9 +924,21 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
         if (!s) return;
         playBtn.title = RLPTr(@"播放");
         detailBtn.title = RLPTr(@"本次播放路径…");
-        s.topDeviceLabel.stringValue = RLPTr(@"输出设备");
-        s.topDevicePopup.toolTip = RLPTr(@"输出设备");
-        s.topDeviceRefreshBtn.toolTip = RLPTr(@"刷新列表");
+        s.topBackendLabel.stringValue = RLPTr(@"后端");
+        [s.topBackendSeg setLabel:RLPTr(@"硬件直通") forSegment:0];
+        [s.topBackendSeg setLabel:RLPTr(@"系统混音") forSegment:1];
+        [s.topBackendSeg setLabel:RLPTr(@"UPnP 投放") forSegment:2];
+        s.topBackendSeg.toolTip = RLPTr(@"输出后端");
+        [s.topBackendSeg setToolTip:RLPTr(@"硬件直通（独占）") forSegment:0];
+        [s.topBackendSeg setToolTip:RLPTr(@"系统混音（共享）") forSegment:1];
+        [s.topBackendSeg setToolTip:RLPTr(@"UPnP 投放") forSegment:2];
+        [s.topBackendSeg invalidateIntrinsicContentSize];
+        s.topHogCheck.title = RLPTr(@"独占 Hog");
+        s.topHogCheck.toolTip = RLPTr(@"独占 Hog");
+        const BOOL upnp = [s isUpnpBackend];
+        s.topDeviceLabel.stringValue = upnp ? RLPTr(@"目标渲染器") : RLPTr(@"输出设备");
+        s.topDevicePopup.toolTip = upnp ? RLPTr(@"目标渲染器") : RLPTr(@"输出设备");
+        s.topDeviceRefreshBtn.toolTip = upnp ? RLPTr(@"重新发现") : RLPTr(@"刷新列表");
     }];
 
     // 2) 独立信号链卡：标题 + 位准状态 + 三摘要（源/处理/输出）+ 7 节点交互链
@@ -1152,10 +1301,21 @@ static void RLPWorkbenchMakePopupTruncate(NSPopUpButton * _Nullable pop) {
     self.sigDsp.stringValue = bp.length
         ? [NSString stringWithFormat:@"%@ · bit-perfect: %@", activeF, bp]
         : activeF;
-    NSString *dev = self.topDevicePopup.titleOfSelectedItem.length
-        ? self.topDevicePopup.titleOfSelectedItem
-        : self.devicePopup.titleOfSelectedItem;
-    NSString *backend = [self str:@"backend" def:@"coreaudio"];
+    NSString *backend = [self currentEffectiveBackend];
+    NSString *dev = nil;
+    if ([backend isEqualToString:@"upnp"]) {
+        dev = self.topDevicePopup.titleOfSelectedItem.length
+            ? self.topDevicePopup.titleOfSelectedItem
+            : self.upnpDevicePopup.titleOfSelectedItem;
+        if (!dev.length) {
+            NSString *saved = [self str:@"upnpdev" def:@""];
+            dev = saved.length ? saved : RLPTr(@"未选择网络播放器");
+        }
+    } else {
+        dev = self.topDevicePopup.titleOfSelectedItem.length
+            ? self.topDevicePopup.titleOfSelectedItem
+            : self.devicePopup.titleOfSelectedItem;
+    }
     self.sigOut.stringValue = [NSString stringWithFormat:@"%@ · %@", dev.length ? dev : RLPTr(@"默认设备"), backend];
     if (self.heroSpecLabel) {
         NSString *specSrc = (fs > 0) ? self.sigSrc.stringValue : RLPTr(@"等待播放");
@@ -2376,19 +2536,77 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     self.devicePopup.font = t.small;
     RLPWorkbenchMakePopupTruncate(self.devicePopup);
     [col addArrangedSubview:self.devicePopup];
-    [self.devicePopup.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24].active = YES;
+    self.devicePopupWidthConstraint = [self.devicePopup.widthAnchor constraintLessThanOrEqualToAnchor:col.widthAnchor constant:-24];
+    self.devicePopupWidthConstraint.active = YES;
     [self populateDevicePopups];
+
+    self.upnpWrap = [[NSStackView alloc] init];
+    self.upnpWrap.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.upnpWrap.alignment = NSLayoutAttributeLeading;
+    self.upnpWrap.spacing = 4;
+    self.upnpWrap.identifier = @"wb.upnp.wrap";
+
+    NSStackView *upnpRow = [[NSStackView alloc] init];
+    upnpRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    upnpRow.alignment = NSLayoutAttributeCenterY;
+    upnpRow.spacing = 6;
+
+    self.upnpLabel = [self inlineLabel:RLPTr(@"目标渲染器")];
+    [self.upnpLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.upnpLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.upnpDevicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.upnpDevicePopup.identifier = @"wb.upnp.device";
+    self.upnpDevicePopup.target = self;
+    self.upnpDevicePopup.action = @selector(onDeviceChanged:);
+    self.upnpDevicePopup.font = t.small;
+    self.upnpDevicePopup.toolTip = RLPTr(@"目标渲染器（UPnP / DLNA）");
+    RLPWorkbenchMakePopupTruncate(self.upnpDevicePopup);
+    [self.upnpDevicePopup setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    self.upnpScanBtn = RLPSymbolButton(@"arrow.clockwise", RLPTr(@"重新发现"), self, @selector(onRefreshUpnpDevicesClicked:));
+    self.upnpScanBtn.identifier = @"wb.upnp.scan";
+    self.upnpScanBtn.keyEquivalent = @"";
+    self.upnpScanBtn.refusesFirstResponder = YES;
+    self.upnpScanBtn.contentTintColor = t.text;
+    [self.upnpScanBtn.widthAnchor constraintEqualToConstant:24].active = YES;
+    [self.upnpScanBtn.heightAnchor constraintEqualToConstant:24].active = YES;
+    [self.upnpScanBtn setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.upnpScanBtn setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [upnpRow addArrangedSubview:self.upnpLabel];
+    [upnpRow addArrangedSubview:self.upnpDevicePopup];
+    [upnpRow addArrangedSubview:self.upnpScanBtn];
+
+    self.upnpStatusLabel = RLPLabel(RLPTr(@"点「重新发现」扫描局域网里的 MediaRenderer"),
+                                    [NSFont systemFontOfSize:10.5], t.mut);
+    self.upnpStatusLabel.identifier = @"wb.upnp.msg";
+    self.upnpStatusLabel.maximumNumberOfLines = 2;
+    self.upnpStatusLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.upnpStatusLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [self.upnpWrap addArrangedSubview:upnpRow];
+    [self.upnpWrap addArrangedSubview:self.upnpStatusLabel];
+    [upnpRow.widthAnchor constraintEqualToAnchor:self.upnpWrap.widthAnchor].active = YES;
+    [self.upnpStatusLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.upnpWrap.widthAnchor].active = YES;
+
+    self.upnpWrap.hidden = YES;
+    [col addArrangedSubview:self.upnpWrap];
+    self.upnpWrapWidthConstraint = [self.upnpWrap.widthAnchor constraintEqualToAnchor:col.widthAnchor constant:-24];
+    [self populateUpnpPopups];
 
     NSStackView *beRow = [[NSStackView alloc] init];
     beRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     beRow.spacing = 6;
     self.backendPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    self.backendPopup.identifier = @"wb.backend";
     self.backendPopup.target = self;
     self.backendPopup.action = @selector(onBackendChanged:);
     self.backendPopup.font = t.small;
     RLPWorkbenchMakePopupTruncate(self.backendPopup);
     [self.backendPopup addItemsWithTitles:@[RLPTr(@"硬件直通（独占）"), RLPTr(@"系统混音（共享）"), RLPTr(@"UPnP 投放")]];
     self.hogCheck = [NSButton checkboxWithTitle:RLPTr(@"独占 Hog") target:self action:@selector(onHogChanged:)];
+    self.hogCheck.identifier = @"wb.hog";
     self.hogCheck.font = t.small;
     [self.hogCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [beRow addArrangedSubview:self.backendPopup];
@@ -2457,7 +2675,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     self.loudnessCheck = [NSButton checkboxWithTitle:RLPTr(@"响度补偿") target:self action:@selector(onLoudnessChanged:)];
     self.loudnessCheck.font = t.small;
     [self.loudnessCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-    self.irGpuCheck = [NSButton checkboxWithTitle:RLPTr(@"GPU 卷积") target:self action:@selector(onIrGpuChanged:)];
+    self.irGpuCheck = [NSButton checkboxWithTitle:RLPTr(@"Metal 卷积（只保留，效果差）") target:self action:@selector(onIrGpuChanged:)];
     self.irGpuCheck.font = t.small;
     [self.irGpuCheck setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
@@ -2507,11 +2725,15 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
             [s.backendPopup itemAtIndex:1].title = RLPTr(@"系统混音（共享）");
             [s.backendPopup itemAtIndex:2].title = RLPTr(@"UPnP 投放");
         }
+        s.upnpLabel.stringValue = RLPTr(@"目标渲染器");
+        s.upnpDevicePopup.toolTip = RLPTr(@"目标渲染器（UPnP / DLNA）");
+        s.upnpScanBtn.toolTip = RLPTr(@"重新发现");
+        [s refreshUpnpStatusText];
         s.hogCheck.title = RLPTr(@"独占 Hog");
         if (bpBtn) bpBtn.title = RLPTr(@"直通");
         if (s.bitsPopup.numberOfItems > 0) [s.bitsPopup itemAtIndex:0].title = RLPTr(@"跟随源 (-1)");
         s.loudnessCheck.title = RLPTr(@"响度补偿");
-        s.irGpuCheck.title = RLPTr(@"GPU 卷积");
+        s.irGpuCheck.title = RLPTr(@"Metal 卷积（只保留，效果差）");
     }];
     return card;
 }
@@ -3274,17 +3496,89 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 }
 - (void)onRefreshDevicesClicked:(id)sender {
     (void)sender;
-    [self reloadDevices];
+    if ([self isUpnpBackend]) {
+        [self reloadUpnpDevicesForce:YES];
+    } else {
+        [self reloadDevices];
+    }
+}
+- (void)onRefreshUpnpDevicesClicked:(id)sender {
+    (void)sender;
+    [self reloadUpnpDevicesForce:YES];
+}
+
+- (void)selectUpnpDeviceFromPopup:(NSPopUpButton *)sender {
+    if (!sender || sender.indexOfSelectedItem < 0) return;
+    id ro = sender.selectedItem.representedObject;
+    NSString *devId = @"";
+    if ([ro isKindOfClass:[NSDictionary class]] && [ro[@"id"] isKindOfClass:[NSString class]]) {
+        devId = ro[@"id"];
+    } else if ([ro isKindOfClass:[NSString class]]) {
+        devId = (NSString *)ro;
+    }
+
+    for (NSPopUpButton *pop in @[self.topDevicePopup ?: [NSPopUpButton new], self.upnpDevicePopup ?: [NSPopUpButton new]]) {
+        if (pop == self.topDevicePopup && ![self isUpnpBackend]) continue;
+        for (NSInteger i = 0; i < (NSInteger)pop.numberOfItems; ++i) {
+            id itemRo = [pop itemAtIndex:i].representedObject;
+            NSString *rid = ([itemRo isKindOfClass:[NSDictionary class]] && [itemRo[@"id"] isKindOfClass:[NSString class]])
+                ? itemRo[@"id"]
+                : ([itemRo isKindOfClass:[NSString class]] ? (NSString *)itemRo : @"");
+            if ([rid isEqualToString:devId]) {
+                [pop selectItemAtIndex:i];
+                break;
+            }
+        }
+        pop.toolTip = pop.titleOfSelectedItem.length ? pop.titleOfSelectedItem : RLPTr(@"目标渲染器");
+    }
+
+    const NSUInteger writeSeq = ++self.upnpWriteSeq;
+    ++self.settingsSeq;
+    self.statusMessage.stringValue = RLPTr(@"应用中…");
+    NSString *body = [NSString stringWithFormat:@"upnpdev=%@", RLPEnc(devId)];
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] postJSON:@"/api/settings" body:body
+        completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_ || writeSeq != self_.upnpWriteSeq) return;
+        if (json && [json[@"ok"] boolValue]) {
+            NSMutableDictionary *nextSettings = self_.settings ? [self_.settings mutableCopy] : [NSMutableDictionary dictionary];
+            if ([json[@"kv"] isKindOfClass:[NSDictionary class]]) {
+                [nextSettings addEntriesFromDictionary:(NSDictionary *)json[@"kv"]];
+            }
+            nextSettings[@"upnpdev"] = devId;
+            self_.settings = nextSettings;
+            self_.statusMessage.stringValue = RLPTr(@"已生效");
+            RLPToast(RLPTr(@"输出设备已选择，下次播放生效"));
+            [self_ syncAllControlsFromSettings];
+            [self_ reloadRates];
+            [self_ reloadSettings];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+        } else {
+            NSString *err = ([json isKindOfClass:[NSDictionary class]] &&
+                             [json[@"error"] isKindOfClass:[NSString class]] &&
+                             ((NSString *)json[@"error"]).length)
+                ? json[@"error"] : RLPTr(@"保存失败，已保留原值");
+            self_.statusMessage.stringValue = RLPTr(@"保存失败，已保留原值");
+            RLPToast(err);
+            [self_ syncAllControlsFromSettings];
+        }
+    }];
 }
 
 - (void)onDeviceChanged:(NSPopUpButton *)sender {
     if (!sender || sender.indexOfSelectedItem < 0) return;
+    if (sender == self.upnpDevicePopup || (sender == self.topDevicePopup && [self isUpnpBackend])) {
+        [self selectUpnpDeviceFromPopup:sender];
+        return;
+    }
     NSDictionary *d = sender.selectedItem.representedObject;
     NSString *devId = ([d isKindOfClass:[NSDictionary class]] && [d[@"id"] isKindOfClass:[NSString class]])
         ? d[@"id"] : @"";
     // 在途期间先保持顶部与输出规格卡两处下拉选择一致；真实 settings 与顶部设备摘要仅在 POST 成功后更新
     const NSInteger idx = sender.indexOfSelectedItem;
     for (NSPopUpButton *pop in [self devicePopups]) {
+        if (pop == self.topDevicePopup && [self isUpnpBackend]) continue;
         if (pop != sender && idx >= 0 && idx < (NSInteger)pop.numberOfItems) {
             [pop selectItemAtIndex:idx];
         }
@@ -3302,6 +3596,9 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         if (!self_ || writeSeq != self_.deviceWriteSeq) return;
         if (json && [json[@"ok"] boolValue]) {
             NSMutableDictionary *nextSettings = self_.settings ? [self_.settings mutableCopy] : [NSMutableDictionary dictionary];
+            if ([json[@"kv"] isKindOfClass:[NSDictionary class]]) {
+                [nextSettings addEntriesFromDictionary:(NSDictionary *)json[@"kv"]];
+            }
             nextSettings[@"device"] = devId;
             self_.settings = nextSettings;
             self_.statusMessage.stringValue = RLPTr(@"已生效");
@@ -3312,9 +3609,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
             } else {
                 RLPToast(RLPTr(@"输出设备已选择，下次播放生效"));
             }
-            [self_ syncOutputControls];
-            [self_ refreshTrackCard];
-            [self_ refreshChain];
+            [self_ syncAllControlsFromSettings];
             [self_ reloadRates];
             [self_ reloadSettings];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
@@ -3329,13 +3624,32 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         }
     }];
 }
+- (void)switchBackendTo:(NSString *)bk {
+    if (!bk.length) return;
+    self.pendingBackend = bk;
+    [self syncOutputControls];
+    [self refreshTrackCard];
+    [self refreshChain];
+    if ([bk isEqualToString:@"upnp"] && !self.upnpDevicesLoaded && !self.upnpDiscovering && [RLPCoreClient shared].started) {
+        [self reloadUpnpDevicesForce:YES];
+    }
+    [self postSettings:@{@"backend": bk}];
+}
+- (void)onTopBackendChanged:(NSSegmentedControl *)sender {
+    NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
+    const NSInteger i = sender.selectedSegment;
+    if (i >= 0 && i < (NSInteger)vals.count) [self switchBackendTo:vals[i]];
+}
 - (void)onBackendChanged:(NSPopUpButton *)sender {
     NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
     const NSInteger i = sender.indexOfSelectedItem;
-    if (i >= 0 && i < (NSInteger)vals.count) [self postSettings:@{@"backend": vals[i]}];
+    if (i >= 0 && i < (NSInteger)vals.count) [self switchBackendTo:vals[i]];
 }
 - (void)onHogChanged:(NSButton *)sender {
-    [self postSettings:@{@"hogexcl": (sender.state == NSControlStateValueOn ? @"1" : @"0")}];
+    const NSControlStateValue st = sender.state;
+    if (self.hogCheck && self.hogCheck != sender) self.hogCheck.state = st;
+    if (self.topHogCheck && self.topHogCheck != sender) self.topHogCheck.state = st;
+    [self postSettings:@{@"hogexcl": (st == NSControlStateValueOn ? @"1" : @"0")}];
 }
 - (void)onBitsChanged:(NSPopUpButton *)sender {
     NSArray *vals = @[@"-1", @"16", @"24", @"32"];
@@ -3656,15 +3970,49 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         NSArray *bvals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
         NSArray *btitles = @[RLPTr(@"硬件直通（独占）"), RLPTr(@"系统混音（共享）"), RLPTr(@"UPnP 投放")];
         NSPopUpButton *bp = [self popoverPopupWithValues:bvals titles:btitles action:@selector(onNodeBackend:)];
-        NSInteger bi = [bvals indexOfObject:[self str:@"backend" def:@"coreaudio"]];
+        NSInteger bi = [bvals indexOfObject:[self currentEffectiveBackend]];
         [bp selectItemAtIndex:(bi == NSNotFound) ? 0 : bi];
         [s addArrangedSubview:bp];
+        if ([self isUpnpBackend]) {
+            [s addArrangedSubview:[self inlineLabel:RLPTr(@"目标渲染器")]];
+            NSMutableArray<NSString *> *uvals = [NSMutableArray array];
+            NSMutableArray<NSString *> *utitles = [NSMutableArray array];
+            NSArray<NSDictionary<NSString *, NSString *> *> *devs = [self.upnpDevices isKindOfClass:[NSArray class]] ? self.upnpDevices : @[];
+            NSString *saved = [self str:@"upnpdev" def:@""];
+            BOOL savedSeen = NO;
+            if (devs.count > 0) {
+                [uvals addObject:@""];
+                [utitles addObject:RLPTr(@"未选择网络播放器")];
+                for (NSDictionary<NSString *, NSString *> *d in devs) {
+                    NSString *did = d[@"id"] ?: @"";
+                    if (!did.length) continue;
+                    if ([did isEqualToString:saved]) savedSeen = YES;
+                    [uvals addObject:did];
+                    [utitles addObject:(d[@"name"].length ? d[@"name"] : did)];
+                }
+            }
+            if (saved.length && !savedSeen) {
+                [uvals addObject:saved];
+                [utitles addObject:[NSString stringWithFormat:@"%@%@", RLPTr(@"（上次选择 · 离线/需刷新）"), saved]];
+            }
+            if (!uvals.count) {
+                [uvals addObject:@""];
+                [utitles addObject:RLPTr(@"（未发现 UPnP 渲染器）")];
+            }
+            NSPopUpButton *up = [self popoverPopupWithValues:uvals titles:utitles action:@selector(onNodeUpnpDevice:)];
+            up.identifier = @"wb.node.out.upnp";
+            RLPWorkbenchMakePopupTruncate(up);
+            NSInteger ui = [uvals indexOfObject:saved];
+            [up selectItemAtIndex:(ui == NSNotFound) ? 0 : ui];
+            [s addArrangedSubview:up];
+        }
     } else {
         [s addArrangedSubview:[self inlineLabel:RLPTr(@"源规格由当前曲目决定，没有可调项。")]];
     }
     [self.popover close];
     NSView *anchor = self.chainNodes[key] ?: self.view;
-    self.popover = RLPShowCardPopover(anchor, RLPCardController(s, 330, 120), 330);
+    const CGFloat popH = ([key isEqualToString:@"out"] && [self isUpnpBackend]) ? 170.0 : 120.0;
+    self.popover = RLPShowCardPopover(anchor, RLPCardController(s, 330, popH), 330);
 }
 
 - (NSPopUpButton *)popoverPopupWithValues:(NSArray<NSString *> *)values
@@ -3694,7 +4042,8 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 }
 - (void)onNodeShaper:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"shaper": v}]; }
 - (void)onNodeDsd:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"dsd": v, @"dsdnative": @"0"}]; }
-- (void)onNodeBackend:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self postSettings:@{@"backend": v}]; }
+- (void)onNodeBackend:(NSPopUpButton *)s { NSString *v = s.selectedItem.representedObject; if ([v isKindOfClass:[NSString class]]) [self switchBackendTo:v]; }
+- (void)onNodeUpnpDevice:(NSPopUpButton *)s { [self selectUpnpDeviceFromPopup:s]; }
 - (void)onNodeIrOff:(id)s { (void)s; [self postSettings:@{@"ir": @"0"}]; [self.popover close]; }
 
 #pragma mark - 数据读写与乱序保护
@@ -3719,6 +4068,8 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         }
     }
     const NSUInteger pendingABSeq = self.abPickSeq;
+    const BOOL isBackendWrite = (kv[@"backend"] != nil);
+    const NSUInteger backendSeq = isBackendWrite ? ++self.backendWriteSeq : self.backendWriteSeq;
     ++self.settingsSeq; // 使更早发出的 GET /api/settings 失效
     self.statusMessage.stringValue = RLPTr(@"应用中…");
     NSMutableArray *parts = [NSMutableArray array];
@@ -3729,12 +4080,27 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (pendingAB >= 0 && pendingABSeq != self_.abPickSeq) return;
+        if (isBackendWrite && backendSeq != self_.backendWriteSeq) return;
         if (json && [json[@"ok"] boolValue]) {
+            NSDictionary *retKV = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
+            if (kv[@"backend"] != nil || kv[@"hogexcl"] != nil || retKV != nil) {
+                if (kv[@"backend"] != nil) self_.pendingBackend = nil;
+                NSMutableDictionary *merged = [self_.settings isKindOfClass:[NSDictionary class]]
+                    ? [self_.settings mutableCopy]
+                    : [NSMutableDictionary dictionary];
+                if (retKV) [merged addEntriesFromDictionary:retKV];
+                if (kv[@"backend"] != nil) merged[@"backend"] = kv[@"backend"];
+                if (kv[@"hogexcl"] != nil) merged[@"hogexcl"] = kv[@"hogexcl"];
+                self_.settings = merged;
+                [self_ syncAllControlsFromSettings];
+                if (kv[@"backend"] != nil) [self_ reloadRates];
+            }
             if (pendingAB >= 0 && pendingAB < (NSInteger)self_.abSlots.count) {
                 self_.abPickedSlot = pendingAB;
                 NSMutableDictionary *merged = [self_.settings isKindOfClass:[NSDictionary class]]
                     ? [self_.settings mutableCopy]
                     : [NSMutableDictionary dictionary];
+                if (retKV) [merged addEntriesFromDictionary:retKV];
                 [merged addEntriesFromDictionary:kv];
                 self_.settings = merged;
                 [self_ syncAllControlsFromSettings];
@@ -3744,6 +4110,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
             [self_ reloadSettings];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
         } else {
+            self_.pendingBackend = nil;
             self_.statusMessage.stringValue = RLPTr(@"保存失败，已保留原值");
             RLPToast(RLPTr(@"保存失败"));
             [self_ syncAllControlsFromSettings];
@@ -3754,15 +4121,27 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 - (void)applySettingsPayload:(NSDictionary *)kv forSeq:(NSUInteger)seq {
     if (seq > 0 && seq < self.settingsSeq) return; // 丢弃乱序到达的旧回包
     if (seq > self.settingsSeq) self.settingsSeq = seq;
+    self.pendingBackend = nil;
     NSString *oldDev = [self str:@"device" def:@""];
+    NSString *oldBackend = [self str:@"backend" def:@""];
+    NSString *oldUpnpDev = [self str:@"upnpdev" def:@""];
     self.settings = [kv isKindOfClass:[NSDictionary class]] ? kv : @{};
     if (self.inABPickPost && self.abPendingPickSlot >= 0) {
         self.abPickedSlot = self.abPendingPickSlot;
         self.abPendingPickSlot = -1;
     }
     NSString *newDev = [self str:@"device" def:@""];
+    NSString *newBackend = [self str:@"backend" def:@""];
+    NSString *newUpnpDev = [self str:@"upnpdev" def:@""];
     [self syncAllControlsFromSettings];
-    if (![newDev isEqualToString:oldDev]) [self reloadRates];
+    if ([newBackend isEqualToString:@"upnp"] && !self.upnpDevicesLoaded && !self.upnpDiscovering && [RLPCoreClient shared].started) {
+        [self reloadUpnpDevicesForce:NO];
+    }
+    if (![newDev isEqualToString:oldDev] ||
+        ![newBackend isEqualToString:oldBackend] ||
+        ![newUpnpDev isEqualToString:oldUpnpDev]) {
+        [self reloadRates];
+    }
 }
 
 - (void)applyStatusPayload:(NSDictionary *)st forSeq:(NSUInteger)seq {
@@ -3843,12 +4222,14 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     self.modFamilyPopup.enabled = dsdOn;
     self.modOrderPopup.enabled = dsdOn;
 
-    NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    NSString *bk = [self currentEffectiveBackend];
     const BOOL isSharedOrRemote = [bk isEqualToString:@"coreaudio-shared"] ||
                                   [bk isEqualToString:@"upnp"] ||
                                   [bk isEqualToString:@"null"];
     NSDictionary *d = [self currentDeviceDict];
-    const BOOL hasDop = !isSharedOrRemote && d &&
+    const BOOL isDevAirPlay = d && ([d[@"sharedOnly"] boolValue] ||
+                                    ([d[@"transport"] isKindOfClass:[NSString class]] && [d[@"transport"] isEqualToString:@"airplay"]));
+    const BOOL hasDop = !isSharedOrRemote && !isDevAirPlay && d &&
         (([d[@"dopCarrierRate"] isKindOfClass:[NSNumber class]] && [d[@"dopCarrierRate"] doubleValue] > 0) ||
          [d[@"dop"] boolValue]);
     for (NSInteger i = 1; i < 5; ++i) [self.dsdSeg setEnabled:hasDop forSegment:i];
@@ -3914,10 +4295,16 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         }];
     }
 }
-- (void)viewDidDisappear {
-    self.viewDisappeared = YES;
+- (void)stopPolling {
     [self.poll invalidate];
     self.poll = nil;
+    self.statusInFlight = NO;
+    ++self.statusSeq;
+}
+
+- (void)viewDidDisappear {
+    self.viewDisappeared = YES;
+    [self stopPolling];
     self.statusInFlight = NO;
     ++self.statusSeq;
     ++self.anlSeq;
@@ -3958,9 +4345,19 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     }];
 }
 
+- (NSString *)currentEffectiveBackend {
+    if (self.pendingBackend.length) return self.pendingBackend;
+    NSString *bk = [self str:@"backend" def:@"coreaudio"];
+    return bk.length ? bk : @"coreaudio";
+}
+
+- (BOOL)isUpnpBackend {
+    return [[self currentEffectiveBackend] isEqualToString:@"upnp"];
+}
+
 - (NSArray<NSPopUpButton *> *)devicePopups {
     NSMutableArray<NSPopUpButton *> *list = [NSMutableArray arrayWithCapacity:2];
-    if (self.topDevicePopup) [list addObject:self.topDevicePopup];
+    if (self.topDevicePopup && ![self isUpnpBackend]) [list addObject:self.topDevicePopup];
     if (self.devicePopup) [list addObject:self.devicePopup];
     return list;
 }
@@ -4035,6 +4432,136 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     }
 }
 
+- (void)populateUpnpPopups {
+    NSMutableArray<NSPopUpButton *> *popups = [NSMutableArray arrayWithCapacity:2];
+    if (self.upnpDevicePopup) [popups addObject:self.upnpDevicePopup];
+    if ([self isUpnpBackend] && self.topDevicePopup) [popups addObject:self.topDevicePopup];
+    if (!popups.count) return;
+    NSArray<NSDictionary<NSString *, NSString *> *> *devs = [self.upnpDevices isKindOfClass:[NSArray class]] ? self.upnpDevices : @[];
+    for (NSPopUpButton *pop in popups) {
+        [pop removeAllItems];
+        pop.enabled = YES;
+        if (devs.count == 0) {
+            NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:RLPTr(@"（未发现 UPnP 渲染器）") action:nil keyEquivalent:@""];
+            it.representedObject = @{@"id": @""};
+            [pop.menu addItem:it];
+        } else {
+            NSMenuItem *defIt = [[NSMenuItem alloc] initWithTitle:RLPTr(@"未选择网络播放器") action:nil keyEquivalent:@""];
+            defIt.representedObject = @{@"id": @""};
+            [pop.menu addItem:defIt];
+            for (NSDictionary<NSString *, NSString *> *d in devs) {
+                NSString *did = d[@"id"] ?: @"";
+                if (!did.length) continue;
+                NSString *baseTitle = d[@"name"].length ? d[@"name"] : did;
+                NSString *title = baseTitle;
+                if ([pop itemWithTitle:title]) {
+                    title = [NSString stringWithFormat:@"%@ · %@", baseTitle, did];
+                }
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+                it.representedObject = d;
+                [pop.menu addItem:it];
+            }
+        }
+    }
+    [self syncUpnpSelectionOnly];
+}
+
+- (void)syncUpnpSelectionOnly {
+    NSMutableArray<NSPopUpButton *> *popups = [NSMutableArray arrayWithCapacity:2];
+    if (self.upnpDevicePopup) [popups addObject:self.upnpDevicePopup];
+    if ([self isUpnpBackend] && self.topDevicePopup) [popups addObject:self.topDevicePopup];
+    if (!popups.count) return;
+    NSString *cur = [self str:@"upnpdev" def:@""];
+    for (NSPopUpButton *pop in popups) {
+        pop.enabled = YES;
+        for (NSInteger i = (NSInteger)pop.numberOfItems - 1; i >= 0; --i) {
+            if ([pop itemAtIndex:i].tag == 997) [pop removeItemAtIndex:i];
+        }
+        if (pop.numberOfItems == 0) continue;
+        NSInteger sel = 0;
+        if (cur.length > 0) {
+            BOOL found = NO;
+            for (NSInteger i = 0; i < (NSInteger)pop.numberOfItems; ++i) {
+                id ro = [pop itemAtIndex:i].representedObject;
+                NSString *rid = ([ro isKindOfClass:[NSDictionary class]] && [ro[@"id"] isKindOfClass:[NSString class]])
+                    ? ro[@"id"] : @"";
+                if ([rid isEqualToString:cur]) {
+                    sel = i;
+                    found = YES;
+                    break;
+                }
+            }
+            if (!found) {
+                NSString *offlineTitle = [NSString stringWithFormat:@"%@%@", RLPTr(@"（上次选择 · 离线/需刷新）"), cur];
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:offlineTitle action:nil keyEquivalent:@""];
+                it.representedObject = @{@"id": cur, @"offline": @YES};
+                it.tag = 997;
+                [pop.menu addItem:it];
+                sel = (NSInteger)pop.numberOfItems - 1;
+            }
+        }
+        if (sel >= 0 && sel < (NSInteger)pop.numberOfItems) [pop selectItemAtIndex:sel];
+        pop.toolTip = pop.titleOfSelectedItem.length ? pop.titleOfSelectedItem : RLPTr(@"目标渲染器");
+    }
+}
+
+- (void)refreshUpnpStatusText {
+    if (!self.upnpStatusLabel) return;
+    if (self.upnpDiscovering) {
+        self.upnpStatusLabel.stringValue = RLPTr(@"正在发现渲染器…");
+    } else if (self.upnpDiscoveryFailed) {
+        self.upnpStatusLabel.stringValue = self.upnpHint.length ? self.upnpHint : RLPTr(@"扫描失败（/api/cast/devices 无响应）");
+    } else if (self.upnpDevices.count > 0) {
+        self.upnpStatusLabel.stringValue = [NSString stringWithFormat:RLPTr(@"共发现 %lu 个渲染器"), (unsigned long)self.upnpDevices.count];
+    } else if (self.upnpDevicesLoaded) {
+        self.upnpStatusLabel.stringValue = self.upnpHint.length ? self.upnpHint : RLPTr(@"未发现 UPnP/DLNA 渲染器（确认设备已开机并开启 DLNA/UPnP）");
+    } else {
+        self.upnpStatusLabel.stringValue = RLPTr(@"点「重新发现」扫描局域网里的 MediaRenderer");
+    }
+}
+
+- (void)reloadUpnpDevicesForce:(BOOL)force {
+    if (![RLPCoreClient shared].started) return;
+    const NSUInteger seq = ++self.upnpDevicesSeq;
+    self.upnpDiscovering = YES;
+    self.upnpDiscoveryFailed = NO;
+    [self refreshUpnpStatusText];
+    NSString *url = force ? @"/api/cast/devices?scan=1" : @"/api/cast/devices";
+    __weak __typeof__(self) weakSelf = self;
+    [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ applyUpnpDevicesPayload:json forSeq:seq];
+    }];
+}
+
+- (void)applyUpnpDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq {
+    if (seq > 0 && seq < self.upnpDevicesSeq) return;
+    if (seq > self.upnpDevicesSeq) self.upnpDevicesSeq = seq;
+    self.upnpDiscovering = NO;
+    const BOOL okFlag = [json isKindOfClass:[NSDictionary class]] &&
+        (json[@"ok"] == nil || [json[@"ok"] boolValue]);
+    if (okFlag && [json[@"devices"] isKindOfClass:[NSArray class]]) {
+        self.upnpDevices = RLPWorkbenchNormalizeUpnpDevices(json[@"devices"]);
+        self.upnpDevicesLoaded = YES;
+        self.upnpDiscoveryFailed = NO;
+        NSString *hint = [json[@"hint"] isKindOfClass:[NSString class]] ? json[@"hint"] : @"";
+        self.upnpHint = hint.length ? hint : nil;
+    } else {
+        self.upnpDiscoveryFailed = YES;
+        NSString *err = ([json isKindOfClass:[NSDictionary class]] &&
+                         [json[@"error"] isKindOfClass:[NSString class]] &&
+                         ((NSString *)json[@"error"]).length)
+            ? json[@"error"] : nil;
+        self.upnpHint = err;
+        if (!self.upnpDevices) self.upnpDevices = @[];
+    }
+    [self syncOutputControls];
+    [self refreshTrackCard];
+    [self refreshChain];
+    if ([self isUpnpBackend]) [self reloadRates];
+}
+
 - (void)reloadDevices {
     const NSUInteger seq = ++self.devicesSeq;
     __weak __typeof__(self) weakSelf = self;
@@ -4064,8 +4591,17 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 
 - (void)reloadRates {
     const NSUInteger seq = ++self.ratesSeq;
-    NSString *dev = [self str:@"device" def:@""];
-    NSString *url = dev.length ? [NSString stringWithFormat:@"/api/rates?device=%@", RLPEnc(dev)] : @"/api/rates";
+    NSString *bk = [self str:@"backend" def:@""];
+    NSString *url = nil;
+    if ([bk isEqualToString:@"upnp"]) {
+        NSString *upnpDev = [self str:@"upnpdev" def:@""];
+        url = upnpDev.length
+            ? [NSString stringWithFormat:@"/api/rates?backend=upnp&upnpdev=%@", RLPEnc(upnpDev)]
+            : @"/api/rates?backend=upnp";
+    } else {
+        NSString *dev = [self str:@"device" def:@""];
+        url = dev.length ? [NSString stringWithFormat:@"/api/rates?device=%@", RLPEnc(dev)] : @"/api/rates";
+    }
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:url completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -4075,17 +4611,14 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         [self_.ratePopup removeAllItems];
         [self_.ratePopup addItemWithTitle:RLPTr(@"跟随源")];
         [[self_.ratePopup lastItem] setRepresentedObject:@"follow"];
+        [self_.ratePopup addItemWithTitle:RLPTr(@"源采样率")];
+        [[self_.ratePopup lastItem] setRepresentedObject:@"src"];
         for (id r in rs) {
             if (![r isKindOfClass:[NSNumber class]]) continue;
             [self_.ratePopup addItemWithTitle:[NSString stringWithFormat:@"%@ Hz", r]];
             [[self_.ratePopup lastItem] setRepresentedObject:[(NSNumber *)r stringValue]];
         }
-        NSString *cur = [self_ str:@"rate" def:@"follow"];
-        for (NSInteger i = 0; i < (NSInteger)self_.ratePopup.numberOfItems; ++i) {
-            if ([[self_.ratePopup itemAtIndex:i].representedObject isEqualToString:cur]) {
-                [self_.ratePopup selectItemAtIndex:i]; break;
-            }
-        }
+        [self_ selectPopup:self_.ratePopup settingKey:@"rate" defaultValue:@"follow"];
     }];
 }
 
@@ -4110,11 +4643,45 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 }
 
 - (void)syncOutputControls {
-    [self syncDeviceSelectionOnly];
+    NSString *bk = [self currentEffectiveBackend];
+    const BOOL isUpnp = [bk isEqualToString:@"upnp"];
     NSArray *vals = @[@"coreaudio", @"coreaudio-shared", @"upnp"];
-    NSInteger bi = [vals indexOfObject:[self str:@"backend" def:@"coreaudio"]];
-    [self.backendPopup selectItemAtIndex:(bi == NSNotFound ? 0 : bi)];
-    self.hogCheck.state = [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSInteger bi = [vals indexOfObject:bk];
+    const NSInteger selIdx = (bi == NSNotFound ? 0 : bi);
+    [self.backendPopup selectItemAtIndex:selIdx];
+    if (self.topBackendSeg && selIdx >= 0 && selIdx < self.topBackendSeg.segmentCount) {
+        self.topBackendSeg.selectedSegment = selIdx;
+    }
+    const NSControlStateValue hogState = [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+    const BOOL hogEn = [bk isEqualToString:@"coreaudio"];
+    self.hogCheck.state = hogState;
+    self.hogCheck.enabled = hogEn;
+    if (self.topHogCheck) {
+        self.topHogCheck.state = hogState;
+        self.topHogCheck.enabled = hogEn;
+    }
+
+    if (isUpnp) {
+        if (self.devicePopupWidthConstraint) self.devicePopupWidthConstraint.active = NO;
+        if (self.devicePopup) self.devicePopup.hidden = YES;
+        if (self.upnpWrap) self.upnpWrap.hidden = NO;
+        if (self.upnpWrapWidthConstraint) self.upnpWrapWidthConstraint.active = YES;
+        [self populateUpnpPopups];
+        [self refreshUpnpStatusText];
+    } else {
+        if (self.upnpWrapWidthConstraint) self.upnpWrapWidthConstraint.active = NO;
+        if (self.upnpWrap) self.upnpWrap.hidden = YES;
+        if (self.devicePopup) self.devicePopup.hidden = NO;
+        if (self.devicePopupWidthConstraint) self.devicePopupWidthConstraint.active = YES;
+        [self populateDevicePopups];
+    }
+    if (self.topDeviceLabel) {
+        self.topDeviceLabel.stringValue = isUpnp ? RLPTr(@"目标渲染器") : RLPTr(@"输出设备");
+    }
+    if (self.topDeviceRefreshBtn) {
+        self.topDeviceRefreshBtn.toolTip = isUpnp ? RLPTr(@"重新发现") : RLPTr(@"刷新列表");
+    }
 }
 
 - (void)reloadStatus {
@@ -4200,13 +4767,24 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         @"sdm": dsd ? [NSString stringWithFormat:@"DSD%ld · %@%@", (long)dsdRate,
                        [self str:@"modfamily" def:@"ec"], [self str:@"modorder" def:@"7"]] : @"—",
         @"out": ({
-            NSString *bk = [self str:@"backend" def:@"coreaudio"];
-            const BOOL hogCfg = [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"];
-            NSString *fbWhy = [st[@"fallbackWhy"] isKindOfClass:[NSString class]] ? st[@"fallbackWhy"] : @"";
-            const BOOL hogKnownFalse = [st[@"hogAcquired"] respondsToSelector:@selector(boolValue)] && ![st[@"hogAcquired"] boolValue];
-            const BOOL hogFallback = (fbWhy.length > 0) || hogKnownFalse;
-            NSString *hogSuffix = hogCfg ? (hogFallback ? RLPTr(@" · Hog（已回退）") : @" · Hog") : @"";
-            [NSString stringWithFormat:@"%@%@", bk, hogSuffix];
+            NSString *bk = [self currentEffectiveBackend];
+            NSString *outVal = nil;
+            if ([bk isEqualToString:@"upnp"]) {
+                NSString *sel = self.upnpDevicePopup.titleOfSelectedItem;
+                if (!sel.length) {
+                    NSString *saved = [self str:@"upnpdev" def:@""];
+                    sel = saved.length ? saved : RLPTr(@"未选择网络播放器");
+                }
+                outVal = [NSString stringWithFormat:@"%@ · %@", bk, sel];
+            } else {
+                const BOOL hogCfg = [[self str:@"hogexcl" def:@"1"] isEqualToString:@"1"];
+                NSString *fbWhy = [st[@"fallbackWhy"] isKindOfClass:[NSString class]] ? st[@"fallbackWhy"] : @"";
+                const BOOL hogKnownFalse = [st[@"hogAcquired"] respondsToSelector:@selector(boolValue)] && ![st[@"hogAcquired"] boolValue];
+                const BOOL hogFallback = (fbWhy.length > 0) || hogKnownFalse;
+                NSString *hogSuffix = hogCfg ? (hogFallback ? RLPTr(@" · Hog（已回退）") : @" · Hog") : @"";
+                outVal = [NSString stringWithFormat:@"%@%@", bk, hogSuffix];
+            }
+            outVal;
         }),
     };
     for (NSString *key in self.chainNodes) {
@@ -4298,6 +4876,8 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
         }
     }
     [self populateDevicePopups];
+    [self populateUpnpPopups];
+    [self refreshUpnpStatusText];
     if (self.eqExtLabel) {
         NSString *extEq = [self str:@"eq" def:@""];
         self.eqExtLabel.stringValue = (extEq.length && ![extEq isEqualToString:@"0"])
@@ -4332,6 +4912,7 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     // 主题切换后这两处必须跟着走，否则浅色→深色时它们仍停在旧主题的色值上
     // （monCueNote 是中性说明 → mut2；filterOverrideLabel 由 refreshChain 每轮重设）。
@@ -4376,6 +4957,15 @@ static BOOL RLPABSlotMatchesSettings(NSDictionary * _Nullable slot, NSDictionary
     }
     if (self.topDeviceRefreshBtn) {
         self.topDeviceRefreshBtn.contentTintColor = t.text;
+    }
+    if (self.upnpScanBtn) {
+        self.upnpScanBtn.contentTintColor = t.text;
+    }
+    if (self.upnpLabel) {
+        self.upnpLabel.textColor = t.mut;
+    }
+    if (self.upnpStatusLabel) {
+        self.upnpStatusLabel.textColor = t.mut;
     }
     if (self.trackCover) {
         self.trackCover.layer.backgroundColor = t.cardAlt.CGColor;

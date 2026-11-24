@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)startPolling;
 - (void)stopPolling;
 - (void)applyTheme;
+- (void)applyLanguage;
 @property (nonatomic, readonly) BOOL polling;
 @end
 

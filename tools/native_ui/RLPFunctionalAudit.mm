@@ -279,7 +279,7 @@ static void Pump(NSTimeInterval seconds) {
 /// 把本轮功能验收的结论回传给后端（web 用 /api/selftest/report 落盘页面自检结果）。
 /// 为什么要有：web 的页面自检跑完会把 want/actual 落盘，便于事后 grep 与对比；
 /// 原生这边是 --audit，结论同样应该落盘到同一个地方，否则两边的"验收证据"躺在两个世界。
-static void ReportAuditResult(NSString *summary, NSInteger pass, NSInteger fail) {
+static void __attribute__((unused)) ReportAuditResult(NSString *summary, NSInteger pass, NSInteger fail) {
     if (![RLPCoreClient shared].started) return;
     NSDictionary *payload = @{ @"schema": @1,
                                @"kind": @"native-audit",
@@ -1612,7 +1612,6 @@ int RLPRunFunctionalAudit(NSString *outDir) {
 
             // 通用「可见」判定：自身与全部祖先未隐藏，且 frame 有面积、落在某个祖先可视区内。
             // 注意不能用 convertRect 到窗口（离屏审计里窗口可能没显示），用**祖先链可见性 + 面积**。
-            __block NSInteger visibleButtons = 0;
             NSMutableSet<NSString *> *visIds = [NSMutableSet set];
             NSMutableArray<NSView *> *allD = [NSMutableArray array];
             CollectAllViews(svm.view, allD);
@@ -1621,7 +1620,6 @@ int RLPRunFunctionalAudit(NSString *outDir) {
                 BOOL anc = YES;
                 for (NSView *p = v.superview; p; p = p.superview) if (p.hidden) { anc = NO; break; }
                 if (!anc) continue;
-                if ([v isKindOfClass:[NSButton class]]) ++visibleButtons;
                 if (v.identifier.length) [visIds addObject:v.identifier];
             }
 
@@ -1681,20 +1679,22 @@ int RLPRunFunctionalAudit(NSString *outDir) {
             CK(RLPViewActuallyVisible(fbCount),
                "反馈字数计数内联可见", fbCount ? @"ok" : @"找不到 sp_fbcount");
             // 计数真的跟随输入：写入 12 个字符后断言 12 / 16384
-            if (fbText && fbCount && [svm respondsToSelector:NSSelectorFromString(@"updateFbCount")]) {
+            SEL updSel = NSSelectorFromString(@"updateFbCount");
+            if (fbText && fbCount && [svm respondsToSelector:updSel]) {
+                void (*callUpd)(id, SEL) = (void (*)(id, SEL))[svm methodForSelector:updSel];
                 fbText.string = @"ABCDEFGHIJKL";       // 12 个 ASCII = 12 字节
-                [svm performSelector:NSSelectorFromString(@"updateFbCount")];
+                callUpd(svm, updSel);
                 Pump(0.1);
                 CK([fbCount.stringValue hasPrefix:@"12 / 16384"],
                    "输入 12 个字符后计数显示 12 / 16384", fbCount.stringValue);
                 // 中文按字节计（web fbBytes 同口径）：6 个汉字 = 18 字节，不是 6。
                 fbText.string = @"一二三四五六";
-                [svm performSelector:NSSelectorFromString(@"updateFbCount")];
+                callUpd(svm, updSel);
                 Pump(0.1);
                 CK([fbCount.stringValue hasPrefix:@"18 / 16384"],
                    "中文按 UTF-8 字节计数（6 个汉字 = 18 字节，不是 6）", fbCount.stringValue);
                 fbText.string = @"";
-                [svm performSelector:NSSelectorFromString(@"updateFbCount")];
+                callUpd(svm, updSel);
             }
             // 附带诊断包默认勾选 + 发送按钮
             NSSwitch *fbDiag = nil;

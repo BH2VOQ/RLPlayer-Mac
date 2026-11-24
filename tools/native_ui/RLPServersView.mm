@@ -47,6 +47,8 @@
 @property (nonatomic, assign) NSUInteger seq;
 @property (nonatomic, assign) NSUInteger formOpSeq;
 @property (nonatomic, assign) BOOL hasLoadedOnce;
+@property (nonatomic, assign) BOOL emptyNotStarted;
+@property (nonatomic, assign) NSInteger formMsgState; // 0=mut 1=ok 2=danger
 @end
 
 @implementation RLPServersView
@@ -151,6 +153,7 @@
         [self.formBox removeFromSuperview];
         self.formBox.hidden = YES;
         self.formMsg.stringValue = @"";
+        self.formMsgState = 0;
         self.formMsg.textColor = [RLPTheme current].mut;
         if (self.hiddenFormDock && self.formBox.superview != self.hiddenFormDock) {
             [self.hiddenFormDock addSubview:self.formBox];
@@ -314,9 +317,11 @@
 
 - (void)reload {
     if (![RLPCoreClient shared].started) {
+        self.emptyNotStarted = YES;
         [self showEmpty:RLPTr(@"核心未启动")];
         return;
     }
+    self.emptyNotStarted = NO;
     const NSUInteger seq = ++self.seq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/src/config" completion:^(NSDictionary * _Nullable json) {
@@ -458,6 +463,7 @@
     self.passField.stringValue = @"";   // 密码红线：永不回填
     self.passField.placeholderString = r ? RLPTr(@"留空 = 保持原密码") : RLPTr(@"密码");
     self.formMsg.stringValue = @"";
+    self.formMsgState = 0;
     self.formMsg.textColor = [RLPTheme current].mut;
     self.saveBtn.enabled = YES;
     self.testFormBtn.enabled = YES;
@@ -513,6 +519,7 @@
     NSString *err = [self validateForm];
     if (err) {
         self.formMsg.stringValue = err;
+        self.formMsgState = 2;
         self.formMsg.textColor = [RLPTheme current].danger;
         [self notifyLayoutChanged];
         return;
@@ -525,6 +532,7 @@
     const NSUInteger opSeq = ++self.formOpSeq;
     self.saveBtn.enabled = NO;
     self.formMsg.stringValue = RLPTr(@"保存中…");
+    self.formMsgState = 0;
     self.formMsg.textColor = [RLPTheme current].mut;
     [self notifyLayoutChanged];
     __weak __typeof__(self) weakSelf = self;
@@ -536,6 +544,7 @@
         if (!json || ![json[@"ok"] boolValue]) {
             NSString *e = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"保存失败");
             self_.formMsg.stringValue = e;
+            self_.formMsgState = 2;
             self_.formMsg.textColor = [RLPTheme current].danger;
             [self_ notifyLayoutChanged];
             return;
@@ -553,6 +562,7 @@
     const NSUInteger opSeq = self.formOpSeq;
     self.testFormBtn.enabled = NO;
     self.formMsg.stringValue = RLPTr(@"测试中…");
+    self.formMsgState = 0;
     self.formMsg.textColor = [RLPTheme current].mut;
     [self notifyLayoutChanged];
     __weak __typeof__(self) weakSelf = self;
@@ -565,6 +575,7 @@
         const BOOL ok = json && [json[@"ok"] boolValue];
         NSString *e = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : RLPTr(@"失败");
         self_.formMsg.stringValue = ok ? RLPTr(@"连接成功") : [@"✗ " stringByAppendingString:e];
+        self_.formMsgState = ok ? 1 : 2;
         self_.formMsg.textColor = ok ? [RLPTheme current].ok : [RLPTheme current].danger;
         [self_ notifyLayoutChanged];
     }];
@@ -573,8 +584,11 @@
 #pragma mark - 行动作
 
 - (void)onActivate:(NSButton *)sender {
-    RLPServerRow *r = [self rowForId:sender.identifier];
-    NSString *body = [@"action=active&id=" stringByAppendingString:RLPEnc(sender.identifier)];
+    NSString *targetSid = [sender.identifier copy] ?: @"";
+    RLPServerRow *r = [self rowForId:targetSid];
+    if (!r) return;
+    NSString *fallbackDisp = r.name.length ? r.name : r.base;
+    NSString *body = [@"action=active&id=" stringByAppendingString:RLPEnc(targetSid)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:@"/api/src/config" body:body completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -584,7 +598,9 @@
             RLPToast(e);
             return;
         }
-        RLPToast([NSString stringWithFormat:RLPTr(@"已启用「%@」"), r.name.length ? r.name : r.base]);
+        RLPServerRow *cur = [self_ rowForId:targetSid];
+        NSString *disp = cur ? (cur.name.length ? cur.name : cur.base) : fallbackDisp;
+        RLPToast([NSString stringWithFormat:RLPTr(@"已启用「%@」"), disp]);
         [self_ reload];
     }];
 }
@@ -607,6 +623,7 @@
 - (void)onRemove:(NSButton *)sender {
     NSString *targetSid = [sender.identifier copy] ?: @"";
     RLPServerRow *r = [self rowForId:targetSid];
+    if (!r) return;
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = [NSString stringWithFormat:RLPTr(@"删除服务器「%@」？"), r.name.length ? r.name : r.base];
     a.informativeText = RLPTr(@"只删配置，不动已下载缓存。");
@@ -643,11 +660,38 @@
     self.formBox.layer.borderColor = t.line.CGColor;
     self.formBox.layer.backgroundColor = t.bg3.CGColor;
     self.formTitle.textColor = t.text;
-    if (!self.formMsg.stringValue.length) {
-        self.formMsg.textColor = t.mut;
-    }
+    if (self.formMsgState == 1) self.formMsg.textColor = t.ok;
+    else if (self.formMsgState == 2) self.formMsg.textColor = t.danger;
+    else self.formMsg.textColor = t.mut;
     if (self.hasLoadedOnce) {
-        [self renderRows];
+        if (self.emptyNotStarted && !self.servers.count) {
+            [self showEmpty:RLPTr(@"核心未启动")];
+        } else {
+            [self renderRows];
+        }
+    }
+}
+
+- (void)applyLanguage {
+    self.addBtn.title = RLPTr(@"添加服务器");
+    RLPServerRow *ed = self.editingId.length ? [self rowForId:self.editingId] : nil;
+    self.formTitle.stringValue = ed ? [RLPTr(@"编辑服务器") stringByAppendingFormat:@" · %@",
+                                      ed.name.length ? ed.name : ed.base]
+                                    : RLPTr(@"添加服务器");
+    self.nameField.placeholderString = RLPTr(@"名称（可选）");
+    self.userField.placeholderString = RLPTr(@"用户名");
+    self.passField.placeholderString = ed ? RLPTr(@"留空 = 保持原密码") : RLPTr(@"密码");
+    self.saveBtn.title = RLPTr(@"保存");
+    self.testFormBtn.title = RLPTr(@"测试");
+    self.cancelBtn.title = RLPTr(@"取消");
+    if (self.hasLoadedOnce) {
+        if (self.emptyNotStarted && !self.servers.count) {
+            [self showEmpty:RLPTr(@"核心未启动")];
+        } else {
+            [self renderRows];
+        }
+    } else {
+        [self notifyLayoutChanged];
     }
 }
 

@@ -286,6 +286,27 @@ int main() {
         NSView *startBtn = FindId(inPane, @"sp_instart");
         Ck(startBtn && CardFor(startBtn) != nil,
            @"【A】「开始采集 / 停止采集」按钮在输入卡片体内", @"sp_instart 无卡片祖先");
+        NSPopUpButton *inDev = (NSPopUpButton *)FindId(inPane, @"sp_indev");
+        [settings reloadData];
+        Pump(0.5);
+        BOOL hasLbItem = NO, lbEnabled = NO;
+        for (NSMenuItem *it in inDev.itemArray) {
+            if ([it.representedObject isKindOfClass:[NSString class]] &&
+                [(NSString *)it.representedObject isEqualToString:@"__system_loopback__"]) {
+                hasLbItem = YES;
+                lbEnabled = it.isEnabled;
+                break;
+            }
+        }
+        Ck(inDev && inDev.numberOfItems >= 1 &&
+           [inDev itemAtIndex:0].representedObject != nil &&
+           [(NSString *)[inDev itemAtIndex:0].representedObject isEqualToString:@""],
+           @"【Loopback】sp_indev 首项 representedObject 为空串（不被 /api/devices 覆盖）",
+           [NSString stringWithFormat:@"count=%ld ro=%@", (long)inDev.numberOfItems,
+            inDev.numberOfItems ? [inDev itemAtIndex:0].representedObject : @"(none)"]);
+        Ck(hasLbItem && lbEnabled,
+           @"【Loopback】sp_indev 含可勾选的 __system_loopback__ 回环端点",
+           [NSString stringWithFormat:@"hasLb=%d enabled=%d", hasLbItem, lbEnabled]);
 
         // ---- ④ 输出页（A）：UPnP 发现控件归「输出后端」卡；声道微调必须有真实控件 ----
         [settings selectPane:@"out"];

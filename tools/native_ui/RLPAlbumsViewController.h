@@ -27,6 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 页标题（顶栏承载；与 RLPPageViewController.pageTitle 同语义）。
 @property (nonatomic, copy, readonly) NSString *pageTitle;
 
+- (void)applyTheme;
 - (void)applyLanguage;
 
 @end

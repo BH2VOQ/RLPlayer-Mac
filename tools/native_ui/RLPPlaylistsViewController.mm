@@ -39,6 +39,10 @@
 @interface RLPPlaylistsViewController () <NSTableViewDataSource, NSTableViewDelegate>
 // 页内不再持有歌单列表：列表在侧栏（web #sqList 同址）。页面只负责"当前这份歌单"。
 @property (nonatomic, strong) NSTableView *itemTable;
+@property (nonatomic, strong) NSScrollView *itemScroll;
+@property (nonatomic, strong) NSView *barView;
+@property (nonatomic, strong) NSLayoutConstraint *barHeightConstraint;
+@property (nonatomic, strong) NSArray<NSButton *> *barButtons;
 @property (nonatomic, strong) NSMutableArray<RLPPlaylistRow *> *playlists;
 @property (nonatomic, strong) NSMutableArray<RLPPlaylistItem *> *items;
 @property (nonatomic, copy) NSString *selectedName;
@@ -51,6 +55,9 @@
 @property (nonatomic, assign) NSUInteger actionEpoch;
 @property (nonatomic, copy) NSString *lastPlayKey;      // 同键 0.35s 去重（与队列页同口径）
 @property (nonatomic, assign) NSTimeInterval lastPlayAt;
+@property (nonatomic, assign) BOOL layingOutChrome;
+@property (nonatomic, copy, nullable) NSString *subtitleStateKey;
+@property (nonatomic, copy, nullable) NSString *subtitleErrorRaw;
 @end
 
 @implementation RLPPlaylistsViewController
@@ -125,18 +132,24 @@
     del.identifier = @"sq.delete";
     newBtn.identifier = @"sq.new";
     saveBtn.identifier = @"sq.savecurrent";
-    NSStackView *bar = [[NSStackView alloc] init];
-    bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    bar.spacing = 8;
+    NSView *bar = [[NSView alloc] initWithFrame:NSZeroRect];
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     bar.identifier = @"sq.header";
-    for (NSButton *b in @[ playAll, rename, del, newBtn, saveBtn ]) {
+    self.barView = bar;
+    NSArray<NSButton *> *barBtns = @[ playAll, rename, del, newBtn, saveBtn ];
+    self.barButtons = barBtns;
+    for (NSButton *b in barBtns) {
         b.bezelStyle = NSBezelStyleRounded;
         b.controlSize = NSControlSizeSmall;
-        [bar addArrangedSubview:b];
+        [bar addSubview:b];
     }
     playAll.enabled = NO; rename.enabled = NO; del.enabled = NO;
     [host addSubview:bar];
+    bar.postsFrameChangedNotifications = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onPlaylistsClipFrameChanged:)
+                                                 name:NSViewFrameDidChangeNotification
+                                               object:bar];
 
     // 空态：web `D('list').innerHTML = '<div class=empty>这个歌单是空的</div>'`
     self.emptyLabel = RLPLabel(RLPTr(@"这个歌单是空的"), t.body, t.mut);
@@ -161,11 +174,16 @@
     self.itemTable.usesAlternatingRowBackgroundColors = NO;   // web 的行没有斑马底（截图里的条带就是它）
     self.itemTable.rowHeight = 30;
     self.itemTable.backgroundColor = t.bg;
+    if (@available(macOS 11.0, *)) self.itemTable.style = NSTableViewStylePlain;
+    self.itemTable.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
     NSArray<NSString *> *cols = @[ @"#", RLPTr(@"标题"), RLPTr(@"所在目录") ];
-    NSArray<NSNumber *> *widths = @[ @44, @520, @360 ];
+    NSArray<NSNumber *> *widths = @[ @44, @360, @240 ];
     for (NSInteger i = 0; i < (NSInteger)cols.count; ++i) {
         NSTableColumn *c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"c%ld", (long)i]];
         c.title = cols[i];
+        c.minWidth = (i == 0) ? 44 : 80;
+        c.maxWidth = (i == 0) ? 44 : 10000;
+        c.resizingMask = NSTableColumnNoResizing;
         c.width = widths[i].doubleValue;
         [self.itemTable addTableColumn:c];
     }
@@ -180,17 +198,28 @@
     NSScrollView *is = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     is.documentView = self.itemTable;
     is.hasVerticalScroller = YES;
+    is.autohidesScrollers = YES;
     is.drawsBackground = NO;
     is.translatesAutoresizingMaskIntoConstraints = NO;
+    self.itemScroll = is;
     [host addSubview:is];
+    if (is.contentView) {
+        is.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onPlaylistsClipFrameChanged:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:is.contentView];
+    }
     // 空态文字必须在表格之上：表格背景是不透明主题色，先加就会被它整个盖住
     // （2026-11-13 截图里"这个歌单是空的"看不到就是这个原因，不是没渲染）。
     [host addSubview:self.emptyLabel positioned:NSWindowAbove relativeTo:is];
 
+    self.barHeightConstraint = [bar.heightAnchor constraintEqualToConstant:26];
     [NSLayoutConstraint activateConstraints:@[
         [bar.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
         [bar.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
-        [bar.trailingAnchor constraintLessThanOrEqualToAnchor:host.trailingAnchor constant:-16],
+        [bar.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
+        self.barHeightConstraint,
         [is.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
         [is.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
         [is.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:8],
@@ -198,6 +227,7 @@
         [self.emptyLabel.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
         [self.emptyLabel.topAnchor constraintEqualToAnchor:host.topAnchor constant:120],
     ]];
+    [self layoutPlaylistChrome];
 }
 
 #pragma mark - 表格
@@ -214,6 +244,10 @@
     if (!label) {
         label = RLPLabel(@"", t.body, t.text);
         label.identifier = ident;
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        label.maximumNumberOfLines = 1;
+        [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
     }
     if (row < 0 || row >= (NSInteger)self.items.count) return label;
     RLPPlaylistItem *it = self.items[row];
@@ -250,6 +284,8 @@
     self.renameBtn.enabled = has;
     self.deleteBtn.enabled = has;
     // web renderSavedQueuePage 的中间态：head(name, '加载中…', '')，info 回来后再换成「N 首」。
+    self.subtitleErrorRaw = nil;
+    self.subtitleStateKey = has ? @"loading" : nil;
     [self setSubtitle:has ? RLPTr(@"加载中…") : @""];
     if (!has) {
         ++self.itemSeq;
@@ -521,7 +557,12 @@
 }
 
 - (void)reloadData {
-    if (![RLPCoreClient shared].started) { [self setSubtitle:RLPTr(@"核心未启动")]; return; }
+    if (![RLPCoreClient shared].started) {
+        self.subtitleErrorRaw = nil;
+        self.subtitleStateKey = @"not_started";
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        return;
+    }
     const NSUInteger seq = ++self.listSeq;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/sq/list" completion:^(NSDictionary * _Nullable json) {
@@ -530,8 +571,10 @@
         // 2026-11-17（UI 缺口审计已证实）：旧实现不判 ok，超时/失败也先清空再报
         // 「0 个歌单」——把网络故障说成「你没有歌单」。失败时保留旧数据并显示原因。
         if (!json || ![json[@"ok"] boolValue]) {
-            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"]
-                                                                          : RLPTr(@"歌单读取失败");
+            NSString *rawErr = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil;
+            self_.subtitleErrorRaw = rawErr;
+            self_.subtitleStateKey = @"list_failed";
+            NSString *why = rawErr.length ? rawErr : RLPTr(@"歌单读取失败");
             [self_ setSubtitle:why];
             RLPToast(why);
             return;
@@ -552,6 +595,8 @@
             ++self_.itemSeq;
             self_.selectedName = @"";
             [self_ setPageTitle:RLPTr(@"歌单")];
+            self_.subtitleErrorRaw = nil;
+            self_.subtitleStateKey = @"loaded";
             [self_ setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self_.playlists.count]];
             [self_.items removeAllObjects];
             [self_.itemTable reloadData];
@@ -577,6 +622,8 @@
     if (![RLPCoreClient shared].started) {
         ++self.itemSeq;
         self.playAllBtn.enabled = NO;
+        self.subtitleErrorRaw = nil;
+        self.subtitleStateKey = @"not_started";
         [self setSubtitle:RLPTr(@"核心未启动")];
         return;
     }
@@ -592,6 +639,8 @@
             [self_.itemTable reloadData];
             self_.emptyLabel.hidden = YES;
             self_.playAllBtn.enabled = NO;
+            self_.subtitleErrorRaw = nil;
+            self_.subtitleStateKey = @"missing";
             // web：失败分支 head(name, '', '') —— 标题仍是歌单名，计数清空。
             [self_ setSubtitle:RLPTr(@"歌单不存在（可能已被删除）")];
             [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:@""];
@@ -611,6 +660,8 @@
         const BOOL hasItems = self_.items.count > 0;
         self_.emptyLabel.hidden = hasItems;
         self_.playAllBtn.enabled = hasItems;
+        self_.subtitleErrorRaw = nil;
+        self_.subtitleStateKey = @"loaded";
         NSString *count = [NSString stringWithFormat:RLPTr(@"%ld 首"), (long)self_.items.count];
         [self_ setSubtitle:count];
         // P8：web head(name, it.length + ' 首') 的第二个参数画在顶栏标题旁（#cnt）。
@@ -618,15 +669,99 @@
     }];
 }
 
+- (void)onPlaylistsClipFrameChanged:(NSNotification *)note {
+    (void)note;
+    [self layoutPlaylistChrome];
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    [self layoutPlaylistChrome];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    [self layoutPlaylistChrome];
+}
+
+- (void)layoutPlaylistChrome {
+    if (!self.isViewLoaded || self.layingOutChrome) return;
+    self.layingOutChrome = YES;
+    if (self.barView && self.barButtons.count) {
+        CGFloat barW = NSWidth(self.barView.bounds);
+        const CGFloat hostBarW = (NSWidth(self.view.bounds) > 33.0) ? (NSWidth(self.view.bounds) - 32.0) : 0.0;
+        if (!(barW > 1.0) || (hostBarW > 1.0 && fabs(barW - hostBarW) > 1.0)) {
+            barW = MAX(200.0, hostBarW);
+        }
+        const CGFloat rowH = 26.0;
+        const CGFloat gapX = 8.0, gapY = 6.0;
+        CGFloat x = 0.0, y = 0.0;
+        NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:self.barButtons.count];
+        for (NSButton *b in self.barButtons) {
+            [b sizeToFit];
+            const CGFloat bw = MIN(barW, MAX(48.0, ceil(NSWidth(b.frame))));
+            const CGFloat bh = MAX(22.0, ceil(NSHeight(b.frame)));
+            if (x > 0.0 && x + bw > barW) {
+                x = 0.0;
+                y += rowH + gapY;
+            }
+            [rects addObject:[NSValue valueWithRect:NSMakeRect(x, y, bw, bh)]];
+            x += bw + gapX;
+        }
+        const CGFloat totalH = y + rowH;
+        for (NSUInteger i = 0; i < self.barButtons.count && i < rects.count; ++i) {
+            const NSRect r = rects[i].rectValue;
+            self.barButtons[i].frame = NSMakeRect(
+                r.origin.x,
+                totalH - (r.origin.y + rowH) + floor((rowH - r.size.height) * 0.5),
+                r.size.width,
+                r.size.height);
+        }
+        if (fabs(self.barHeightConstraint.constant - totalH) > 0.5) {
+            self.barHeightConstraint.constant = totalH;
+            [self.barView setNeedsUpdateConstraints:YES];
+            [self.contentView setNeedsUpdateConstraints:YES];
+            [self.contentView setNeedsLayout:YES];
+            [self.view setNeedsUpdateConstraints:YES];
+            [self.view setNeedsLayout:YES];
+        }
+    }
+    if (self.itemTable && self.itemScroll && self.itemTable.tableColumns.count >= 3) {
+        const CGFloat avail = NSWidth(self.itemScroll.contentView.bounds);
+        if (avail > 1.0) {
+            const CGFloat gaps = 2.0 * self.itemTable.intercellSpacing.width;
+            const CGFloat idxW = 44.0;
+            const CGFloat rem = MAX(160.0, avail - idxW - gaps);
+            const CGFloat titleW = floor(rem * 0.60);
+            const CGFloat dirW = MAX(60.0, rem - titleW);
+            self.itemTable.tableColumns[0].width = idxW;
+            self.itemTable.tableColumns[1].width = titleW;
+            self.itemTable.tableColumns[2].width = dirW;
+            [self.itemTable tile];
+        }
+    }
+    self.layingOutChrome = NO;
+}
+
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     self.itemTable.backgroundColor = t.bg;
     self.emptyLabel.textColor = t.mut;
+    NSIndexSet *sel = [self.itemTable.selectedRowIndexes copy];
+    NSPoint origin = self.itemScroll ? self.itemScroll.contentView.bounds.origin : NSZeroPoint;
     [self.itemTable reloadData];
+    if (sel.count) [self.itemTable selectRowIndexes:sel byExtendingSelection:NO];
+    if (self.itemScroll) {
+        [self.itemScroll.contentView scrollToPoint:origin];
+        [self.itemScroll reflectScrolledClipView:self.itemScroll.contentView];
+    }
 }
 
 - (void)applyLanguage {
+    if (!self.selectedName.length) self.pageTitle = RLPTr(@"歌单");
+    if (!self.isViewLoaded) return;
     self.playAllBtn.title = RLPTr(@"播放整列");
     self.renameBtn.title = RLPTr(@"重命名");
     self.deleteBtn.title = RLPTr(@"删除");
@@ -643,8 +778,19 @@
     if (self.itemTable.tableColumns.count >= 3) {
         self.itemTable.tableColumns[1].title = RLPTr(@"标题");
         self.itemTable.tableColumns[2].title = RLPTr(@"所在目录");
+        [self.itemTable.headerView setNeedsDisplay:YES];
     }
-    if (!self.selectedName.length) {
+    [self layoutPlaylistChrome];
+    if ([self.subtitleStateKey isEqualToString:@"not_started"]) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+    } else if ([self.subtitleStateKey isEqualToString:@"list_failed"]) {
+        [self setSubtitle:(self.subtitleErrorRaw.length ? self.subtitleErrorRaw : RLPTr(@"歌单读取失败"))];
+    } else if ([self.subtitleStateKey isEqualToString:@"loading"]) {
+        [self setSubtitle:RLPTr(@"加载中…")];
+    } else if ([self.subtitleStateKey isEqualToString:@"missing"]) {
+        [self setSubtitle:RLPTr(@"歌单不存在（可能已被删除）")];
+        if (self.view.window) [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:@""];
+    } else if (!self.selectedName.length) {
         self.pageTitle = RLPTr(@"歌单");
         NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 个歌单"), (long)self.playlists.count];
         [self setSubtitle:cnt];

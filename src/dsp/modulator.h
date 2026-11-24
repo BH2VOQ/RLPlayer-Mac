@@ -302,9 +302,6 @@ inline NtfPoly synthesize_ntf(int order, double fs, double fBandHz, double hinf)
         for (size_t i = 0; i < n; ++i) out.p[i] = out.b[i] - out.d[i];
         return out;
     };
-    auto hinfAt = [&](double cornerHz, const std::vector<double>& omegas) {
-        return ntf_hinf_lin(compose(cornerHz, omegas));
-    };
     // corner 二分命中 hinf。H∞(corner) 是 U 形（2026-10-25 实测 DSD64：
     // corner=20k(≈fBand) 处谷底 H∞≈1.07，两侧上升），而带内功率 J 随 corner
     // 增大单调下降（corner=100k 时 J=1e-5，corner=20k 时 J=57）——预算买的

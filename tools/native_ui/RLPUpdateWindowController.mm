@@ -25,6 +25,16 @@
 
 static NSString *const kIgnoredVersionKey = @"RLPIgnoredUpdateVersion";
 
+typedef NS_ENUM(NSInteger, RLPUpdateDisplayState) {
+    RLPUpdateDisplayIdle = 0,
+    RLPUpdateDisplayChecking,
+    RLPUpdateDisplayUpToDate,
+    RLPUpdateDisplayError,
+    RLPUpdateDisplayIgnored,
+    RLPUpdateDisplayAvailable,
+    RLPUpdateDisplayInstalled,
+};
+
 #ifdef RLP_HAVE_UPDATE
 // 安装计划 + 它的取消令牌必须**同生共死**：CancelToken 是 shared_ptr<atomic<bool>>，
 // 复制出来的是同一个标志（见 mac_update.h 的说明）。存成堆对象是为了让 ObjC 属性
@@ -40,7 +50,6 @@ struct RLPUpdatePlan {
 @property (nonatomic, strong) NSView *downloadView;
 @property (nonatomic, strong) NSTextField *titleField;
 @property (nonatomic, strong) NSTextView *notesView;
-@property (nonatomic, strong) NSTextField *hintField;
 @property (nonatomic, strong) NSProgressIndicator *progress;
 @property (nonatomic, strong) NSTextField *progressText;
 @property (nonatomic, strong) NSButton *primaryBtn;
@@ -62,6 +71,10 @@ struct RLPUpdatePlan {
 /// 检查阶段拿到的安装计划：下载/校验/安装全靠它（URL/sha256/size 都由清单给出，
 /// UI 不自己拼 URL——那是安全边界）。没有它就不允许点「立即更新」。
 @property (nonatomic) BOOL hasPlan;
+@property (nonatomic) RLPUpdateDisplayState displayState;
+@property (nonatomic, copy) NSString *ignoredVersionDisplay;
+@property (nonatomic) BOOL errorNotesUsesFallback;
+@property (nonatomic) BOOL installedNotesUsesFallback;
 #ifdef RLP_HAVE_UPDATE
 @property (nonatomic) std::shared_ptr<RLPUpdatePlan> planPtr;
 @property (nonatomic, copy) void (^testInstallRunner)(const rta::update::CheckResult &plan,
@@ -92,12 +105,14 @@ struct RLPUpdatePlan {
 
 - (instancetype)init {
     RLPTheme *t = [RLPTheme current];
-    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 520, 380)
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 380)
                                                 styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                   backing:NSBackingStoreBuffered
                                                     defer:NO];
     win.title = RLPTr(@"软件更新");
+    win.minSize = NSMakeSize(540, 340);
     win.backgroundColor = t.bg;
+    win.appearance = [NSAppearance appearanceNamed:(t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua)];
     win.releasedWhenClosed = NO;
     [win center];
     self = [super initWithWindow:win];
@@ -108,7 +123,16 @@ struct RLPUpdatePlan {
                                              selector:@selector(applyLanguage)
                                                  name:RLPLanguageDidChangeNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applyTheme)
+                                                 name:RLPThemeDidChangeNotification
+                                               object:nil];
     return self;
+}
+
+- (void)showWindow:(id)sender {
+    [self applyTheme];
+    [super showWindow:sender];
 }
 
 - (void)dealloc {
@@ -116,7 +140,54 @@ struct RLPUpdatePlan {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+- (void)refreshLocalizedStateText {
+    switch (self.displayState) {
+        case RLPUpdateDisplayIdle:
+            break;
+        case RLPUpdateDisplayChecking:
+            self.titleField.stringValue = RLPTr(@"正在检查…");
+            break;
+        case RLPUpdateDisplayUpToDate:
+            self.titleField.stringValue = RLPTr(@"已是最新版本");
+            break;
+        case RLPUpdateDisplayError:
+            self.titleField.stringValue = RLPTr(@"检查更新失败");
+            if (self.errorNotesUsesFallback) {
+                self.notesView.string = RLPTr(@"检查更新失败");
+            }
+            break;
+        case RLPUpdateDisplayIgnored:
+            if (self.ignoredVersionDisplay.length) {
+                self.titleField.stringValue = [NSString stringWithFormat:RLPTr(@"%@ 已被忽略"), self.ignoredVersionDisplay];
+            }
+            break;
+        case RLPUpdateDisplayAvailable:
+            if (self.remoteVersion.length) {
+                self.titleField.stringValue = [NSString stringWithFormat:RLPTr(@"发现新版本 %@"), self.remoteVersion];
+            }
+            break;
+        case RLPUpdateDisplayInstalled:
+            self.titleField.stringValue = RLPTr(@"更新已安装");
+            if (self.installedNotesUsesFallback) {
+                self.notesView.string = RLPTr(@"更新已安装");
+            }
+            break;
+    }
+    if (self.installing) {
+        if (self.installStageLocked) {
+            if (self.cancelAttempted) {
+                self.progressText.stringValue = RLPTr(@"安装已开始，无法取消");
+            }
+        } else if (self.cancelling) {
+            self.progressText.stringValue = RLPTr(@"已请求取消");
+        } else if (self.progress.doubleValue <= 0.0) {
+            self.progressText.stringValue = RLPTr(@"准备下载…");
+        }
+    }
+}
+
 - (void)applyLanguage {
+    if (!self.isWindowLoaded) return;
     self.window.title = RLPTr(@"软件更新");
     self.manualBtn.title = RLPTr(@"手动下载");
     self.laterBtn.title = RLPTr(@"稍后");
@@ -127,6 +198,7 @@ struct RLPUpdatePlan {
     } else {
         self.primaryBtn.title = RLPTr(@"立即更新");
     }
+    [self refreshLocalizedStateText];
 }
 
 - (void)buildUI {
@@ -219,11 +291,12 @@ struct RLPUpdatePlan {
         [self.primaryBtn.bottomAnchor constraintEqualToAnchor:root.bottomAnchor constant:-18],
         [self.cancelBtn.trailingAnchor constraintEqualToAnchor:self.primaryBtn.leadingAnchor constant:-8],
         [self.cancelBtn.centerYAnchor constraintEqualToAnchor:self.primaryBtn.centerYAnchor],
-        [self.ignoreBtn.trailingAnchor constraintEqualToAnchor:self.cancelBtn.leadingAnchor constant:-8],
+        [self.ignoreBtn.trailingAnchor constraintEqualToAnchor:self.primaryBtn.leadingAnchor constant:-8],
         [self.ignoreBtn.centerYAnchor constraintEqualToAnchor:self.primaryBtn.centerYAnchor],
         [self.laterBtn.trailingAnchor constraintEqualToAnchor:self.ignoreBtn.leadingAnchor constant:-8],
         [self.laterBtn.centerYAnchor constraintEqualToAnchor:self.primaryBtn.centerYAnchor],
         [self.manualBtn.leadingAnchor constraintEqualToAnchor:root.leadingAnchor constant:20],
+        [self.manualBtn.trailingAnchor constraintLessThanOrEqualToAnchor:self.laterBtn.leadingAnchor constant:-8],
         [self.manualBtn.centerYAnchor constraintEqualToAnchor:self.primaryBtn.centerYAnchor],
     ]];
 }
@@ -290,6 +363,10 @@ struct RLPUpdatePlan {
     self.autoRestartScheduled = NO;
     self.terminationConfirmed = NO;
     [self invalidatePlan];
+    self.displayState = RLPUpdateDisplayIdle;
+    self.ignoredVersionDisplay = nil;
+    self.errorNotesUsesFallback = NO;
+    self.installedNotesUsesFallback = NO;
     self.titleField.stringValue = @"";
     self.notesView.string = @"";
     [self switchToInfoState];
@@ -356,6 +433,10 @@ struct RLPUpdatePlan {
     }
     // 重新检查即禁用旧计划，防止在途检查期间或后续失败时误装陈旧版本。
     [self invalidatePlan];
+    self.displayState = RLPUpdateDisplayChecking;
+    self.ignoredVersionDisplay = nil;
+    self.errorNotesUsesFallback = NO;
+    self.installedNotesUsesFallback = NO;
     self.titleField.stringValue = RLPTr(@"正在检查…");
     self.notesView.string = @"";
     self.checking = YES;
@@ -418,6 +499,9 @@ struct RLPUpdatePlan {
 
     if (r.up_to_date()) {
         [self invalidatePlan];
+        self.displayState = RLPUpdateDisplayUpToDate;
+        self.errorNotesUsesFallback = NO;
+        self.installedNotesUsesFallback = NO;
         self.titleField.stringValue = RLPTr(@"已是最新版本");
         self.notesView.string = @"";
         [self switchToInfoState];
@@ -429,9 +513,11 @@ struct RLPUpdatePlan {
         [self invalidatePlan];
         NSString *err = [NSString stringWithUTF8String:r.error.c_str()] ?: @"";
         NSString *shownErr = err.length ? err : RLPTr(@"检查更新失败");
+        self.displayState = RLPUpdateDisplayError;
+        self.errorNotesUsesFallback = (err.length == 0);
+        self.installedNotesUsesFallback = NO;
         self.titleField.stringValue = RLPTr(@"检查更新失败");
         self.notesView.string = shownErr;
-        self.hintField.stringValue = err;
         [self switchToInfoState];
         if (manually) {
             RLPToast(shownErr);
@@ -441,6 +527,9 @@ struct RLPUpdatePlan {
     }
     if (!version.length) {
         [self invalidatePlan];
+        self.displayState = RLPUpdateDisplayError;
+        self.errorNotesUsesFallback = YES;
+        self.installedNotesUsesFallback = NO;
         self.titleField.stringValue = RLPTr(@"检查更新失败");
         self.notesView.string = RLPTr(@"检查更新失败");
         [self switchToInfoState];
@@ -452,6 +541,10 @@ struct RLPUpdatePlan {
     }
     if ([RLPUpdateWindowController isVersionIgnored:version]) {
         [self invalidatePlan];
+        self.displayState = RLPUpdateDisplayIgnored;
+        self.ignoredVersionDisplay = version;
+        self.errorNotesUsesFallback = NO;
+        self.installedNotesUsesFallback = NO;
         self.titleField.stringValue = [NSString stringWithFormat:RLPTr(@"%@ 已被忽略"), version];
         self.notesView.string = @"";
         [self switchToInfoState];
@@ -464,6 +557,10 @@ struct RLPUpdatePlan {
     ptr->plan = r;
     self.planPtr = ptr;
     self.hasPlan = YES;
+    self.displayState = RLPUpdateDisplayAvailable;
+    self.ignoredVersionDisplay = nil;
+    self.errorNotesUsesFallback = NO;
+    self.installedNotesUsesFallback = NO;
     self.titleField.stringValue = [NSString stringWithFormat:RLPTr(@"发现新版本 %@"), version];
     self.notesView.string = notes;
     [self switchToInfoState];
@@ -564,6 +661,9 @@ struct RLPUpdatePlan {
                 self_.autoRestartScheduled = autoRestartScheduled;
                 [self_ invalidatePlan];
                 NSString *statusMsg = msg.length ? msg : RLPTr(@"更新已安装");
+                self_.displayState = RLPUpdateDisplayInstalled;
+                self_.errorNotesUsesFallback = NO;
+                self_.installedNotesUsesFallback = (msg.length == 0);
                 self_.titleField.stringValue = RLPTr(@"更新已安装");
                 self_.notesView.string = statusMsg;
                 [self_ switchToInfoState];
@@ -693,6 +793,10 @@ struct RLPUpdatePlan {
         [self showToastMessage:[NSString stringWithFormat:RLPTr(@"已忽略 %@"), ignoredVer]];
     }
     [self invalidatePlan];
+    self.displayState = RLPUpdateDisplayIdle;
+    self.ignoredVersionDisplay = nil;
+    self.errorNotesUsesFallback = NO;
+    self.installedNotesUsesFallback = NO;
     self.titleField.stringValue = @"";
     self.notesView.string = @"";
     [self.window close];
@@ -777,11 +881,18 @@ struct RLPUpdatePlan {
 }
 
 - (void)applyTheme {
+    if (!self.isWindowLoaded) return;
     RLPTheme *t = [RLPTheme current];
+    self.window.appearance = [NSAppearance appearanceNamed:(t.isLight ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua)];
     self.window.backgroundColor = t.bg;
-    self.window.contentView.layer.backgroundColor = t.bg.CGColor;
+    if (self.window.contentView) {
+        self.window.contentView.wantsLayer = YES;
+        self.window.contentView.layer.backgroundColor = t.bg.CGColor;
+    }
     self.titleField.textColor = t.text;
+    self.notesView.font = t.body;
     self.notesView.textColor = t.text;
+    self.notesView.insertionPointColor = t.accent;
     self.progressText.textColor = t.mut;
 }
 

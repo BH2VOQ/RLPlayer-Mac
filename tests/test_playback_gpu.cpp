@@ -19,6 +19,8 @@
 //   gpuUsed = 本次播放 GPU 真的参与了计算（升频 或 卷积）
 // 判据是"字段组合"，不是"能编译"——3 个真实场景（可用未参与 / 参与 / 不可用）逐条对齐。
 #include "meta/statusflags.h"
+#include "dsp/gpu_pref.h"
+#include "engine/pipeline.h"
 
 #include <cstdio>
 #include <string>
@@ -122,6 +124,27 @@ int main() {
         next.convGpu = false;
         const PlaybackGpuFlags c = playback_gpu_flags(next);
         ck(a.gpuUsed && !c.gpuUsed, "上一曲 gpuUsed=1、下一曲 gpuUsed=0（每曲复位是调用方的责任）");
+    }
+
+    // ---------------- 7) 统一 gpuvendor 开关语义（本地 + UPnP 升频共用） ----------------
+    std::printf("-- 7. gpuvendor 统一切换（auto 默认走 CPU 64-bit，metal 显式开启）--\n");
+    {
+        ck(!rta::dsp::gpu_vendor_wants_metal_resample(""), "空串 -> 默认 auto -> 升频走 64-bit CPU");
+        ck(!rta::dsp::gpu_vendor_wants_metal_resample("auto"), "auto -> 升频走 64-bit CPU");
+        ck(!rta::dsp::gpu_vendor_wants_metal_resample("Auto"), "Auto 大小写兼容 -> 升频走 64-bit CPU");
+        ck(!rta::dsp::gpu_vendor_wants_metal_resample("off"), "off -> 升频走 64-bit CPU");
+        ck(rta::dsp::gpu_vendor_wants_metal_resample("metal"), "metal -> 显式启用 Metal GPU 升频");
+        ck(rta::dsp::gpu_vendor_wants_metal_resample(" Metal "), "Metal 去空白大小写兼容");
+
+        rta::engine::PipelineConfig defCfg;
+        ck(!defCfg.gpuResample, "PipelineConfig 默认 gpuResample=false（默认走 64-bit CPU）");
+
+        const std::string savedVendor = rta::dsp::gpu_vendor();
+        rta::dsp::set_gpu_vendor("auto");
+        ck(!rta::dsp::gpu_dll_candidates().empty(), "auto 仍保留 Metal 候选库供 IR 卷积与 /api/gpu 探测");
+        rta::dsp::set_gpu_vendor("off");
+        ck(rta::dsp::gpu_dll_candidates().empty(), "off 时不加载任何 GPU 候选库（纯 CPU）");
+        rta::dsp::set_gpu_vendor(savedVendor);
     }
 
     std::printf("\n%s（失败 %d 项）\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

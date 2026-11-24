@@ -1245,9 +1245,120 @@
 
 @end
 
+#pragma mark - 聆听室滚动容器与翻转文档视图
+
+/// 聆听室文档视图（翻转坐标：原点左上、y 向下）：
+/// 非翻转 NSStackView 在内容超出可视区且仅约束 topAnchor 时，frame.origin.y 会落为负值，
+/// 切入或从其他页签切回聆听室时若把可见区重置到正 y，会在顶部留出一整块空白直至手动滚动才夹回。
+/// 改成翻转坐标系后「顶部」恒为 origin.y = -contentInsets.top（通常 0.0），异步增删专辑行也只会向下生长。
+@interface RLPQuickStartDocView : NSStackView
+@end
+
+@implementation RLPQuickStartDocView
+- (BOOL)isFlipped { return YES; }
+@end
+
+@interface RLPQuickStartScrollView : NSScrollView
+- (void)pinToTopNow;
+- (void)clampVerticalScrollIfNeeded;
+@end
+
+@implementation RLPQuickStartScrollView {
+    BOOL _rlpSyncingWidth;
+}
+
+- (void)clampVerticalScrollIfNeeded {
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    if (!clip || !doc) return;
+    const CGFloat clipH = clip.bounds.size.height;
+    const NSRect docF = doc.frame;
+    if (clipH <= 1.0 || docF.size.height <= 1.0) return;
+    const CGFloat minY = doc.isFlipped
+        ? -self.contentInsets.top
+        : MIN(NSMinY(docF), NSMaxY(docF) - clipH + self.contentInsets.top);
+    const CGFloat maxY = doc.isFlipped
+        ? MAX(minY, NSMaxY(docF) - clipH + self.contentInsets.bottom)
+        : MAX(minY, NSMaxY(docF) - clipH + self.contentInsets.top);
+    NSPoint o = clip.bounds.origin;
+    if (o.y > maxY + 0.5 || o.y < minY - 0.5) {
+        o.y = MIN(maxY, MAX(minY, o.y));
+        [clip scrollToPoint:o];
+        [self reflectScrolledClipView:clip];
+    }
+}
+
+- (void)pinToTopNow {
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    if (!clip || !doc) return;
+    [clip layoutSubtreeIfNeeded];
+    [doc layoutSubtreeIfNeeded];
+    const NSRect docF = doc.frame;
+    const CGFloat clipH = clip.bounds.size.height;
+    const CGFloat topY = doc.isFlipped
+        ? -self.contentInsets.top
+        : MAX(NSMinY(docF), NSMaxY(docF) - clipH + self.contentInsets.top);
+    if (fabs(clip.bounds.origin.y - topY) > 0.5) {
+        [clip scrollToPoint:NSMakePoint(clip.bounds.origin.x, topY)];
+        [self reflectScrolledClipView:clip];
+    }
+}
+
+- (void)tile {
+    const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
+    [super tile];
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
+    if (clip && doc && clipW > 1.0 &&
+        (fabs(clipW - prevClipW) > 0.5 ||
+         fabs(doc.frame.size.width - clipW) > 0.5 ||
+         fabs(doc.bounds.size.width - clipW) > 0.5)) {
+        [clip setNeedsLayout:YES];
+        [doc setNeedsLayout:YES];
+        [self setNeedsLayout:YES];
+    }
+    [self clampVerticalScrollIfNeeded];
+}
+
+- (void)layout {
+    const CGFloat prevClipW = self.contentView ? self.contentView.bounds.size.width : 0.0;
+    [super layout];
+    if (_rlpSyncingWidth) return;
+    NSClipView *clip = self.contentView;
+    NSView *doc = self.documentView;
+    const CGFloat clipW = clip ? clip.bounds.size.width : 0.0;
+    if (!clip || !doc || clipW <= 1.0) {
+        [self clampVerticalScrollIfNeeded];
+        return;
+    }
+    if (fabs(clipW - prevClipW) > 0.5 ||
+        fabs(doc.frame.size.width - clipW) > 0.5 ||
+        fabs(doc.bounds.size.width - clipW) > 0.5) {
+        _rlpSyncingWidth = YES;
+        for (int pass = 0; pass < 2; ++pass) {
+            const CGFloat curClipW = clip.bounds.size.width;
+            if (curClipW <= 1.0) break;
+            if (fabs(doc.frame.size.width - curClipW) <= 0.5 &&
+                fabs(doc.bounds.size.width - curClipW) <= 0.5) {
+                break;
+            }
+            [clip setNeedsLayout:YES];
+            [doc setNeedsLayout:YES];
+            [super layout];
+        }
+        _rlpSyncingWidth = NO;
+    }
+    [self clampVerticalScrollIfNeeded];
+}
+
+@end
+
 #pragma mark - 聆听室主控制器
 
 @interface RLPQuickStartViewController ()
+@property (nonatomic, strong) RLPQuickStartScrollView *roomScroll;
 @property (nonatomic, strong) NSStackView *stack;
 @property (nonatomic, strong) NSView *headerRow;
 @property (nonatomic, strong) NSTextField *headerTitle;
@@ -1760,7 +1871,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
 
 - (void)buildContent {
     NSView *host = self.contentView;
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    RLPQuickStartScrollView *scroll = [[RLPQuickStartScrollView alloc] initWithFrame:NSZeroRect];
     scroll.drawsBackground = NO;
     scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
@@ -1769,8 +1880,9 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     scroll.scrollerStyle = NSScrollerStyleOverlay;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     [host addSubview:scroll];
+    self.roomScroll = scroll;
 
-    self.stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.stack = [[RLPQuickStartDocView alloc] initWithFrame:NSZeroRect];
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.stack.alignment = NSLayoutAttributeLeading;
     self.stack.spacing = 16;
@@ -3222,7 +3334,8 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         NSString *reason = [st[@"reason"] isKindOfClass:[NSString class]] ? st[@"reason"] : @"";
         NSString *result = [st[@"result"] isKindOfClass:[NSString class]] ? st[@"result"] : @"";
         const BOOL isCurrent = ([curProf isEqualToString:pkey] ||
-                                ([pkey isEqualToString:@"pcm2dsd"] && [curProf isEqualToString:@"dsd"]));
+                                ([pkey isEqualToString:@"pcm2dsd"] && [curProf isEqualToString:@"dsd"]) ||
+                                ([pkey isEqualToString:@"dsd"] && [curProf isEqualToString:@"pcm2dsd"]));
         NSButton *b = [self popRowWithTitle:o[2] note:o[3] on:isCurrent action:@selector(onPickPlayMode:) ident:[o[0] stringValue]];
         b.enabled = enabled;
         if (!enabled && reason.length) {
@@ -3588,6 +3701,19 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         __typeof__(self) self_ = weakSelf;
         if (!self_ || writeSeq != self_.settingsWriteSeq) return;
         if (json && [json[@"ok"] boolValue]) {
+            if ([json[@"kv"] isKindOfClass:[NSDictionary class]]) {
+                self_.settings = json[@"kv"];
+                self_.localDevice = RLPRememberedLocalDevice(self_.settings, self_.localDevice);
+                [self_ syncDeviceSelection];
+                NSString *capsKey = [self_ currentPresetCapsKey];
+                if (![capsKey isEqualToString:self_.presetCapsKey ?: @""]) {
+                    self_.presetCapsKey = capsKey;
+                    [self_ loadPresetCaps:YES];
+                }
+                [self_ syncOutputSummary];
+                [self_ syncPlayAndStyleCards];
+                [self_ syncCapabilitiesUI];
+            }
             RLPToast(RLPTr(@"已生效"));
             [self_ reloadSettings];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification
@@ -3823,7 +3949,9 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
 #pragma mark - 数据
 
 - (void)activate {
+    [self.roomScroll pinToTopNow];
     [self reloadAll];
+    [self.roomScroll pinToTopNow];
     if (!self.poll && [RLPCoreClient shared].started) {
         __weak __typeof__(self) weakSelf = self;
         self.poll = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
@@ -3844,12 +3972,16 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     [self reloadQueue];
 }
 
-- (void)viewDidDisappear {
-    [self.popover close];
-    self.popover = nil;
+- (void)stopPolling {
     [self.poll invalidate];
     self.poll = nil;
     ++self.statusEpoch;
+}
+
+- (void)viewDidDisappear {
+    [self.popover close];
+    self.popover = nil;
+    [self stopPolling];
     self.statusInflight = NO;
     ++self.queueSeq;
     self.queueInflightSeq = 0;
@@ -4020,13 +4152,8 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     NSDictionary *dev = [self.presetCapsJSON[@"device"] isKindOfClass:[NSDictionary class]]
         ? self.presetCapsJSON[@"device"] : nil;
     NSString *kvBackend = [self str:@"backend" def:@""];
-    NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
     const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
-    const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
-    const BOOL castActive = [self.presetCapsJSON[@"castActive"] respondsToSelector:@selector(boolValue)] &&
-                            [self.presetCapsJSON[@"castActive"] boolValue];
-    const BOOL capsMismatch = (kvBackend.length > 0 && capBackend.length > 0 &&
-                               ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive)));
+    const BOOL capsMismatch = [[self class] isCapsJSON:self.presetCapsJSON mismatchedWithSettings:self.settings];
     if (capsMismatch) dev = nil;
     if ([prof isEqualToString:@"bitperfect"]) {
         self.playValue.stringValue = RLPTr(@"原音直通");
@@ -4059,24 +4186,54 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
                 }
                 self.playSub.stringValue = [NSString stringWithFormat:@"%.1f kHz", capped / 1000.0];
             } else if (rateSet.doubleValue > 0) {
-                self.playSub.stringValue = [NSString stringWithFormat:@"%.1f kHz", rateSet.doubleValue / 1000.0];
+                double displayRate = rateSet.doubleValue;
+                if (kvIsUpnp) {
+                    const double ceil = [self.presetCapsJSON[@"castCeiling"] respondsToSelector:@selector(doubleValue)]
+                        ? [self.presetCapsJSON[@"castCeiling"] doubleValue] : 0.0;
+                    double cap = (ceil > 0 && ceil < displayRate) ? ceil : displayRate;
+                    NSArray *rates = [dev[@"rates"] isKindOfClass:[NSArray class]] ? (NSArray *)dev[@"rates"] : @[];
+                    double best = 0;
+                    for (id r in rates) {
+                        if ([r respondsToSelector:@selector(doubleValue)]) {
+                            const double v = [r doubleValue];
+                            if (v <= cap && v > best) best = v;
+                        }
+                    }
+                    if (best > 0) displayRate = best;
+                    else if (maxRate > 0 && maxRate < cap) displayRate = maxRate;
+                    else displayRate = cap;
+                }
+                self.playSub.stringValue = [NSString stringWithFormat:@"%.1f kHz", displayRate / 1000.0];
             } else {
                 self.playSub.stringValue = RLPTr(@"按设备能力匹配 PCM 升频规格");
             }
         } else if ([prof isEqualToString:@"dsd"] || [prof isEqualToString:@"pcm2dsd"]) {
             self.playValue.stringValue = RLPTr(@"DSD 升频");
-            NSString *dsdVal = [self str:@"dsd" def:@""];
+            const NSInteger dsdNum = RLPParseDsdRate(self.settings[@"dsd"]);
             NSString *dopMax = [dev[@"dopMax"] isKindOfClass:[NSString class]] ? dev[@"dopMax"] : @"";
             NSString *shaper = [self str:@"shaper" def:@""];
-            NSString *rateTag = dsdVal.length ? dsdVal.uppercaseString
-                              : (dopMax.length ? dopMax.uppercaseString : RLPTr(@"支持 DoP 输出"));
-            self.playSub.stringValue = shaper.length
-                ? [NSString stringWithFormat:@"%@ · %@", rateTag, shaper]
-                : rateTag;
+            NSString *modFam = [self str:@"modfamily" def:@""];
+            NSString *modOrd = [self str:@"modorder" def:@""];
+            NSString *rateTag = (dsdNum > 0)
+                ? [NSString stringWithFormat:@"DSD%ld", (long)dsdNum]
+                : (dopMax.length ? dopMax.uppercaseString : RLPTr(@"支持 DoP 输出"));
+            NSString *detailTag = (modFam.length && modOrd.length)
+                ? [NSString stringWithFormat:@"%@-%@", modFam.uppercaseString, modOrd]
+                : ((shaper.length && ![shaper isEqualToString:@"none"]) ? shaper : @"DoP");
+            self.playSub.stringValue = [NSString stringWithFormat:@"%@ · %@", rateTag, detailTag];
         } else {
-            self.playValue.stringValue = RLPTr(@"自定义播放方式");
-            NSString *rateSet = [self str:@"rate" def:@""];
-            self.playSub.stringValue = rateSet.length ? rateSet : RLPTr(@"自定义");
+            NSString *declProf = [self str:@"ui_profile" def:@""];
+            const BOOL intentUpsample = [declProf isEqualToString:@"pcm"] ||
+                                        [declProf isEqualToString:@"dsd"] ||
+                                        [declProf isEqualToString:@"pcm2dsd"];
+            if (intentUpsample) {
+                self.playValue.stringValue = RLPTr(@"按设备降级（原采样率）");
+                self.playSub.stringValue = RLPTr(@"当前输出不支持升频，切回高规格设备将自动恢复");
+            } else {
+                self.playValue.stringValue = RLPTr(@"自定义播放方式");
+                NSString *rateSet = [self str:@"rate" def:@""];
+                self.playSub.stringValue = rateSet.length ? rateSet : RLPTr(@"自定义");
+            }
         }
         NSString *f = [self str:@"filter" def:@""];
         NSInteger st = RLPToneStyleForFilter(f, self.filters);
@@ -4325,7 +4482,6 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
 - (void)reloadQueue {
     const NSUInteger seq = ++self.queueSeq;
     self.queueInflightSeq = seq;
-    // TODO(debug): remove before commit
     __weak __typeof__(self) weakSelf = self;
     // 队列契约：GET /api/queue?meta=1 → {items:[路径…], cues:[[cs,ce]…], metas:[{t,a,al,d}…], index/current/cur}
     [[RLPCoreClient shared] getJSON:@"/api/queue?meta=1" completion:^(NSDictionary * _Nullable json) {
@@ -4354,7 +4510,6 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     self.queuePaths = @[];
     self.queueCues = @[];
     self.queueCurrentIndex = -1;
-    // TODO(debug): remove before commit
     for (NSView *v in [self.queueList.arrangedSubviews copy]) {
         [self.queueList removeArrangedSubview:v];
         [v removeFromSuperview];
@@ -4427,8 +4582,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
 
     const NSInteger curIdx = RLPRoomResolveQueueCurrentIndex(json, paths);
     self.queueCurrentIndex = curIdx;
-    // TODO(debug): remove before commit
-     
+
     for (NSView *v in [self.queueList.arrangedSubviews copy]) {
         [self.queueList removeArrangedSubview:v];
         [v removeFromSuperview];
@@ -4681,12 +4835,14 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
         [self.albumRow addArrangedSubview:rowStack];
         [[rowStack.widthAnchor constraintEqualToAnchor:self.albumRow.widthAnchor] setActive:YES];
     }
+    [self.roomScroll clampVerticalScrollIfNeeded];
 }
 
 #pragma mark - 主题
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
 
     for (NSView *c in self.cardSurfaces) {
@@ -4804,6 +4960,29 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
 }
 
 /// 纯函数：`/api/preset/caps` 响应 → @{known, pcmReady, dsdReady}。
++ (BOOL)isCapsJSON:(NSDictionary * _Nullable)json mismatchedWithSettings:(NSDictionary * _Nullable)kv {
+    NSDictionary *dev = [json[@"device"] isKindOfClass:[NSDictionary class]] ? json[@"device"] : nil;
+    NSString *kvBackend = [kv[@"backend"] isKindOfClass:[NSString class]] ? kv[@"backend"] : @"";
+    NSString *capBackend = [dev[@"backend"] isKindOfClass:[NSString class]] ? dev[@"backend"] : @"";
+    const BOOL castActive = [json[@"castActive"] respondsToSelector:@selector(boolValue)] &&
+                            [json[@"castActive"] boolValue];
+    const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
+    const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
+    if (kvBackend.length > 0 && capBackend.length > 0 &&
+        ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive))) {
+        return YES;
+    }
+    NSString *probeKey = [json[@"probeKey"] isKindOfClass:[NSString class]] ? json[@"probeKey"] : @"";
+    if (probeKey.length > 0 && kv.count > 0 && !castActive) {
+        NSString *effBk = kvBackend.length ? kvBackend : @"coreaudio";
+        NSString *devId = [kv[@"device"] isKindOfClass:[NSString class]] ? kv[@"device"] : @"";
+        NSString *upnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
+        NSString *wantKey = [NSString stringWithFormat:@"%@|%@|%@", effBk, devId, upnpDev];
+        if (![probeKey isEqualToString:wantKey]) return YES;
+    }
+    return NO;
+}
+
 + (NSDictionary<NSString *, NSNumber *> *)gatingForCapsJSON:(NSDictionary * _Nullable)json {
     const id okv = json[@"ok"];
     const BOOL ok = [okv respondsToSelector:@selector(boolValue)] && [okv boolValue];
@@ -4864,10 +5043,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
                           ([backend isEqualToString:@"upnp"] ||
                            [capBackend isEqualToString:@"upnp"] ||
                            castActive);
-    const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
-    const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
-    const BOOL capsMismatch = (kvBackend.length > 0 && capBackend.length > 0 &&
-                               ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive)));
+    const BOOL capsMismatch = [self isCapsJSON:json mismatchedWithSettings:kv];
     const BOOL known = rawKnown && !capsMismatch;
     const BOOL pcmReady = rawPcmReady && !capsMismatch;
     const BOOL dsdReady = rawDsdReady && !capsMismatch;
@@ -4995,8 +5171,7 @@ static NSInteger RLPRoomResolveQueueCurrentIndex(NSDictionary * _Nullable json, 
     const BOOL kvIsUpnp = [kvBackend isEqualToString:@"upnp"];
     const BOOL capIsRemote = [capBackend isEqualToString:@"upnp"] || [capBackend isEqualToString:@"airplay"];
     const BOOL isRemote = kvIsUpnp || capIsRemote || castActive;
-    const BOOL capsMismatch = (kvBackend.length > 0 && capBackend.length > 0 &&
-                               ((kvIsUpnp && !capIsRemote) || (!kvIsUpnp && capIsRemote && !castActive)));
+    const BOOL capsMismatch = [[self class] isCapsJSON:self.presetCapsJSON mismatchedWithSettings:self.settings];
     if (capsMismatch) dev = nil;
 
     NSDictionary<NSString *, NSDictionary *> *statuses =

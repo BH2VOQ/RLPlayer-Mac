@@ -27,11 +27,11 @@ ctrl	askCancel	src/net/ui_script.h:3630	RLPSupport.mm:152	同上：NSAlert 自�
 ctrl	cfYes	src/net/ui_script.h:3651	RLPFoldersViewController.mm:334	原生确认框用 NSAlert 的两个系统按钮（runModal 返回 First/SecondButtonReturn），无 web 的 DOM 按钮
 ctrl	cfNo	src/net/ui_script.h:3650	RLPFoldersViewController.mm:334	同上：确认框的两个按钮由 NSAlert 提供
 ctrl	modal	src/net/ui_script.h:3487	RLPSupport.mm:308	web 的整页遮罩是 DOM 模态层；原生模态用 NSAlert / RLPShowCardPopover（系统控件），无同名遮罩控件
-ctrl	mclose	src/net/ui_script.h:6626	RLPSupport.mm:308	同上：原生弹层由系统按钮/遮罩关闭，无 web 的 #mclose 按钮
+ctrl	mclose	src/net/ui_script.h:6737	RLPSupport.mm:308	同上：原生弹层由系统按钮/遮罩关闭，无 web 的 #mclose 按钮
 ctrl	wMin	src/net/ui_script.h:1082	RLPMainWindowController.mm:131	原生窗口用 AppKit 标题栏红绿灯（NSWindowStyleMaskMiniaturizable），web 自绘的最小化键无对应控件
 ctrl	wMax	src/net/ui_script.h:1049	RLPMainWindowController.mm:131	同上：最大化 = NSWindowStyleMaskResizable 的系统按钮
 ctrl	wClose	src/net/ui_script.h:1084	RLPMainWindowController.mm:131	同上：关闭 = NSWindowStyleMaskClosable 的系统按钮
-ctrl	bHelp	src/net/ui_script.h:6607	RLPShortcuts.mm:17	web 的「快捷键与提示」浮层；原生快捷键走系统菜单 keyEquivalent，无帮助浮层控件
+ctrl	bHelp	src/net/ui_script.h:6718	RLPShortcuts.mm:17	web 的「快捷键与提示」浮层；原生快捷键走系统菜单 keyEquivalent，无帮助浮层控件
 ctrl	bSearchClear	src/net/ui_script.h:1815	无对应实现（原生空态由各页 empty 视图承担：albums.emptyAdd / folders.empty / recent.empty，没有「清空搜索词」按钮）	web 搜索空态里的跳转按钮，原生空态没有这个按钮
 ctrl	qClear	src/net/ui_script.h:1816	RLPMainWindowController.mm:203	web 顶栏搜索旁的自绘清除键；原生用 NSSearchField 自带的系统 cancel 按钮（回车/清除走 onSearch:），无独立 #qClear
 ctrl	lstRetry	src/net/ui_script.h:950	RLPWorksViewController.mm:296	web 通用取数失败占位的「重试」按钮；原生各页有各自重试入口（works.retry / remote.empty.retry / knowledgeRefresh），无通用控件
@@ -41,20 +41,20 @@ ctrl	bBioToggle	src/net/ui_script.h:2858	RLPArtistDetailViewController.mm:262	we
 ctrl	bAll	src/net/ui_script.h:2748	RLPAlbumsViewController.mm:294	web 专辑子集页「返回全部专辑」；原生没有专辑子集视图（专辑页始终是全部专辑）
 ctrl	pickNewSq	src/net/ui_script.h:3888	RLPTrackActions.mm:207	原生保存到歌单用 NSPopover 弹层（内联「新歌单名」输入 + 保存），无独立「新建歌单…」按钮
 ctrl	pickCancelSq	src/net/ui_script.h:3885	RLPTrackActions.mm:207	同上：弹层由 NSPopover 关闭，无 web 的「取消」按钮
-ctrl	ralbPlayAll	src/net/ui_script.h:5667	RLPStreamingViewController.mm:523	原生流媒体页只做目录浏览 + 行点击播放，没有 web 远程专辑详情页的「播放整张」
-ctrl	ralbAdd	src/net/ui_script.h:5670	RLPStreamingViewController.mm:523	同上：没有「整张加入队列」的远程专辑操作
-ctrl	ralbShuf	src/net/ui_script.h:5674	RLPStreamingViewController.mm:523	同上：没有远程专辑「随机播放」
-ctrl	bRoomWiz	src/net/ui_script.h:6522	无对应实现（web 房间测量卡片 roomCorrCard 整块 display:none；原生 RLPCalibrationView 只加载 EQ/IR 文件，无测量向导）	web 房间测量向导本版禁用，原生也没有测量链路，控件无对应实现
-ctrl	rcGo	src/net/ui_script.h:11038	无对应实现（同上：房间测量卡片 roomCorrCard 整块 display:none，原生无测量向导）	房间测量「确认并开始测量」随向导一起禁用
-ctrl	rcCancel2	src/net/ui_script.h:11039	无对应实现（同上：房间测量卡片 roomCorrCard 整块 display:none）	房间测量「取消」随向导一起禁用
+ctrl	ralbPlayAll	src/net/ui_script.h:5750	RLPStreamingViewController.mm:523	原生流媒体页只做目录浏览 + 行点击播放，没有 web 远程专辑详情页的「播放整张」
+ctrl	ralbAdd	src/net/ui_script.h:5751	RLPStreamingViewController.mm:523	同上：没有「整张加入队列」的远程专辑操作
+ctrl	ralbShuf	src/net/ui_script.h:5752	RLPStreamingViewController.mm:523	同上：没有远程专辑「随机播放」
+ctrl	bRoomWiz	src/net/ui_script.h:6633	无对应实现（web 房间测量卡片 roomCorrCard 整块 display:none；原生 RLPCalibrationView 只加载 EQ/IR 文件，无测量向导）	web 房间测量向导本版禁用，原生也没有测量链路，控件无对应实现
+ctrl	rcGo	src/net/ui_script.h:11155	无对应实现（同上：房间测量卡片 roomCorrCard 整块 display:none，原生无测量向导）	房间测量「确认并开始测量」随向导一起禁用
+ctrl	rcCancel2	src/net/ui_script.h:11156	无对应实现（同上：房间测量卡片 roomCorrCard 整块 display:none）	房间测量「取消」随向导一起禁用
 ctrl	rmdGo	src/net/ui_script.h:3488	无对应实现（同上：迁移/删除确认按钮在 roomCorrCard 内，整块 display:none）	房间测量的确认按钮随向导禁用
 ctrl	rmdCancel	src/net/ui_script.h:3487	无对应实现（同上：roomCorrCard 整块 display:none）	房间测量的取消按钮随向导禁用
-ctrl	bSaveRoomEq	src/net/ui_script.h:12165	无对应实现（同上：roomCorrCard 整块 display:none，原生无房间 EQ 保存入口）	房间 EQ 保存按钮随向导禁用
+ctrl	bSaveRoomEq	src/net/ui_script.h:12282	无对应实现（同上：roomCorrCard 整块 display:none，原生无房间 EQ 保存入口）	房间 EQ 保存按钮随向导禁用
 ctrl	sRep	src/net/ui_script.h:2436	RLPSettingsViewController.mm:1592	原生把循环方式放在设置·通用（sp_rep，同一 /api/playmode 路径），无同名快捷面板控件
-ctrl	sShuf	src/net/ui_script.h:4039	RLPSettingsViewController.mm:1596	原生随机播放在设置·通用（sp_shuf，同一 /api/shuffle），无同名控件
-ctrl	sLoud	src/net/ui_script.h:4764	RLPSettingsViewController.mm:1600	原生等响度补偿在设置·通用（sp_loud，settings 键 loudness），无同名控件
-ctrl	sp_naa_dev	src/net/ui_script.h:7632	无对应实现（NAA/RTANet 在 macOS 无驱动体系；web 已把 NAA 从输出后端下拉移除，原生后端也不含 NAA）	NAA 设备下拉在原生无对象
-ctrl	sp_naa_scan	src/net/ui_script.h:7663	无对应实现（同上：NAA 已从 macOS 后端移除，原生无 NAA 发现入口）	NAA 设备扫描在原生无对象
-ctrl	sp_naahost	src/net/ui_script.h:7651	无对应实现（同上：NAA 主机地址在 macOS 端不可用）	NAA 主机地址在原生无对象
+ctrl	sShuf	src/net/ui_script.h:4061	RLPSettingsViewController.mm:1596	原生随机播放在设置·通用（sp_shuf，同一 /api/shuffle），无同名控件
+ctrl	sLoud	src/net/ui_script.h:4786	RLPSettingsViewController.mm:1600	原生等响度补偿在设置·通用（sp_loud，settings 键 loudness），无同名控件
+ctrl	sp_naa_dev	src/net/ui_script.h:7747	无对应实现（NAA/RTANet 在 macOS 无驱动体系；web 已把 NAA 从输出后端下拉移除，原生后端也不含 NAA）	NAA 设备下拉在原生无对象
+ctrl	sp_naa_scan	src/net/ui_script.h:7778	无对应实现（同上：NAA 已从 macOS 后端移除，原生无 NAA 发现入口）	NAA 设备扫描在原生无对象
+ctrl	sp_naahost	src/net/ui_script.h:7766	无对应实现（同上：NAA 主机地址在 macOS 端不可用）	NAA 主机地址在原生无对象
 ctrl	npGrip	src/net/ui_script.h:1072	RLPMainWindowController.mm:130	web 全屏覆盖层的自绘拖拽条；原生窗口拖拽由 AppKit 标题栏承担，无该控件
 api	/api/repeat	src/net/ui_script.h:0refs;tools/rtaweb.cpp:12683	无对应实现（tools/native_ui/*.mm 0 次引用该路径；设置页改用 /api/playmode）	web 前端 0 次引用（改用 /api/playmode）；/api/repeat 只读 body 的 rate，旧原生调用恒被归零，故按 Web 口径改用 /api/playmode。

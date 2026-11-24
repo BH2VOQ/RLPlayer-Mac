@@ -210,6 +210,68 @@ int main() {
     }
     std::printf("\n");
 
+    {
+        std::printf("[5b] CaptureFifo SPSC 并发完整性与 srcNull 生命周期契约\n");
+        rta::platform::detail::CaptureFifo fifo;
+        fifo.reset(256, 2);
+        constexpr size_t kTotalFrames = 8000;
+        std::atomic<bool> producerDone{false};
+        std::thread prod([&] {
+            std::vector<float> blk(64 * 2);
+            size_t sent = 0;
+            while (sent < kTotalFrames) {
+                const size_t chunk = (kTotalFrames - sent) < 64 ? (kTotalFrames - sent) : 64;
+                for (size_t i = 0; i < chunk; ++i) {
+                    const float v = (float)(sent + i + 1);
+                    blk[i * 2] = v;
+                    blk[i * 2 + 1] = -v;
+                }
+                size_t pushed = chunk - fifo.push(blk.data(), chunk);
+                while (pushed < chunk) {
+                    std::this_thread::yield();
+                    pushed += (chunk - pushed) - fifo.push(blk.data() + pushed * 2, chunk - pushed);
+                }
+                sent += chunk;
+            }
+            producerDone.store(true, std::memory_order_release);
+        });
+        std::vector<float> out(128 * 2);
+        size_t got = 0;
+        bool seqOk = true;
+        while (got < kTotalFrames) {
+            const size_t n = fifo.read_available(out.data(), 128);
+            for (size_t i = 0; i < n; ++i) {
+                const float expV = (float)(got + i + 1);
+                if (out[i * 2] != expV || out[i * 2 + 1] != -expV) seqOk = false;
+            }
+            got += n;
+            if (n == 0) {
+                if (producerDone.load(std::memory_order_acquire) && got >= kTotalFrames) break;
+                std::this_thread::yield();
+            }
+        }
+        prod.join();
+        check(seqOk && got == kTotalFrames, "CaptureFifo SPSC 并发读写帧序零错乱",
+              "got=" + std::to_string(got));
+
+        CoreAudioInput nullIn;
+        MacCaptureConfig ncfg;
+        ncfg.srcNull = true;
+        ncfg.paced = false;
+        ncfg.targetFrames = 960;
+        check(nullIn.open(ncfg), "srcNull open 成功");
+        check(nullIn.start(), "srcNull 首次 start() 成功");
+        check(!nullIn.start(), "srcNull 重复 start() 返回 false 而不触发 std::terminate");
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        nullIn.stop();
+        check(nullIn.total_captured_frames() > 0, "srcNull 采集帧数 > 0");
+        check(nullIn.open(ncfg), "srcNull 重新 open() 成功并清零累计帧数");
+        check(nullIn.total_captured_frames() == 0, "重新 open() 后 total_captured_frames() 归零",
+              "frames=" + std::to_string(nullIn.total_captured_frames()));
+        nullIn.close();
+        std::printf("\n");
+    }
+
     // ---- 判据 6（可选）：真开回环 ----------------------------------------------
     const std::string wantReal = env_str("RTA_LOOPBACK_TESTS");
     const bool realEnabled = wantReal == "1";

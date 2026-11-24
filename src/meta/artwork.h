@@ -962,16 +962,44 @@ inline std::chrono::steady_clock::time_point& art_discogs_last() {
     static std::chrono::steady_clock::time_point t{};
     return t;
 }
-inline void art_discogs_throttle() {
-    if (art_http_hook()) return;                  // 离线测试不真睡
-    std::lock_guard<std::mutex> lk(art_discogs_mtx());
-    auto& last = art_discogs_last();
-    const auto now = std::chrono::steady_clock::now();
-    if (last.time_since_epoch().count() != 0) {
-        const auto wait = std::chrono::milliseconds(2500) - (now - last);
-        if (wait.count() > 0) std::this_thread::sleep_for(wait);
+inline bool art_is_cancelled() {
+    const std::atomic<bool>* tok = rta::net::http_detail::current_cancellation_token();
+    return tok && tok->load(std::memory_order_acquire);
+}
+
+inline bool art_discogs_throttle() {
+    if (art_is_cancelled()) return false;
+    if (art_http_hook()) return true;                  // 离线测试不真睡
+    std::chrono::steady_clock::time_point sleepUntil{};
+    bool needSleep = false;
+    {
+        std::lock_guard<std::mutex> lk(art_discogs_mtx());
+        auto& last = art_discogs_last();
+        const auto now = std::chrono::steady_clock::now();
+        if (last.time_since_epoch().count() != 0) {
+            const auto target = last + std::chrono::milliseconds(2500);
+            if (target > now) {
+                // 预约槽位后释放互斥锁，避免多个并发请求在锁内累加 2.5s*N 阻塞退出
+                last = target;
+                sleepUntil = target;
+                needSleep = true;
+            } else {
+                last = now;
+            }
+        } else {
+            last = now;
+        }
     }
-    last = now;
+    if (needSleep) {
+        while (true) {
+            if (art_is_cancelled()) return false;
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= sleepUntil) break;
+            const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(sleepUntil - now);
+            std::this_thread::sleep_for(std::min(rem, std::chrono::milliseconds(25)));
+        }
+    }
+    return true;
 }
 
 // Discogs 搜索 + 详情两步的公共实现(头像与简介都用它，避免两套节流/解析)。
@@ -985,6 +1013,11 @@ struct ArtDiscogsLookup {
 inline ArtDiscogsLookup art_discogs_lookup(const std::string& name, const ArtworkOpts& opts,
                                            int budgetMs) {
     ArtDiscogsLookup out;
+    if (art_is_cancelled()) {
+        out.transient = true;
+        out.reason = "已取消";
+        return out;
+    }
     const long long nowSec = (long long)std::time(nullptr);
     const long long cool = art_discogs_cool_until().load();
     if (nowSec < cool) {
@@ -997,13 +1030,22 @@ inline ArtDiscogsLookup art_discogs_lookup(const std::string& name, const Artwor
     const std::string root = base.empty() ? "https://api.discogs.com" : base;
     const std::vector<std::string> hdr = { std::string("User-Agent: ") + pv_user_agent() };
 
-    art_discogs_throttle();
+    if (!art_discogs_throttle()) {
+        out.transient = true;
+        out.reason = "已取消";
+        return out;
+    }
     ArtHttpRequest q;
     q.method = "GET";
     q.url = root + "/database/search?q=" + percent_enc_utf8(name) + "&type=artist&per_page=5";
     q.headers = hdr;
     q.timeoutMs = std::max(500, std::min(opts.perSourceMs, budgetMs));
     const rta::net::HttpResponse sr = art_http(q);
+    if (art_is_cancelled()) {
+        out.transient = true;
+        out.reason = "已取消";
+        return out;
+    }
     if (sr.status == 429) {
         // 限频 = 瞬态：绝不当成「没有此人」写进 7 天负缓存
         art_discogs_cool_until().store(nowSec + 300);
@@ -1022,7 +1064,11 @@ inline ArtDiscogsLookup art_discogs_lookup(const std::string& name, const Artwor
     const ArtArtistCandidate* hit = art_pick_artist(list, name, opts.allowFuzzy);
     if (!hit) { out.reason = "无同名艺人(首个=" + art_oneline(list.front().name) + ")"; return out; }
 
-    art_discogs_throttle();
+    if (!art_discogs_throttle()) {
+        out.transient = true;
+        out.reason = "已取消";
+        return out;
+    }
     ArtHttpRequest dq;
     dq.method = "GET";
     dq.url = root + "/artists/" + hit->id;
@@ -1142,6 +1188,10 @@ inline ArtistImageResult artwork_fetch_artist_image(const std::string& rawName,
     // 跑完一整条链；命中就落盘并返回 true。primary 非空表示「主艺人回退轮」。
     auto runChain = [&](const std::string& who, const std::string& primary) -> bool {
         for (const ArtArtistSource* src : plan) {
+            if (art_is_cancelled()) {
+                anyTransient = true;
+                break;
+            }
             if (primary.empty() && skip.count(src->id)) {
                 ArtSourceTry t;
                 t.source = src->id;
@@ -1167,7 +1217,7 @@ inline ArtistImageResult artwork_fetch_artist_image(const std::string& rawName,
             ArtSourceTry t;
             t.source = src->id;
             t.ok = fo.ok;
-            t.transient = fo.transient;
+            t.transient = fo.transient || art_is_cancelled();
             t.url = fo.url;
             t.reason = (primary.empty() ? std::string() : ("主艺人「" + primary + "」")) + fo.reason;
             t.bytes = (long long)fo.bytes.size();
@@ -1194,8 +1244,9 @@ inline ArtistImageResult artwork_fetch_artist_image(const std::string& rawName,
                 }
                 return true;
             }
-            if (fo.transient) anyTransient = true;
+            if (t.transient) anyTransient = true;
             res.tried.push_back(t);
+            if (art_is_cancelled()) break;
         }
         return false;
     };
@@ -1205,7 +1256,7 @@ inline ArtistImageResult artwork_fetch_artist_image(const std::string& rawName,
     // ③b 主艺人回退(A & B / A feat. B → A)。用户库大量 artist 标签是多艺人串，
     //     这类串在任何源都不存在，但主艺人通常有头像；取到的是「这首歌的主艺人」的脸，
     //     与「张冠李戴」不同(不是别人)，因此默认开、且 .src 里记 primary= 便于核对。
-    if (opts.splitPrimary && remaining > 0) {
+    if (opts.splitPrimary && remaining > 0 && !art_is_cancelled()) {
         const std::string prim = art_primary_artist(name);
         if (!prim.empty() && art_norm_name(prim) != art_norm_name(name)) {
             if (runChain(prim, prim)) return res;
@@ -1222,7 +1273,7 @@ inline ArtistImageResult artwork_fetch_artist_image(const std::string& rawName,
     for (const ArtSourceTry& t : res.tried)
         if (!t.transient && t.source != "-" && t.reason.rfind("负缓存", 0) != 0)
             anyAuthoritativeMiss = true;
-    if (opts.useCache && !opts.cacheDir.empty() && anyAuthoritativeMiss) {
+    if (opts.useCache && !opts.cacheDir.empty() && anyAuthoritativeMiss && !art_is_cancelled()) {
         std::vector<ArtSourceTry> toWrite;
         for (const ArtSourceTry& t : res.tried) {
             if (t.source == "-") continue;
@@ -1251,6 +1302,7 @@ inline ArtistProfileResult artwork_fetch_artist_profile(const std::string& rawNa
     if (name.empty()) return res;
     int remaining = opts.totalBudgetMs;
     for (const ProviderDesc* pd : art_sources_with(ArtCap::ArtistBio, opts.srcOn, opts.order)) {
+        if (art_is_cancelled()) break;
         if (opts.onlySource && std::string(opts.onlySource) != pd->id) continue;
         if (remaining <= 0) break;
         const auto t0 = std::chrono::steady_clock::now();

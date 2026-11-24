@@ -1333,7 +1333,7 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
     [self refreshModeButtons];
     [self refreshBadges];
     self.volume.needsDisplay=YES; self.progress.needsDisplay=YES;
-    self.volKnob.needsDisplay=YES;
+    [self.volKnob applyTheme];
     if (self.coverView.layer) self.coverView.layer.backgroundColor = t.bg2.CGColor;
 }
 
@@ -1352,6 +1352,7 @@ static const NSTimeInterval kRLPBarModeConfirmSeconds = 2.0;
     }
     [self refreshModeButtons];
     [self refreshBadges];
+    [self.volKnob applyLanguage];
     [self applyVolumeLockedState:self.rawVolumeLocked];
     [self refreshVolumeMuteIcon];
     self.needsLayout = YES;

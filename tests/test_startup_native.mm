@@ -839,6 +839,7 @@ int main(int argc, const char *argv[]) {
         // 保持局部宿主引用至退出，规避 WKWebView 跨进程异步 dealloc 崩溃（见 test_source_native.mm）
         static HostAppDelegate* g_keepAliveUntilExit = nil;
         g_keepAliveUntilExit = host;
+        (void)g_keepAliveUntilExit;
 
         ::chdir(cwd);
         std::error_code ec;

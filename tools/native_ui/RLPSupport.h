@@ -680,4 +680,7 @@ void RLPDiagEvent(NSString * _Nullable kind,
 /// 判据专用：同步清空遥测队列与限流计数，隔离同进程先后测试之间的状态。
 void RLPDiagTelemetryResetForAudit(void);
 
+/// 为 NSOpenPanel 配置文件扩展名过滤（macOS 11+ 走 UTType allowedContentTypes，避免 allowedFileTypes 弃用告警）。
+void RLPConfigureOpenPanelFileTypes(NSOpenPanel *panel, NSArray<NSString *> *extensions);
+
 NS_ASSUME_NONNULL_END

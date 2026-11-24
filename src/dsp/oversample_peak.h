@@ -51,11 +51,11 @@ inline const std::vector<std::vector<double>>& isp_kernel() {
                                : [](double rr) {
                                      const double beta = 6.0, t2 = 2.0 * rr - 1.0;
                                      const double v = 1.0 - t2 * t2;
-                                     double num = 0.0, den = 0.0;
+                                     double num = 0.0;
                                      // I0 级数展开（beta 小，前 12 项足够）
                                      double f = 1.0, s1 = 0.0;
                                      for (int m = 0; m < 14; ++m) { s1 += f; f *= (beta * beta / 4.0) / ((double)(m + 1) * (double)(m + 1)); }
-                                     num = s1; den = 1.0;
+                                     num = s1;
                                      double g = 1.0, s2 = 0.0;
                                      const double z = beta * std::sqrt(std::max(0.0, v));
                                      for (int m = 0; m < 14; ++m) { s2 += g; g *= (z * z / 4.0) / ((double)(m + 1) * (double)(m + 1)); }

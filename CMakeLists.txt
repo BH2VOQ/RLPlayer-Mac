@@ -77,7 +77,7 @@ add_compile_options($<$<CONFIG:Release>:-DNDEBUG>)
 #   —— libcurl 在 macOS 上不读系统代理，必须自己问；不加这个框架会 link error。
 set(RL_PLATFORM_LIBS curl iconv
     "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation"
-    "-framework SystemConfiguration")
+    "-framework SystemConfiguration" "-framework Accelerate")
 
 # ---- 跨平台工具 ----
 # 2026-10-25：已改为 macOS 单平台，故不再有「Windows 用 winhttp/ws2_32」这一半说明。
@@ -105,6 +105,7 @@ target_link_libraries(filter_report PRIVATE ${RL_PLATFORM_LIBS})
 
 add_library(rtadsp INTERFACE)
 target_include_directories(rtadsp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(rtadsp INTERFACE "-framework Accelerate")
 
 # ---------------- macOS：单进程 App + 保留独立 CLI（PLATFORM.md §13.12）----------------
 # 2026-10-25 用户立项：单进程合并（保留程序内多线程），只留 arm64。
@@ -1467,6 +1468,12 @@ if(APPLE)
   set_tests_properties(embedded_api PROPERTIES
     ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
 
+  add_executable(test_close_cancellation_contract tests/test_close_cancellation_contract.cpp)
+  target_include_directories(test_close_cancellation_contract PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(test_close_cancellation_contract PRIVATE rtadsp ${RL_PLATFORM_LIBS})
+  add_test(NAME close_cancellation_contract COMMAND test_close_cancellation_contract)
+  set_tests_properties(close_cancellation_contract PROPERTIES TIMEOUT 30)
+
   # 1.1.2 AirPlay 平台策略门禁（AP-1.1/1.2/1.3/1.4/1.6）。
   # 全离线：FourCC 识别、能力收敛、DoP 前置拒绝、延迟来源、存活判定；
   # 不 open 任何设备、不出声、不改系统音量（铁律 1）。
@@ -1811,6 +1818,28 @@ add_executable(test_parallel tests/test_parallel.cpp)
 target_link_libraries(test_parallel PRIVATE rtadsp)
 add_test(NAME parallel COMMAND test_parallel)
 
+add_executable(test_parallel_pool tests/test_parallel_pool.cpp)
+target_link_libraries(test_parallel_pool PRIVATE rtadsp)
+add_test(NAME parallel_pool COMMAND test_parallel_pool)
+
+add_executable(test_resampler_simd tests/test_resampler_simd.cpp)
+target_link_libraries(test_resampler_simd PRIVATE rtadsp)
+add_test(NAME resampler_simd COMMAND test_resampler_simd)
+
+add_executable(test_resampler_simd_early tests/test_resampler_simd.cpp)
+target_compile_definitions(test_resampler_simd_early PRIVATE RTA_TEST_EARLY_INTRINSICS=1)
+target_link_libraries(test_resampler_simd_early PRIVATE rtadsp)
+add_test(NAME resampler_simd_early COMMAND test_resampler_simd_early)
+
+add_executable(test_resampler_rational_simd tests/test_resampler_rational_simd.cpp)
+target_link_libraries(test_resampler_rational_simd PRIVATE rtadsp)
+add_test(NAME resampler_rational_simd COMMAND test_resampler_rational_simd)
+
+add_executable(test_resampler_rational_simd_early tests/test_resampler_rational_simd.cpp)
+target_compile_definitions(test_resampler_rational_simd_early PRIVATE RTA_TEST_EARLY_INTRINSICS=1)
+target_link_libraries(test_resampler_rational_simd_early PRIVATE rtadsp)
+add_test(NAME resampler_rational_simd_early COMMAND test_resampler_rational_simd_early)
+
 add_executable(test_two_stage tests/test_two_stage.cpp)
 target_link_libraries(test_two_stage PRIVATE rtadsp)
 add_test(NAME two_stage COMMAND test_two_stage)
@@ -1883,7 +1912,7 @@ add_test(NAME year COMMAND test_year)
 # 本测试需要环境里的 ffprobe（工具缺失即失败，不跳过，与 writeback 同类门禁）；
 # 已知时长的合成 WAV 落在 %TEMP%，不碰 MUSIC；真实 FLAC 素材缺失时打 [SKIP]。
 add_executable(test_playback_gpu tests/test_playback_gpu.cpp)
-target_include_directories(test_playback_gpu PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_playback_gpu PRIVATE rtadsp)
 add_test(NAME playback_gpu COMMAND test_playback_gpu)
 
 # OPRA 耳机 EQ 适配门禁（离线纯函数 + RTA_NET_TESTS=1 真网 opt-in）
@@ -1982,6 +2011,7 @@ add_test(NAME airplay_discovery COMMAND test_airplay_discovery)
 
 add_executable(test_cast_audio tests/test_cast_audio.cpp)
 target_include_directories(test_cast_audio PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_cast_audio PRIVATE "-framework Accelerate")
 add_test(NAME cast_audio COMMAND test_cast_audio)
 set_tests_properties(cast_audio PROPERTIES TIMEOUT 60)
 
@@ -1989,7 +2019,7 @@ set_tests_properties(cast_audio PROPERTIES TIMEOUT 60)
 # （不能用 Apple 编码器 + Apple 解码器自证）。没装 ffmpeg 时该用例明确 SKIP，不冒充通过。
 add_executable(test_cast_bit_exact tests/test_cast_bit_exact.cpp)
 target_include_directories(test_cast_bit_exact PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_cast_bit_exact PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+target_link_libraries(test_cast_bit_exact PRIVATE "-framework AudioToolbox" "-framework CoreFoundation" "-framework Accelerate")
 add_test(NAME cast_bit_exact COMMAND test_cast_bit_exact)
 set_tests_properties(cast_bit_exact PROPERTIES TIMEOUT 60)
 
@@ -2145,28 +2175,28 @@ target_include_directories(test_dynamics PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME dynamics COMMAND test_dynamics)
 
 add_executable(test_fake_lossless tests/test_fake_lossless.cpp)
-target_include_directories(test_fake_lossless PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_fake_lossless PRIVATE rtadsp)
 add_test(NAME fake_lossless COMMAND test_fake_lossless)
 # ⚠️ 必须在 add_test 之后；PATH 指到 ffmpeg-lite（系统 ffmpeg 坏链，退出码 134）
 set_tests_properties(fake_lossless PROPERTIES
   ENVIRONMENT "PATH=${CMAKE_SOURCE_DIR}/build-mac/ffmpeg-lite:/usr/bin:/bin:/usr/sbin:/sbin")
 
 add_executable(test_track_health tests/test_track_health.cpp)
-target_include_directories(test_track_health PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_track_health PRIVATE rtadsp)
 add_test(NAME track_health COMMAND test_track_health)
 
 # F-3 房间校正 + 测量编排（上游 f26ca3d + 8d80e17，纯 header，零平台依赖）
 add_executable(test_room_correction tests/test_room_correction.cpp)
-target_include_directories(test_room_correction PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_room_correction PRIVATE rtadsp)
 add_test(NAME room_correction COMMAND test_room_correction)
 
 add_executable(test_room_measurement tests/test_room_measurement.cpp)
-target_include_directories(test_room_measurement PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_room_measurement PRIVATE rtadsp)
 add_test(NAME room_measurement COMMAND test_room_measurement)
 
 # U4：测量麦克风校准曲线（纯 header：解析 / 对数插值 / 读数减校准）
 add_executable(test_mic_cal tests/test_mic_cal.cpp)
-target_include_directories(test_mic_cal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_mic_cal PRIVATE rtadsp)
 add_test(NAME mic_cal COMMAND test_mic_cal)
 
 # U4 第二步：/api/miccal 黑盒（导入→GET 读回→清除；坏文件 400 + 稳定 code）。
@@ -2209,7 +2239,7 @@ add_test(NAME enrich COMMAND test_enrich)
 #   · version_compare—— 同上
 #   · replaygain / dsd_rate_convert —— 纯 DSP，无需额外链接
 add_executable(test_quality tests/test_quality.cpp)
-target_include_directories(test_quality PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_quality PRIVATE rtadsp)
 add_test(NAME quality COMMAND test_quality)
 
 add_executable(test_quality_ai tests/test_quality_ai.cpp)
@@ -2227,7 +2257,7 @@ target_include_directories(test_replaygain PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME replaygain COMMAND test_replaygain)
 
 add_executable(test_dsd_rate_convert tests/test_dsd_rate_convert.cpp)
-target_include_directories(test_dsd_rate_convert PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_dsd_rate_convert PRIVATE rtadsp)
 add_test(NAME dsd_rate_convert COMMAND test_dsd_rate_convert)
 
 # F-7：诊断包脱敏（纯函数）。A 段故意保留旧实现作永久红基线，谁把 legacy 修好它就变红。
@@ -2363,7 +2393,7 @@ add_test(NAME loopback_capture COMMAND test_loopback_capture)
 # 构建 dylib：bash tools/build_gpu_metal_mac.sh（产物在仓库根 librtagpu.dylib）
 add_executable(test_gpu_metal tests/test_gpu_metal.cpp)
 target_include_directories(test_gpu_metal PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_gpu_metal PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(test_gpu_metal PRIVATE ${CMAKE_DL_LIBS} "-framework Accelerate")
 add_test(NAME gpu_metal COMMAND test_gpu_metal)
 # dylib 定位：测试自己用 __FILE__ 反推仓库根（ctest 的 cwd 是 build-mac，不是仓库根），
 # 不需要额外环境变量；也可 `test_gpu_metal <path-to-librtagpu.dylib>` 显式指定。
@@ -2381,12 +2411,12 @@ add_test(NAME gpu_conv_streaming COMMAND test_gpu_conv_streaming)
 # 探针：手动跑，不进 ctest（打印整张矩阵，依赖本机 GPU；无卡机器 exit 2）
 add_executable(gpu_precision tools/gpu_precision.cpp)
 target_include_directories(gpu_precision PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(gpu_precision PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(gpu_precision PRIVATE ${CMAKE_DL_LIBS} "-framework Accelerate")
 
 # 门禁：把本机实测阈值固化（缺 dylib / GPU 不可用 → [SKIP] + return 0，不算失败）
 add_executable(test_gpu_precision tests/test_gpu_precision.cpp)
 target_include_directories(test_gpu_precision PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_gpu_precision PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(test_gpu_precision PRIVATE ${CMAKE_DL_LIBS} "-framework Accelerate")
 add_test(NAME gpu_precision COMMAND test_gpu_precision)
 
 # ---------------- 2026-10-26：WebUi 传输层安全加固测试 ----------------
@@ -2400,6 +2430,10 @@ add_executable(test_net_405 tests/test_net_405.cpp)
 target_include_directories(test_net_405 PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_net_405 PRIVATE ${RL_PLATFORM_LIBS})
 add_test(NAME net_405 COMMAND test_net_405)
+
+# 共享固定本地回环测试端口（19101 / 19106）的用例串行复用，避免并行 ctest -j 撞端口。
+set_tests_properties(libroot_regress webui_hardening upnp_control net_405 dsd_path
+                     PROPERTIES RESOURCE_LOCK rtaweb_port_lock)
 
 # ---------------- 2026-10-26：DeepSeek 客户端及用量并发记账测试 (A-4) ----------------
 add_executable(test_metallm tests/test_metallm.cpp)
@@ -2736,7 +2770,8 @@ if(APPLE)
   add_executable(test_native_pages_900_contract tests/test_native_pages_900_contract.mm
     ${_modes_sources}
     tools/native_ui/RLPWorkbench.mm
-    tools/native_ui/RLPWorkbenchViewController.mm)
+    tools/native_ui/RLPWorkbenchViewController.mm
+    tools/native_ui/RLPFeedbackWindowController.mm)
   target_compile_options(test_native_pages_900_contract PRIVATE -fobjc-arc)
   target_include_directories(test_native_pages_900_contract PRIVATE src tools tools/native_ui)
   target_link_libraries(test_native_pages_900_contract PRIVATE ${_modes_libs})

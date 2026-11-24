@@ -867,10 +867,12 @@ inline EntityKind entity_artist_kind(const std::string& raw) {
     };
     for (const char* w : kCjkMulti)
         if (raw.find(w) != std::string::npos) return EntityKind::Group;
-    // 4. 单字「社」「団」「团」：加上下文/后缀门槛（必须为后缀或后接修饰符，且长度>单字）
-    if (entity_detail_has_cjk_suffix(n, "社")) return EntityKind::Group;
-    if (entity_detail_has_cjk_suffix(n, "団")) return EntityKind::Group;
-    if (entity_detail_has_cjk_suffix(n, "团")) return EntityKind::Group;
+    // 4. 单字「社」「団」「团」：加上下文/后缀门槛（必须为后缀或后接修饰符，且长度>单字，且未命中负例词表）
+    if (!isNegative) {
+        if (entity_detail_has_cjk_suffix(n, "社")) return EntityKind::Group;
+        if (entity_detail_has_cjk_suffix(n, "団")) return EntityKind::Group;
+        if (entity_detail_has_cjk_suffix(n, "团")) return EntityKind::Group;
+    }
 
     return EntityKind::Person;
 }

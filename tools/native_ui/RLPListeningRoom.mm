@@ -146,13 +146,6 @@ NSDictionary<NSString *, NSString *> *RLPSettingsPatchForToneStyle(
 
 NSString *RLPPlayModeFromSettings(NSDictionary *kv) {
     if (![kv isKindOfClass:[NSDictionary class]]) return @"bitperfect";
-    id declObj = kv[@"ui_profile"];
-    NSString *declared = [declObj isKindOfClass:[NSString class]] ? declObj : @"";
-    if ([declared isEqualToString:@"bitperfect"] || [declared isEqualToString:@"pcm"] ||
-        [declared isEqualToString:@"dsd"] || [declared isEqualToString:@"pcm2dsd"] ||
-        [declared isEqualToString:@"custom"]) {
-        return declared;
-    }
     const NSInteger dsdVal = RLPParseDsdRate(kv[@"dsd"]);
 
     id dirObj = kv[@"directsdm"];
@@ -168,6 +161,20 @@ NSString *RLPPlayModeFromSettings(NSDictionary *kv) {
 
     id filtObj = kv[@"filter"];
     NSString *filter = [filtObj isKindOfClass:[NSString class]] ? filtObj : @"";
+
+    // 若 conf 存有 ui_profile 意图，先核对当前实际参数是否已按设备降级/被手工改动；
+    // 未冲突时按声明返回（如区分 dsd vs pcm2dsd），已降级时返回真实生效的模式（如 dsd->pcm / custom）。
+    id declObj = kv[@"ui_profile"];
+    NSString *declared = [declObj isKindOfClass:[NSString class]] ? declObj : @"";
+    if ([declared isEqualToString:@"bitperfect"]) {
+        if (dsdVal <= 0 && (direct || (rateIsSrc && !filter.length))) return @"bitperfect";
+    } else if ([declared isEqualToString:@"pcm"]) {
+        if (rateObj == nil || (dsdVal <= 0 && !rateIsSrc)) return @"pcm";
+    } else if ([declared isEqualToString:@"dsd"] || [declared isEqualToString:@"pcm2dsd"]) {
+        if (kv[@"dsd"] == nil || dsdVal > 0) return declared;
+    } else if ([declared isEqualToString:@"custom"]) {
+        return @"custom";
+    }
 
     if (direct || (dsdVal <= 0 && rateIsSrc && !filter.length)) return @"bitperfect";
     if (dsdVal > 0) return @"dsd";

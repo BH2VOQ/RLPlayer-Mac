@@ -34,6 +34,7 @@
 #import "RLPModels.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include "version.h"
 #include "rlapp_core.h"
@@ -114,11 +115,33 @@ static void STCheck(BOOL ok, const char *what, NSString *detail) {
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { return YES; }
 
 - (void)applicationWillTerminate:(NSNotification *)note {
+    (void)note;
+    if (self.mainWC.isWindowLoaded && self.mainWC.window) {
+        self.mainWC.window.alphaValue = 0.0;
+    }
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self.exitPoll invalidate];
+    self.exitPoll = nil;
     [self.nowPlayingTimer invalidate];
+    self.nowPlayingTimer = nil;
+    if (self.shortcutMonitor) {
+        [NSEvent removeMonitor:self.shortcutMonitor];
+        self.shortcutMonitor = nil;
+    }
+    MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+    if (center.nowPlayingInfo.count) center.nowPlayingInfo = @{};
+    center.playbackState = MPNowPlayingPlaybackStateStopped;
     [self.mainWC stopAllActivity];
-    [[RLPCoreClient shared] shutdown];
+    id core = [RLPCoreClient shared];
+    if ([core respondsToSelector:@selector(shutdownWithTimeoutMs:)]) {
+        if (![core shutdownWithTimeoutMs:2500]) {
+            std::fflush(stdout);
+            std::fflush(stderr);
+            std::_Exit(0);
+        }
+    } else {
+        [core shutdown];
+    }
 }
 
 // ---------------- 菜单（原生入口与快捷键的唯一落点） ----------------

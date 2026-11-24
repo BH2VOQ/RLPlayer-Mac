@@ -1060,6 +1060,7 @@ inline LibTrack lib_probe_one(const std::string& file, const std::string& ffprob
             // -of default=nw=0 会打印段标记：[STREAM] / [/STREAM] / [FORMAT] / [/FORMAT]
             if (line == "[FORMAT]") { inFormat = true; line.clear(); continue; }
             if (line == "[/FORMAT]") { inFormat = false; line.clear(); continue; }
+            (void)inFormat;
             if (line == "[STREAM]") { inFormat = false; curIsAudio = false; line.clear(); continue; }
             const size_t e = line.find('=');
             if (e != std::string::npos) {

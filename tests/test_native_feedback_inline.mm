@@ -64,10 +64,6 @@ static BOOL SetKVC(id obj, NSString *key, id value) {
     @try { [obj setValue:value forKey:key]; return YES; }
     @catch (NSException *e) { return NO; }
 }
-static id GetKVC(id obj, NSString *key) {
-    @try { return [obj valueForKey:key]; }
-    @catch (NSException *e) { return nil; }
-}
 /// 卡片标题（set.group.head 里的第一个 NSTextField）。
 static NSString *CardTitle(NSView *card) {
     NSView *head = FindId(card, @"set.group.head");
@@ -650,11 +646,6 @@ int main() {
                 @"LongUnbrokenPayloadToken_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
             NSString *longOs =
                 @"Version 27.3 (Build 26C5035r) LongSystemVersionStringWithoutSpaces_ARM64_Darwin27_ExtendedDiagnosticBuild";
-            const char *longErrJson =
-                "{\"ok\":false,\"code\":\"server_error\",\"error\":"
-                "\"Upload rejected due to oversized diagnostic telemetry payload across multiple validation stages; "
-                "please uncheck diagnostics or shorten description and retry later "
-                "(LONG_ERROR_TOKEN_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ).\"}";
 
             SetKVC(settings, @"fbSystemVersionOverride", longOs);
             for (NSString *lang in @[ @"zh", @"en" ]) {
@@ -689,7 +680,6 @@ int main() {
                     NSTextView *curText = (NSTextView *)FindId(settings.view, @"sp_fbtext");
                     NSSwitch *curDiag = (NSSwitch *)FindId(settings.view, @"sp_fbdiag");
                     NSButton *curPvBtn = (NSButton *)FindId(settings.view, @"sp_fbpreview");
-                    NSButton *curSendBtn = (NSButton *)FindId(settings.view, @"sp_fbsend");
 
                     // A: 预览显示 >=5 行 + 长系统串 + 长正文 + 空结果隐藏不占位
                     TriggerFbResultEmpty(settings);

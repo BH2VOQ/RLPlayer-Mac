@@ -225,6 +225,7 @@ static NSLayoutConstraint *gLastGroupWidthConstraint = nil;
 
 /// 分区标题 = 开一张 web .sgroup 卡片。
 static NSView *RLPSGroup(NSString *title, NSString *desc, RLPTheme *t) {
+    (void)t;
     RLPStripSentinels(gCurrentStack);
     RLPSettingsGroup *g = [[RLPSettingsGroup alloc] initWithTitle:title hint:desc];
     gCurrentGroup = g;
@@ -287,6 +288,8 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSView *> *paneCache;
 /// 已经从后端读到真值的键：没读到之前不写回，避免用 UI 默认值覆盖用户真实设置。
 @property (nonatomic, strong) NSMutableSet<NSString *> *loadedKeys;
+@property (nonatomic, assign) BOOL forceResetMissingOnNextLoad;
+@property (nonatomic, copy) NSString *lastLoadedUiMode;
 @property (nonatomic, strong) NSTextField *statusLine;
 
 // ---- 输出页（web data-g=out）----
@@ -755,11 +758,18 @@ static NSStackView *RLPSRow(NSString *label, NSView *control, NSString *hint, RL
     return self;
 }
 
+- (void)stopPolling {
+    [_wbTimer invalidate]; _wbTimer = nil;
+    [_coverTimer invalidate]; _coverTimer = nil;
+    [_fbProbeDeadline invalidate]; _fbProbeDeadline = nil;
+    [_libStatsView stopPolling];
+    [_inputView stopPolling];
+    [_castView stopPolling];
+}
+
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_wbTimer invalidate];
-    [_coverTimer invalidate];
-    [_libStatsView stopPolling];
+    [self stopPolling];
 }
 
 #pragma mark - 骨架
@@ -1563,8 +1573,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     NSString *msg = text ?: @"";
     self.statusLine.stringValue = msg;
     RLPToast(msg);
-    std::fprintf(stderr, "[DIAG] SETTINGS_SAVE_FAIL revert=%lu text=%s\n",
-                 (unsigned long)reverted.count, [msg UTF8String]);
+    if (std::getenv("RLP_SETTINGS_DIAG")) {
+        std::fprintf(stderr, "[DIAG] SETTINGS_SAVE_FAIL revert=%lu text=%s\n",
+                     (unsigned long)reverted.count, [msg UTF8String]);
+    }
 }
 
 - (void)postKey:(NSString *)key value:(NSString *)value
@@ -1589,8 +1601,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         [parts addObject:[NSString stringWithFormat:@"%@=%@", k, RLPEnc(kv[k] ?: @"")]];
     }
     const NSUInteger seq = ++self.settingsPostSeq;
-    std::fprintf(stderr, "[DIAG] POST %s seq=%lu\n",
-                 [[kv.allKeys componentsJoinedByString:@","] UTF8String], (unsigned long)seq);
+    if (std::getenv("RLP_SETTINGS_DIAG")) {
+        std::fprintf(stderr, "[DIAG] POST %s seq=%lu\n",
+                     [[kv.allKeys componentsJoinedByString:@","] UTF8String], (unsigned long)seq);
+    }
 
     // 一次提交只落一次地：答复 / 超时 / 根本没发出去，三者取先到的那一个。
     // 为什么必须有这条闸门：RLPCoreClient 在关闸（退出中 / 生成号变化）时会**直接丢掉回调**
@@ -1656,7 +1670,35 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
             if ([stored objectForKey:k] != nil) accepted[k] = kv[k];
             else dropped[k] = kv[k];
         }
-        if (accepted.count) [self_ applySettingsSaveSuccess:accepted seq:seq];
+        if (accepted.count) {
+            [self_ applySettingsSaveSuccess:accepted seq:seq];
+            const BOOL endpointChanged = (kv[@"device"] != nil || kv[@"backend"] != nil ||
+                                          kv[@"upnpdev"] != nil || kv[@"uimode"] != nil);
+            if (kv[@"rate"] == nil && [stored[@"rate"] isKindOfClass:[NSString class]] &&
+                self_.ratePopup != nil) {
+                [self_ applyKV:stored toPopup:self_.ratePopup key:@"rate"];
+            }
+            if (endpointChanged) {
+                if (kv[@"dsd"] == nil && stored[@"dsd"] != nil) {
+                    [self_ applyDsdPersistValue:stored[@"dsd"]];
+                }
+                if (kv[@"shaper"] == nil && stored[@"shaper"] != nil && self_.shaperPopup != nil) {
+                    [self_ applyKV:stored toPopup:self_.shaperPopup key:@"shaper"];
+                }
+                if (kv[@"directsdm"] == nil && stored[@"directsdm"] != nil && self_.directSdmSwitch != nil) {
+                    [self_ applyKV:stored toSwitch:self_.directSdmSwitch key:@"directsdm"];
+                }
+                if (kv[@"modfamily"] == nil && stored[@"modfamily"] != nil && self_.modFamilyPopup != nil) {
+                    [self_ applyKV:stored toPopup:self_.modFamilyPopup key:@"modfamily"];
+                }
+                if (kv[@"modorder"] == nil && stored[@"modorder"] != nil && self_.modOrderPopup != nil) {
+                    [self_ applyKV:stored toPopup:self_.modOrderPopup key:@"modorder"];
+                }
+                if (kv[@"modcut"] == nil && stored[@"modcut"] != nil && self_.modCutField != nil) {
+                    [self_ applyKV:stored toTextField:self_.modCutField key:@"modcut"];
+                }
+            }
+        }
         if (dropped.count) {
             const double durMs = ([NSProcessInfo processInfo].systemUptime - postAt) * 1000.0;
             RLPDiagEvent(@"error", @"api_fail",
@@ -1836,6 +1878,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         // 12s 兜底（web fbWatchdog 的 12000ms）：网络层卡住也必须给用户结论。
         self.fbProbeDeadline = [NSTimer scheduledTimerWithTimeInterval:12.0 repeats:NO
                                                                block:^(NSTimer *tm) {
+            (void)tm;
             __typeof__(self) self_ = weakSelf;
             if (!self_ || settled) return;
             settled = YES;
@@ -2467,6 +2510,7 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     // 现在移进卡片本体，设备列表仍来自 /api/input/devices（带 id，开始采集时用 id 而不是显示名）。
     self.inDevicePopup = [self popupForKey:@"sp_indev"
         items:@[ RLPTr(@"（未选择 / 默认设备）") ] action:@selector(onInDevice:)];
+    [[self.inDevicePopup itemAtIndex:0] setRepresentedObject:@""];
     self.inRefreshBtn = [NSButton buttonWithTitle:RLPTr(@"刷新设备") target:self
                                            action:@selector(onInRefreshDevices:)];
     self.inRefreshBtn.bezelStyle = NSBezelStyleRounded;
@@ -2535,12 +2579,20 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
     self.inputView = [[RLPInputView alloc] initStatusOnlyWithFrame:NSMakeRect(0, 0, 620, 240)];
     self.inputView.translatesAutoresizingMaskIntoConstraints = NO;
     // 设置页本身就是整页滚动容器：状态区块不再套自己的滚动条。
+    __weak __typeof__(self) weakSelf = self;
+    self.inputView.onStateUpdated = ^(NSDictionary *st) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        const BOOL run = [st[@"running"] respondsToSelector:@selector(boolValue)] && [st[@"running"] boolValue];
+        self_.inStartBtn.enabled = !run;
+        self_.inStopBtn.enabled = run;
+    };
     [self.inputView setEmbeddedInPage:YES];
     [gCurrentGroup addFullRow:self.inputView];
     [self.inputView reload];
-    // 高度 = 状态区块的自然高度（拆掉内层滚动后必须由宿主给，否则本视图没有 intrinsic 高度）。
+    // 高度 >= 状态区块的自然高度（拆掉内层滚动后由内部 stack 撑开，允许错误信息行展开或换行时不裁切）。
     [[self.inputView.heightAnchor
-        constraintEqualToConstant:MAX(120.0, [self.inputView preferredContentHeight])] setActive:YES];
+        constraintGreaterThanOrEqualToConstant:MAX(120.0, [self.inputView preferredContentHeight])] setActive:YES];
     [self loadInputDevices];
 }
 
@@ -2557,29 +2609,49 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
         NSMutableArray<NSDictionary *> *good = [NSMutableArray array];
         for (id x in arr) if ([x isKindOfClass:[NSDictionary class]]) [good addObject:x];
         self_.inDevices = good;
-        NSString *keep = self_.inDevicePopup.titleOfSelectedItem;
+        id keepRO = self_.inDevicePopup.selectedItem.representedObject;
+        NSString *keepId = [keepRO isKindOfClass:[NSString class]] ? (NSString *)keepRO : nil;
         [self_.inDevicePopup removeAllItems];
         [self_.inDevicePopup addItemWithTitle:RLPTr(@"（未选择 / 默认设备）")];
+        [[self_.inDevicePopup itemAtIndex:0] setRepresentedObject:@""];
         for (NSDictionary *d in good) {
             NSString *nm = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @"";
             if (!nm.length) continue;
+            NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
             const BOOL lb = [d[@"loopback"] respondsToSelector:@selector(boolValue)] && [d[@"loopback"] boolValue];
-            NSString *title = lb ? [nm stringByAppendingString:RLPTr(@"（系统混音·本机不支持）")] : nm;
-            [self_.inDevicePopup addItemWithTitle:title];
-            if (lb) [[self_.inDevicePopup itemAtIndex:self_.inDevicePopup.numberOfItems - 1] setEnabled:NO];
-        }
-        if (keep.length && [self_.inDevicePopup itemWithTitle:keep])
-            [self_.inDevicePopup selectItemWithTitle:keep];
-        // 回显落盘值：优先按设备 id 匹配内部 inDevices，其次按显示名。
-        NSString *want = self_.savedInDev;
-        if (want.length) {
-            NSInteger idx = NSNotFound;
-            for (NSInteger i = 0; i < (NSInteger)good.count; ++i) {
-                NSDictionary *d = good[i];
-                NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
-                if (did.length && [did isEqualToString:want]) { idx = i; break; }
+            const BOOL isDef = [d[@"default"] respondsToSelector:@selector(boolValue)] && [d[@"default"] boolValue];
+            NSString *title = nm;
+            if (lb && [title rangeOfString:@"回环"].location == NSNotFound &&
+                [title rangeOfString:@"Loopback" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+                title = [title stringByAppendingString:RLPTr(@" · 回环")];
             }
-            if (idx != NSNotFound) [self_.inDevicePopup selectItemAtIndex:idx + 1];
+            if (isDef && [title rangeOfString:@"（默认）"].location == NSNotFound) {
+                title = [title stringByAppendingString:RLPTr(@"（默认）")];
+            }
+            [self_.inDevicePopup addItemWithTitle:title];
+            NSMenuItem *it = [self_.inDevicePopup itemAtIndex:self_.inDevicePopup.numberOfItems - 1];
+            if (did.length) [it setRepresentedObject:did];
+        }
+        // 回显落盘值（其次保留本次已选设备）：优先按 representedObject(id) 匹配，再兜底按原始 name。
+        NSString *want = (self_.savedInDev != nil) ? self_.savedInDev : keepId;
+        if (want.length) {
+            NSInteger matchIdx = NSNotFound;
+            for (NSInteger i = 0; i < (NSInteger)self_.inDevicePopup.numberOfItems; ++i) {
+                id ro = [self_.inDevicePopup itemAtIndex:i].representedObject;
+                if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:want]) {
+                    matchIdx = i;
+                    break;
+                }
+            }
+            if (matchIdx == NSNotFound) {
+                for (NSInteger i = 0; i < (NSInteger)good.count && i + 1 < (NSInteger)self_.inDevicePopup.numberOfItems; ++i) {
+                    NSString *nm = [good[i][@"name"] isKindOfClass:[NSString class]] ? good[i][@"name"] : @"";
+                    if ([nm isEqualToString:want]) { matchIdx = i + 1; break; }
+                }
+            }
+            if (matchIdx != NSNotFound) [self_.inDevicePopup selectItemAtIndex:matchIdx];
+        } else if (self_.savedInDev != nil) {
+            [self_.inDevicePopup selectItemAtIndex:0];
         }
     }];
 }
@@ -2616,9 +2688,10 @@ static NSString *RLPSettingsControlValueString(NSView *v) {
 
     // ---- GPU ----
     self.gpuGroup = (RLPSettingsGroup *)RLPSGroup(RLPTr(@"GPU"),
-        RLPTr(@"自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同"), t);
+        RLPTr(@"自动 = 本地与 UPnP 升频及默认卷积均走 64-bit CPU（NEON + vDSP，精度更高）；Apple Metal（只保留，效果差）= 本地与 UPnP 升频及卷积均强制走 Metal（单精度 32-bit，不推荐）；关闭 = 全部纯 CPU"), t);
     [stack addArrangedSubview:self.gpuGroup];
-    self.gpuPopup = [self popupForKey:@"sp_gpu" items:@[ @"auto", @"metal", @"off" ]
+    self.gpuPopup = [self popupForKey:@"sp_gpu"
+                                items:@[ RLPTr(@"自动"), RLPTr(@"Apple Metal（只保留，效果差）"), RLPTr(@"关闭（纯 CPU）") ]
                                action:@selector(onGpuVendor:)];
     [stack addArrangedSubview:RLPSRow(RLPTr(@"GPU 后端"), self.gpuPopup, nil, t)];
     self.gpuStatus = [self hintForKey:@"sp_gpumsg" width:560];
@@ -4038,15 +4111,22 @@ static void RLPMetaClearStackRow(NSStackView *row) {
     if ([bk isEqualToString:@"coreaudio"]) [self loadInputDevices];
 }
 - (void)onInDevice:(id)sender {
-    NSString *n = self.inDevicePopup.titleOfSelectedItem;
-    if (!n.length) return;
-    // web sp_indev 的 option value 是设备 id；原生下拉显示 name，保存时必须归一成 id。
-    NSString *value = n;
-    for (NSDictionary *d in self.inDevices) {
-        NSString *nm = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @"";
-        NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
-        if (did.length && (nm == n || [nm isEqualToString:n])) { value = did; break; }
+    id ro = self.inDevicePopup.selectedItem.representedObject;
+    NSString *value = [ro isKindOfClass:[NSString class]] ? (NSString *)ro : nil;
+    if (!value) {
+        if (self.inDevicePopup.indexOfSelectedItem <= 0) {
+            value = @"";
+        } else {
+            NSString *n = self.inDevicePopup.titleOfSelectedItem ?: @"";
+            value = n;
+            for (NSDictionary *d in self.inDevices) {
+                NSString *nm = [d[@"name"] isKindOfClass:[NSString class]] ? d[@"name"] : @"";
+                NSString *did = [d[@"id"] isKindOfClass:[NSString class]] ? d[@"id"] : @"";
+                if (did.length && [nm isEqualToString:n]) { value = did; break; }
+            }
+        }
     }
+    self.savedInDev = value;
     [self postKey:@"indev" value:value];
 }
 
@@ -4346,9 +4426,9 @@ static NSInteger RLPGpuIndexForVendor(NSString *v) {
             available ? RLPTr(@"GPU 可用") : RLPTr(@"走 CPU（未找到可执行的 GPU 后端）"), metalInfo];
         // Metal 项的标题带上真实状态（web 同款：能用的用真名字，不可用的说清楚）。
         NSString *metalTitle = !metal
-            ? [RLPTr(@"Apple Metal（GPU 加速）") stringByAppendingString:RLPTr(@" · 后端库未就位")]
-            : (usable ? RLPTr(@"Apple Metal（GPU 加速）")
-                      : [RLPTr(@"Apple Metal（GPU 加速）") stringByAppendingString:RLPTr(@" · 已就位，本机未检测到可用 Metal 设备（会自动回退）")]);
+            ? [RLPTr(@"Apple Metal（只保留，效果差）") stringByAppendingString:RLPTr(@" · 后端库未就位")]
+            : (usable ? RLPTr(@"Apple Metal（只保留，效果差）")
+                      : [RLPTr(@"Apple Metal（只保留，效果差）") stringByAppendingString:RLPTr(@" · 已就位，本机未检测到可用 Metal 设备（会自动回退）")]);
         NSMenuItem *item = [self_.gpuPopup itemAtIndex:1];
         if (item) item.title = metalTitle;
     }];
@@ -5007,6 +5087,9 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
 - (void)onExternalSettingsChanged:(NSNotification *)note {
     if (note.object == self || (self.eqView && note.object == self.eqView)) return;
     if (![RLPCoreClient shared].started) return;
+    if ([note.userInfo[@"modeSwitch"] boolValue]) {
+        self.forceResetMissingOnNextLoad = YES;
+    }
     [self reloadData];
 }
 
@@ -5042,10 +5125,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
             return;
         }
         [self_.devicePopup removeAllItems];
-        [self_.inDevicePopup removeAllItems];
         // web #sp_device：首项 value="" 的「默认设备」，设备项 value = 稳定 id
         //（ui_script.h:5318 / 5337）。旧实现只填显示名 ⟹ 选中后 POST 的也是显示名，
         // 后端按 id 解析（rtaweb.cpp:2764），名字匹配只能算兜底。
+        // 注意：绝不能在这里碰 inDevicePopup，输入设备只由 /api/input/devices（loadInputDevices）填充。
         [self_.devicePopup addItemWithTitle:RLPTr(@"默认设备")];
         [[self_.devicePopup itemAtIndex:0] setRepresentedObject:@""];
         for (id d in (NSArray *)devs) {
@@ -5057,9 +5140,7 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
             if (did.length)
                 [[self_.devicePopup itemAtIndex:self_.devicePopup.numberOfItems - 1]
                     setRepresentedObject:did];
-            [self_.inDevicePopup addItemWithTitle:name];
         }
-        if (!self_.inDevicePopup.numberOfItems) [self_.inDevicePopup addItemWithTitle:RLPTr(@"默认输入设备")];
         // settings 的 GET 可能比设备列表先到：按记下的 id 再回显一次。
         [self_ selectSavedDevice];
     }];
@@ -5137,7 +5218,10 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
     const NSTimeInterval getIssueAt = [NSProcessInfo processInfo].systemUptime;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        std::fprintf(stderr, "[DIAG] GET completion seq=%lu cur=%lu\n", (unsigned long)seq, (unsigned long)self_.settingsGetSeq);
+        if (std::getenv("RLP_SETTINGS_DIAG")) {
+            std::fprintf(stderr, "[DIAG] GET completion seq=%lu cur=%lu\n",
+                         (unsigned long)seq, (unsigned long)self_.settingsGetSeq);
+        }
         if (!self_ || seq != self_.settingsGetSeq) return;
         NSDictionary *rawKV = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : nil;
         if (!rawKV) {
@@ -5154,6 +5238,35 @@ static BOOL RLPFeedbackTextBlank(NSString *s) {
         for (NSString *k in rawKV) {
             NSNumber *postedAt = self_.settingsKeyPostAt[k];
             if (postedAt && postedAt.doubleValue > getIssueAt) [kvFiltered removeObjectForKey:k];
+        }
+        NSString *incomingMode = [rawKV[@"uimode"] isKindOfClass:[NSString class]]
+            ? ([(NSString *)rawKV[@"uimode"] isEqualToString:@"pro"] ? @"pro" : @"listen")
+            : @"listen";
+        const BOOL modeSwitched = self_.forceResetMissingOnNextLoad ||
+            (self_.lastLoadedUiMode.length > 0 && ![self_.lastLoadedUiMode isEqualToString:incomingMode]);
+        self_.forceResetMissingOnNextLoad = NO;
+        self_.lastLoadedUiMode = incomingMode;
+        if (modeSwitched) {
+            NSDictionary *modeDefaults = @{
+                @"loudness": @"0", @"isp": @"1", @"twostage": @"1", @"directsdm": @"0",
+                @"atten": @"", @"taps": @"", @"transition": @"", @"modcut": @"", @"moddith": @"",
+                @"rate": @"follow", @"rateFamilyPolicy": @"compatible",
+                @"filter": @"", @"filterNx": @"", @"sdmfilt": @"", @"sdmfiltnx": @"",
+                @"phase": @"", @"shaper": @"auto", @"modfamily": @"dsd", @"modorder": @"5",
+                @"dsdkind": @"fir", @"dsdconv": @"narrow"
+            };
+            [modeDefaults enumerateKeysAndObjectsUsingBlock:^(NSString *dk, NSString *dv, BOOL *stop) {
+                (void)stop;
+                if (!rawKV[dk] && !kvFiltered[dk]) kvFiltered[dk] = dv;
+            }];
+            if (!rawKV[@"eq"] && self_.eqField && ![self_ isControlDirty:self_.eqField]) {
+                self_.eqField.stringValue = @"";
+                if (self_.eqField.identifier.length) self_.lastLoadedValues[self_.eqField.identifier] = @"";
+            }
+            if (!rawKV[@"dsd"] && !kvFiltered[@"dsd"]) {
+                kvFiltered[@"dsd"] = @"0";
+            }
+            if (self_.calView) [self_.calView reload];
         }
         NSDictionary *kv = kvFiltered;
         // U12（2026-11-16）：拐点准入提示由同一份 GET 的顶层 sdm 对象驱动；
@@ -5550,13 +5663,18 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
     }
     NSMutableString *body = [NSMutableString stringWithFormat:@"mode=%@",
                              wantNull ? @"null" : (wantMonitor ? @"monitor" : @"record")];
-    const NSInteger di = self.inDevicePopup.indexOfSelectedItem;
-    NSString *devId = @"";
-    if (di > 0 && di - 1 < (NSInteger)self.inDevices.count) {
-        id d = self.inDevices[di - 1][@"id"];
-        if ([d isKindOfClass:[NSString class]]) devId = d;
+    id ro = self.inDevicePopup.selectedItem.representedObject;
+    NSString *devId = [ro isKindOfClass:[NSString class]] ? (NSString *)ro : @"";
+    if (!devId.length) {
+        const NSInteger di = self.inDevicePopup.indexOfSelectedItem;
+        if (di > 0 && di - 1 < (NSInteger)self.inDevices.count) {
+            id d = self.inDevices[di - 1][@"id"];
+            if ([d isKindOfClass:[NSString class]]) devId = d;
+        }
     }
     if (devId.length) [body appendFormat:@"&dev=%@", RLPEnc(devId)];
+    const double inBuf = self.inBufField.doubleValue;
+    if (inBuf > 0) [body appendFormat:@"&inbuf=%.0f", inBuf];
     const double secs = self.inSecondsField.doubleValue;
     if (secs > 0) [body appendFormat:@"&seconds=%.3f", secs];
     NSString *out = [self.inOutField.stringValue stringByTrimmingCharactersInSet:
@@ -5584,6 +5702,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
             ? (wantMonitor ? RLPTr(@"直通监听已启动") : RLPTr(@"录制采集已启动"))
             : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil)
                ?: RLPTr(@"开始采集失败"));
+        [self_.inputView reload];
     }];
 }
 
@@ -5605,6 +5724,7 @@ static BOOL sRLPConfirmBitPerfectFix = YES;
         self_.inStopBtn.enabled = NO;
         self_.inMsg.stringValue = ok ? RLPTr(@"已停止")
             : (([json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : nil) ?: RLPTr(@"停止失败"));
+        [self_.inputView reload];
     }];
 }
 
@@ -6149,6 +6269,7 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     // 主题切换后清缓存重建页签前，先快照 sp_eq 等各页未提交草稿与滚动/焦点状态。
     NSDictionary *paneState = [self capturePaneViewState];
@@ -6158,12 +6279,20 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
     //（那份可能含 field editor 文本，比现在再读一次更完整）。
     if (!self.eqDraftState && self.eqView) self.eqDraftState = [self.eqView rlp_captureDraftState];
     [self captureLlmModelStateIfNeeded];
+    [self.castView stopPolling];
+    [self.inputView stopPolling];
+    [self.libStatsView stopPolling];
     [self.paneCache removeAllObjects];
     self.diagGroup = nil;
     self.fbGroup = nil;
     self.srvGroup = nil;
     self.castGroup = nil;
     self.serversView = nil;
+    self.castView = nil;
+    self.inputView = nil;
+    self.libStatsView = nil;
+    self.calView = nil;
+    self.metaSourcesView = nil;
     [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];
@@ -6213,6 +6342,8 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
 }
 
 - (void)applyLanguage {
+    self.pageTitle = RLPTr(@"设置");
+    if (!self.isViewLoaded) return;
     NSString *curLang = RLPLanguage();
     if ([self.lastAppliedLang isEqualToString:curLang]) return;
     self.lastAppliedLang = curLang;
@@ -6235,12 +6366,20 @@ static NSUInteger RLPUTF8Bytes(NSString *s) {
         [self.eqView applyLanguage];
     }
 
+    [self.castView stopPolling];
+    [self.inputView stopPolling];
+    [self.libStatsView stopPolling];
     [self.paneCache removeAllObjects];
     self.diagGroup = nil;
     self.fbGroup = nil;
     self.srvGroup = nil;
     self.castGroup = nil;
     self.serversView = nil;
+    self.castView = nil;
+    self.inputView = nil;
+    self.libStatsView = nil;
+    self.calView = nil;
+    self.metaSourcesView = nil;
     [self resetMetaResponsiveState];
     [self rebuildTabs];
     [self showTab:self.tab];

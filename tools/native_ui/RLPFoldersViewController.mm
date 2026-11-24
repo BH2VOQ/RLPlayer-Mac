@@ -16,17 +16,25 @@
 @property (nonatomic, strong) NSArray<NSString *> *dirs;
 @property (nonatomic, strong) NSArray<NSString *> *files;
 @property (nonatomic, strong) NSTableView *table;
+@property (nonatomic, strong) NSScrollView *scrollView;
+@property (nonatomic, strong) NSTableColumn *nameColumn;
 @property (nonatomic, strong) NSTextField *pathField;      // web #fPath（可输入后回车跳转）
 @property (nonatomic, strong) NSPopUpButton *rootPopup;     // web #fRoot（音乐库根目录跳转）
 @property (nonatomic, strong) NSButton *goBtn;              // web #fGo
 @property (nonatomic, strong) NSButton *upBtn;
 @property (nonatomic, strong) NSButton *refreshBtn;
 @property (nonatomic) BOOL loaded;
+@property (nonatomic, assign) BOOL lastLoadFailed;
+@property (nonatomic, copy, nullable) NSString *lastLoadError;
 // web 空态：`此目录没有音频文件`（只有目录/文件都为空时出现，dirs 非空不算空）。
 @property (nonatomic, strong) NSTextField *emptyLabel;
 @end
 
 @implementation RLPFoldersViewController
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"文件夹")];
@@ -81,6 +89,8 @@
     self.table.headerView = nil;
     self.table.rowHeight = 30;
     self.table.intercellSpacing = NSMakeSize(0, 1);
+    if (@available(macOS 11.0, *)) self.table.style = NSTableViewStylePlain;
+    self.table.columnAutoresizingStyle = NSTableViewLastColumnOnlyAutoresizingStyle;
     self.table.dataSource = self;
     self.table.delegate = self;
     self.table.target = self;
@@ -90,9 +100,16 @@
     self.table.doubleAction = @selector(onRowDoubleClick:);
     NSTableColumn *icon = [[NSTableColumn alloc] initWithIdentifier:@"icon"];
     icon.width = 26;
+    icon.minWidth = 26;
+    icon.maxWidth = 26;
+    icon.resizingMask = NSTableColumnNoResizing;
     [self.table addTableColumn:icon];
     NSTableColumn *name = [[NSTableColumn alloc] initWithIdentifier:@"name"];
-    name.width = 640;
+    name.width = 400;
+    name.minWidth = 80;
+    name.maxWidth = 10000;
+    name.resizingMask = NSTableColumnAutoresizingMask;
+    self.nameColumn = name;
     [self.table addTableColumn:name];
 
     NSMenu *menu = [[NSMenu alloc] init];
@@ -111,7 +128,15 @@
     scroll.autohidesScrollers = YES;
     scroll.documentView = self.table;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scrollView = scroll;
     [host addSubview:scroll];
+    if (scroll.contentView) {
+        scroll.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onFoldersClipFrameChanged:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:scroll.contentView];
+    }
 
     self.emptyLabel = RLPLabel(RLPTr(@"此目录没有音频文件"), t.body, t.mut2);
     self.emptyLabel.identifier = @"folders.empty";
@@ -194,6 +219,8 @@
 - (void)onGoIn:(NSTextField *)sender { (void)sender; [self onGo:nil]; }
 
 - (void)loadDir:(NSString *)dir {
+    self.lastLoadFailed = NO;
+    self.lastLoadError = nil;
     if (![RLPCoreClient shared].started) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         return;
@@ -204,18 +231,23 @@
     [[RLPCoreClient shared] getJSON:path completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) strongSelf = self_;
         if (!strongSelf) return;
-        strongSelf.loaded = YES;
         if (!json || ![json[@"ok"] boolValue]) {
             // 2026-11-17（UI 缺口审计已证实）：旧实现只弹 toast，首屏失败时空态标签仍隐藏
             // ⟹ 整页空白、用户不知道发生了什么。把后端给的 error 原样显示出来。
-            NSString *why = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"]
-                                                                          : RLPTr(@"目录读取失败");
+            strongSelf.lastLoadFailed = YES;
+            NSString *rawErr = ([json[@"error"] isKindOfClass:[NSString class]] && [json[@"error"] length])
+                ? json[@"error"] : nil;
+            strongSelf.lastLoadError = rawErr;
+            NSString *why = rawErr ?: RLPTr(@"目录读取失败");
             strongSelf.emptyLabel.stringValue = why;
             strongSelf.emptyLabel.hidden = NO;
             [strongSelf setSubtitle:RLPTr(@"读取失败")];
             RLPToast(why);
             return;
         }
+        strongSelf.loaded = YES;
+        strongSelf.lastLoadFailed = NO;
+        strongSelf.lastLoadError = nil;
         strongSelf.dir = json[@"dir"] ?: @"";
         strongSelf.dirs = json[@"dirs"] ?: @[];
         strongSelf.files = json[@"files"] ?: @[];
@@ -268,6 +300,10 @@
     if (!label) {
         label = RLPLabel(@"", t.body, t.text);
         label.identifier = ident;
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        label.maximumNumberOfLines = 1;
+        [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
     }
     label.stringValue = name;
     label.textColor = isDir ? t.text : t.mut;
@@ -366,10 +402,41 @@
     }];
 }
 
+- (void)onFoldersClipFrameChanged:(NSNotification *)note {
+    (void)note;
+    [self layoutFolderColumns];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    [self layoutFolderColumns];
+}
+
+- (void)layoutFolderColumns {
+    if (!self.table || !self.scrollView || !self.nameColumn) return;
+    const CGFloat avail = NSWidth(self.scrollView.contentView.bounds);
+    if (!(avail > 1.0)) return;
+    const CGFloat targetW = MAX(80.0, avail - 26.0 - self.table.intercellSpacing.width);
+    if (fabs(self.nameColumn.width - targetW) > 0.5) {
+        self.nameColumn.width = targetW;
+        [self.table tile];
+    }
+}
+
 - (void)applyTheme {
     [super applyTheme];
-    self.pathField.textColor = [RLPTheme current].text;
+    if (!self.isViewLoaded) return;
+    RLPTheme *t = [RLPTheme current];
+    self.pathField.textColor = t.text;
+    self.emptyLabel.textColor = t.mut2;
+    NSIndexSet *sel = [self.table.selectedRowIndexes copy];
+    NSPoint origin = self.scrollView ? self.scrollView.contentView.bounds.origin : NSZeroPoint;
     [self.table reloadData];
+    if (sel.count) [self.table selectRowIndexes:sel byExtendingSelection:NO];
+    if (self.scrollView) {
+        [self.scrollView.contentView scrollToPoint:origin];
+        [self.scrollView reflectScrolledClipView:self.scrollView.contentView];
+    }
 }
 
 
@@ -402,18 +469,24 @@
     if (self.rootPopup.numberOfItems > 0) {
         [self.rootPopup itemAtIndex:0].title = RLPTr(@"音乐库…");
     }
-    self.emptyLabel.stringValue = RLPTr(@"此目录没有音频文件");
     NSArray<NSMenuItem *> *menuItems = self.table.menu.itemArray;
     if (menuItems.count >= 2) {
         menuItems[0].title = RLPTr(@"播放");
         menuItems[1].title = RLPTr(@"删除磁盘目录…");
     }
-    if (self.loaded) {
+    if (self.lastLoadFailed) {
+        [self setSubtitle:RLPTr(@"读取失败")];
+        self.emptyLabel.stringValue = self.lastLoadError.length ? self.lastLoadError : RLPTr(@"目录读取失败");
+    } else if (self.loaded) {
+        self.emptyLabel.stringValue = RLPTr(@"此目录没有音频文件");
         [self setSubtitle:[NSString stringWithFormat:@"%ld %@ · %ld %@",
             (long)self.dirs.count, RLPTr(@"个文件夹"),
             (long)self.files.count, RLPTr(@"首")]];
     } else if (![RLPCoreClient shared].started) {
+        self.emptyLabel.stringValue = RLPTr(@"此目录没有音频文件");
         [self setSubtitle:RLPTr(@"核心未启动")];
+    } else {
+        self.emptyLabel.stringValue = RLPTr(@"此目录没有音频文件");
     }
 }
 

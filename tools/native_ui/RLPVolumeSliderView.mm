@@ -131,6 +131,17 @@ static const CGFloat kKnobR = 7.0;         // 滑块半径
 - (NSButton *)muteButton { return _mute; }
 - (NSTextField *)valueLabel { return _value; }
 
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    if (_value) _value.textColor = t.mut;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)applyLanguage {
+    if (_mute) _mute.toolTip = RLPTr(@"静音 / 取消静音");
+    [self refreshAppearance];
+}
+
 #pragma mark - 几何
 
 /// 轨道矩形按当前 bounds 现算，不依赖 layout 是否已经跑过。

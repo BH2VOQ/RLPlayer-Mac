@@ -45,8 +45,37 @@
 #include <thread>
 #include <cstring>
 #include <atomic>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 namespace rta::audio {
+
+namespace audio_detail {
+inline const std::atomic<bool>*& current_cancellation_token() {
+    static thread_local const std::atomic<bool>* s_token = nullptr;
+    return s_token;
+}
+inline bool is_cancelled() {
+    const std::atomic<bool>* tok = current_cancellation_token();
+    return tok && tok->load(std::memory_order_acquire);
+}
+} // namespace audio_detail
+
+class AudioLoadCancellationScope {
+public:
+    explicit AudioLoadCancellationScope(const std::atomic<bool>* token)
+        : prev_(audio_detail::current_cancellation_token()) {
+        audio_detail::current_cancellation_token() = token;
+    }
+    ~AudioLoadCancellationScope() {
+        audio_detail::current_cancellation_token() = prev_;
+    }
+    AudioLoadCancellationScope(const AudioLoadCancellationScope&) = delete;
+    AudioLoadCancellationScope& operator=(const AudioLoadCancellationScope&) = delete;
+private:
+    const std::atomic<bool>* prev_ = nullptr;
+};
 
 inline std::string lowerExt(const std::string& p) {
     const size_t d = p.find_last_of('.');
@@ -312,6 +341,13 @@ inline bool read_wav_stream_pipe(int fd, rta::platform::PipeProcess& proc,
 
     // ---- 阶段一：凑齐 WAV 头 ----
     while (!hdrOk) {
+        if (audio_detail::is_cancelled()) {
+#ifndef _WIN32
+            if (proc.pid > 0) ::kill(proc.pid, SIGKILL);
+#endif
+            if (errOut) *errOut = "解码已取消";
+            return false;
+        }
         std::vector<uint8_t> chunk;
         const long got = read_once(chunk, 4096, 20 /* ms */);
         if (got == -2) return false;
@@ -388,6 +424,13 @@ inline bool read_wav_stream_pipe(int fd, rta::platform::PipeProcess& proc,
     std::vector<uint8_t> readChunk;
     readChunk.reserve(65536);
     while (true) {
+        if (audio_detail::is_cancelled()) {
+#ifndef _WIN32
+            if (proc.pid > 0) ::kill(proc.pid, SIGKILL);
+#endif
+            if (errOut) *errOut = "解码已取消";
+            return false;
+        }
         readChunk.clear();
         const long got = read_once(readChunk, 65536, 20 /* ms */);
         if (got == -2) return false;
@@ -1064,12 +1107,18 @@ inline AudioBuffer read_via_ffmpeg_stream(const std::string& path, LoadNote* not
     std::string streamError;
 
     for (int i = 0; i < kDecodeTries; ++i) {
+        if (audio_detail::is_cancelled()) {
+            throw std::runtime_error("解码已取消");
+        }
         ++attempts;
         fflog.clear();
         streamError.clear();
         buf = AudioBuffer{};
 
         if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(120 * i));  // 退避
+        if (audio_detail::is_cancelled()) {
+            throw std::runtime_error("解码已取消");
+        }
 
         rta::platform::PipeProcess proc;
         const auto t_ff_0 = std::chrono::steady_clock::now();
@@ -1116,6 +1165,9 @@ inline AudioBuffer read_via_ffmpeg_stream(const std::string& path, LoadNote* not
         // 先等进程退出再判读结果：退出码是"ffmpeg 到底成没成"的唯一权威。
         rc = proc.wait();
         errThread.join();
+        if (audio_detail::is_cancelled()) {
+            throw std::runtime_error("解码已取消");
+        }
 
         const auto t_ff_1 = std::chrono::steady_clock::now();
         ffmpeg_ms += std::chrono::duration<double, std::milli>(t_ff_1 - t_ff_0).count();
@@ -1182,6 +1234,7 @@ inline AudioBuffer read_via_ffmpeg(const std::string& path, LoadNote* note = nul
     } catch (const DecodeFailure&) {
         throw; // Frame-count evidence is not a pipe limitation; file fallback cannot repair it.
     } catch (const std::exception& e) {
+        if (audio_detail::is_cancelled()) throw;
         // 源文件探针归因：如果源文件此刻确实读不了（权限/不存在），回退临时文件同样
         // 无法解决，必须直接重抛，保留原始退出码与权威归因。
         const std::string unreadable = source_read_probe(path);
@@ -1232,6 +1285,7 @@ inline AudioBuffer read_any(const std::string& path, LoadNote* note = nullptr) {
                 throw std::runtime_error(std::string("解码阶段异常: ") + e.what() +
                                          "(文件=" + path + ",阶段=read_dsd_native)");
             } catch (const std::exception& e) {
+                if (audio_detail::is_cancelled()) throw;
                 // 回退策略（ROADMAP P0）：读不了的文件仍走 ffmpeg，并在 note 里说明。
                 // 注意 length_error/bad_alloc 已在上面被拦截重抛 —— 不允许"vector too long"
                 // 被这个回退吞掉后继续播放。

@@ -222,6 +222,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 /// 请求世代：连续打字/清空时只允许最新一次响应落地（否则旧响应会把新结果覆盖掉）。
 @property (nonatomic, assign) NSUInteger reloadSeq;
 @property (nonatomic, assign) BOOL hasLoaded;
+@property (nonatomic, assign) BOOL lastLoadFailed;
 @property (nonatomic, copy) NSArray *lastRoots;
 // 专辑页空态（web emptyStateHtml 的非 classic 分支）：只在曲库 0 张专辑时出现。
 @property (nonatomic, strong) NSView *emptyCard;
@@ -340,6 +341,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     self.emptyCard.wantsLayer = YES;
     self.emptyCard.layer.cornerRadius = 12;
     self.emptyCard.layer.borderWidth = 1;
+    self.emptyCard.layer.borderColor = t.line.CGColor;
+    self.emptyCard.layer.backgroundColor = t.bg2.CGColor;
     self.emptyCard.hidden = YES;
     [root addSubview:self.emptyCard];
 
@@ -525,6 +528,7 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 /// 不带 q 才是整库。旧原生的 reload 永远发裸路径 ⟹ 顶栏搜索在专辑页根本没有过滤能力。
 - (void)reloadWithQuery:(NSString *)query {
     self.query = query ?: @"";
+    self.lastLoadFailed = NO;
     if (![RLPCoreClient shared].started) {
         [self.albums removeAllObjects];
         self.countLabel.stringValue = RLPTr(@"核心未启动");
@@ -541,11 +545,13 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
         if (!self_) return;
         if (self_.reloadSeq != seq) return;   // 已发出更新的查询，旧响应作废
         if (!json || ![json[@"ok"] boolValue]) {
+            self_.lastLoadFailed = YES;
             self_.countLabel.stringValue = RLPTr(@"加载失败");
             return;
         }
         NSArray<RLPAlbum *> *list = [RLPAlbum albumsFromJSON:json];
         self_.hasLoaded = YES;
+        self_.lastLoadFailed = NO;
         [self_.albums setArray:list];
         const CGFloat w = [self_ effectiveGridWidth];
         if (w > 1.0) [self_ relayoutGridForWidth:w];
@@ -750,12 +756,28 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
 }
 
 - (void)applyTheme {
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     self.view.layer.backgroundColor = t.bg.CGColor;
     self.titleLabel.textColor = t.text;
     self.countLabel.textColor = t.mut;
+    if (self.emptyCard) {
+        self.emptyCard.layer.borderColor = t.line.CGColor;
+        self.emptyCard.layer.backgroundColor = t.bg2.CGColor;
+    }
+    self.emptyTitleLabel.textColor = t.text;
+    self.emptyHintLabel.textColor = t.mut2;
+    self.emptyRootLabel.textColor = t.mut2;
     self.collection.backgroundColors = @[ NSColor.clearColor ];
+    NSSet<NSIndexPath *> *sel = [self.collection.selectionIndexPaths copy];
+    NSScrollView *scroll = self.collection.enclosingScrollView;
+    NSPoint origin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
     [self.collection reloadData];
+    if (sel.count) self.collection.selectionIndexPaths = sel;
+    if (scroll) {
+        [scroll.contentView scrollToPoint:origin];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
 }
 
 - (void)onMenuEnqueue:(id)sender {
@@ -777,6 +799,8 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
     for (NSUInteger i = 0; i < menuItems.count && i < menuTitles.count; ++i) {
         menuItems[i].title = RLPTr(menuTitles[i]);
     }
+    self.emptyAddBtn.title = RLPTr(@"添加音乐目录");
+    self.emptyScanBtn.title = RLPTr(@"扫描目录");
     self.emptyStationBtn.title = RLPTr(@"打开快速开始");
     if (!self.emptyCard.hidden) {
         if (self.query.length > 0) {
@@ -786,10 +810,14 @@ static const NSUserInterfaceItemIdentifier kAlbumItemID = @"RLPAlbumItem";
             [self refreshEmptyStateWithRoots:self.lastRoots ?: @[]];
         }
     }
-    if (self.hasLoaded) {
+    if (self.lastLoadFailed) {
+        self.countLabel.stringValue = RLPTr(@"加载失败");
+    } else if (self.hasLoaded) {
         NSString *cnt = [NSString stringWithFormat:RLPTr(@"%ld 张专辑"), (long)self.albums.count];
         self.countLabel.stringValue = cnt;
         if (self.view.window) [[NSNotificationCenter defaultCenter] postNotificationName:@"RLPPageCountNotification" object:cnt];
+    } else if (![RLPCoreClient shared].started) {
+        self.countLabel.stringValue = RLPTr(@"核心未启动");
     }
     NSSet<NSIndexPath *> *sel = [self.collection.selectionIndexPaths copy];
     NSScrollView *scroll = self.collection.enclosingScrollView;

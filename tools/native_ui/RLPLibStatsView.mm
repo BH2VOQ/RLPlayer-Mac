@@ -16,6 +16,7 @@
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, assign) NSUInteger seq;
 @property (nonatomic, assign) BOOL hasData;
+@property (nonatomic, copy, nullable) NSDictionary *lastJson;
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *valueLabels;
 @end
 
@@ -102,7 +103,43 @@
     self.timer = nil;
 }
 
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (!self.window) [self stopPolling];
+}
+
 - (void)dealloc { [self stopPolling]; }
+
+- (void)renderFromStatsJson:(NSDictionary *)json {
+    const NSInteger tracks = [json[@"tracks"] integerValue];
+    const NSInteger albums = [json[@"albums"] respondsToSelector:@selector(integerValue)] ? [json[@"albums"] integerValue] : 0;
+    const NSInteger th = [json[@"scanThreads"] respondsToSelector:@selector(integerValue)] ? [json[@"scanThreads"] integerValue] : 0;
+    const double ms = [json[@"lastScanMs"] respondsToSelector:@selector(doubleValue)] ? [json[@"lastScanMs"] doubleValue] : 0.0;
+    const BOOL scanning = [json[@"scanning"] respondsToSelector:@selector(boolValue)] && [json[@"scanning"] boolValue];
+
+    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array];
+    [pairs addObject:@[RLPTr(@"曲目"), [NSString stringWithFormat:@"%ld", (long)tracks]]];
+    [pairs addObject:@[RLPTr(@"专辑"), [NSString stringWithFormat:@"%ld", (long)albums]]];
+    // 0 = 自动；显示「自动」而非 0（web 同口径）。
+    [pairs addObject:@[RLPTr(@"扫描线程（生效）"), th > 0 ? [NSString stringWithFormat:@"%ld", (long)th] : RLPTr(@"自动")]];
+    [pairs addObject:@[RLPTr(@"上次扫描"), ms > 0 ? [NSString stringWithFormat:@"%.1f s", ms / 1000.0] : @"—"]];
+    if (scanning) {
+        const NSInteger scanned = [json[@"scanned"] respondsToSelector:@selector(integerValue)] ? [json[@"scanned"] integerValue] : 0;
+        const NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)] ? [json[@"total"] integerValue] : 0;
+        [pairs addObject:@[RLPTr(@"进度"), [NSString stringWithFormat:@"%ld / %ld", (long)scanned, (long)total]]];
+    }
+    [self renderRows:pairs];
+    [self applyTheme];
+}
+
+- (void)applyLanguage {
+    if (self.hasData && self.lastJson) {
+        [self renderFromStatsJson:self.lastJson];
+    } else {
+        [self renderRows:@[]];
+        [self applyTheme];
+    }
+}
 
 - (void)reload {
     if (![RLPCoreClient shared].started) return;
@@ -117,28 +154,12 @@
             return;
         }
         self_.hasData = YES;
-        const NSInteger tracks = [json[@"tracks"] integerValue];
-        const NSInteger albums = [json[@"albums"] respondsToSelector:@selector(integerValue)] ? [json[@"albums"] integerValue] : 0;
-        const NSInteger th = [json[@"scanThreads"] respondsToSelector:@selector(integerValue)] ? [json[@"scanThreads"] integerValue] : 0;
-        const double ms = [json[@"lastScanMs"] respondsToSelector:@selector(doubleValue)] ? [json[@"lastScanMs"] doubleValue] : 0.0;
+        self_.lastJson = json;
         const BOOL scanning = [json[@"scanning"] respondsToSelector:@selector(boolValue)] && [json[@"scanning"] boolValue];
-
-        NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array];
-        [pairs addObject:@[RLPTr(@"曲目"), [NSString stringWithFormat:@"%ld", (long)tracks]]];
-        [pairs addObject:@[RLPTr(@"专辑"), [NSString stringWithFormat:@"%ld", (long)albums]]];
-        // 0 = 自动；显示「自动」而非 0（web 同口径）。
-        [pairs addObject:@[RLPTr(@"扫描线程（生效）"), th > 0 ? [NSString stringWithFormat:@"%ld", (long)th] : RLPTr(@"自动")]];
-        [pairs addObject:@[RLPTr(@"上次扫描"), ms > 0 ? [NSString stringWithFormat:@"%.1f s", ms / 1000.0] : @"—"]];
-        if (scanning) {
-            const NSInteger scanned = [json[@"scanned"] respondsToSelector:@selector(integerValue)] ? [json[@"scanned"] integerValue] : 0;
-            const NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)] ? [json[@"total"] integerValue] : 0;
-            [pairs addObject:@[RLPTr(@"进度"), [NSString stringWithFormat:@"%ld / %ld", (long)scanned, (long)total]]];
-        }
-        [self_ renderRows:pairs];
-        [self_ applyTheme];
+        [self_ renderFromStatsJson:json];
 
         // 扫描中 1.5s 轮询；停下来即停表（web pollSchedule 同口径）。
-        if (scanning) {
+        if (scanning && self_.window) {
             [self_ stopPolling];
             __weak __typeof__(self_) weak2 = self_;
             self_.timer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *tm) {

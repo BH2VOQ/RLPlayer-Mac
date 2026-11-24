@@ -44,6 +44,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSTextField *)valueFieldForBand:(NSUInteger)i;
 /// 第 i 段下方显示的频率文本（判据用）。
 - (NSString *)freqLabelForBand:(NSUInteger)i;
+- (void)applyTheme;
+- (void)applyLanguage;
 
 /// 绘制自证：drawRect 次数 + 最近一次画出来的把手位置（判据区分"数据变了"与"变了没重绘"）。
 @property (nonatomic, readonly) NSInteger drawCount;

@@ -8,6 +8,8 @@ static const CGFloat kInspH = 30.0;
 
 @implementation RLPEQFaderInspector {
     NSTextField *_freqLabel;
+    NSTextField *_qLabel;
+    NSTextField *_typeLabel;
     NSTextField *_qField;
     NSPopUpButton *_typePopup;
     NSButton *_enableSwitch;
@@ -40,6 +42,8 @@ static const CGFloat kInspH = 30.0;
     [self addSubview:_freqLabel];
 
     NSTextField *ql = RLPLabel(@"Q", t.small, t.mut);
+    ql.identifier = @"eq.insp.qLabel";
+    _qLabel = ql;
     [self addSubview:ql];
     _qField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     _qField.identifier = @"eq.insp.q";
@@ -53,6 +57,7 @@ static const CGFloat kInspH = 30.0;
 
     NSTextField *tl = RLPLabel(RLPTr(@"类型"), t.small, t.mut);
     tl.identifier = @"eq.insp.typeLabel";
+    _typeLabel = tl;
     [self addSubview:tl];
     _typePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _typePopup.identifier = @"eq.insp.type";
@@ -143,6 +148,14 @@ static const CGFloat kInspH = 30.0;
 - (void)onEnable:(NSButton *)s {
     if (self.bandIndex < 0 || !self.onEnabledChanged) return;
     self.onEnabledChanged(self.bandIndex, s.state == NSControlStateValueOn);
+}
+
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    _freqLabel.textColor = t.text;
+    _qLabel.textColor = t.mut;
+    _typeLabel.textColor = t.mut;
+    [self setNeedsDisplay:YES];
 }
 
 - (void)applyLanguage {

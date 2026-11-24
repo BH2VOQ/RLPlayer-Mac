@@ -38,10 +38,22 @@
 @property (nonatomic, strong) NSButton *refreshBtn;
 @property (nonatomic, strong) NSTextField *chipLabel;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *sampleButtons;
+@property (nonatomic, strong) NSScrollView *scrollView;
+@property (nonatomic, strong) NSView *searchCard;
+@property (nonatomic, strong) NSLayoutConstraint *titleWidthConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *composerWidthConstraint;
+@property (nonatomic, strong) NSView *chipsContainer;
+@property (nonatomic, strong) NSLayoutConstraint *chipsHeightConstraint;
 @property (nonatomic, copy, nullable) NSDictionary *lastJSON;
+@property (nonatomic, copy, nullable) NSString *statusMessageZh;
+@property (nonatomic, assign) BOOL layingOutControls;
 @end
 
 @implementation RLPWorksViewController
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 
 - (instancetype)init {
     self = [super initWithTitle:RLPTr(@"古典作品 · 演绎版本")];
@@ -61,7 +73,15 @@
     scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scrollView = scroll;
     [host addSubview:scroll];
+    if (scroll.contentView) {
+        scroll.contentView.postsFrameChangedNotifications = YES;
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(onWorksClipFrameChanged:)
+                                                     name:NSViewFrameDidChangeNotification
+                                                   object:scroll.contentView];
+    }
 
     NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -109,6 +129,7 @@
     card.layer.borderWidth = 1;
     card.layer.borderColor = t.hairline.CGColor;
     card.identifier = @"works.searchcard";
+    self.searchCard = card;
     [stack addArrangedSubview:card];
     [NSLayoutConstraint activateConstraints:@[
         [card.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48],
@@ -148,33 +169,36 @@
     self.refreshBtn = refresh;
     for (NSView *v in @[tl, cl, self.titleField, self.composerField, search, refresh])
         [card addSubview:v];
+    self.titleWidthConstraint = [self.titleField.widthAnchor constraintEqualToConstant:260];
+    self.composerWidthConstraint = [self.composerField.widthAnchor constraintEqualToConstant:240];
     [NSLayoutConstraint activateConstraints:@[
         [tl.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
         [tl.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
         [self.titleField.leadingAnchor constraintEqualToAnchor:tl.leadingAnchor],
         [self.titleField.topAnchor constraintEqualToAnchor:tl.bottomAnchor constant:4],
-        [self.titleField.widthAnchor constraintEqualToConstant:260],
+        self.titleWidthConstraint,
         [cl.leadingAnchor constraintEqualToAnchor:self.titleField.trailingAnchor constant:16],
         [cl.topAnchor constraintEqualToAnchor:tl.topAnchor],
+        [cl.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-16],
         [self.composerField.leadingAnchor constraintEqualToAnchor:cl.leadingAnchor],
         [self.composerField.topAnchor constraintEqualToAnchor:self.titleField.topAnchor],
-        [self.composerField.widthAnchor constraintEqualToConstant:240],
+        self.composerWidthConstraint,
         [search.leadingAnchor constraintEqualToAnchor:tl.leadingAnchor],
         [search.topAnchor constraintEqualToAnchor:self.titleField.bottomAnchor constant:12],
         [refresh.leadingAnchor constraintEqualToAnchor:search.trailingAnchor constant:8],
         [refresh.centerYAnchor constraintEqualToAnchor:search.centerYAnchor],
     ]];
 
-    // 示例作品芯片（web chip-work：点了直接检索）
-    NSStackView *chips = [[NSStackView alloc] init];
-    chips.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    chips.spacing = 8;
+    // 示例作品芯片（web chip-work：自适应折行，窄窗不挤出边界）
+    NSView *chips = [[NSView alloc] initWithFrame:NSZeroRect];
     chips.translatesAutoresizingMaskIntoConstraints = NO;
+    chips.identifier = @"works.chips";
+    self.chipsContainer = chips;
     NSTextField *chipLabel = RLPLabel(RLPTr(@"示例作品："), t.small, t.mut);
     chipLabel.tag = 1;
     self.chipLabel = chipLabel;
     [self.dynamicLabels addObject:chipLabel];
-    [chips addArrangedSubview:chipLabel];
+    [chips addSubview:chipLabel];
     NSArray<NSArray<NSString *> *> *samples = @[
         @[@"Boléro", @"Maurice Ravel", RLPTr(@"Boléro（拉威尔）")],
         @[@"Symphony No. 5", @"Ludwig van Beethoven", RLPTr(@"贝多芬第五交响曲")],
@@ -189,12 +213,17 @@
         b.font = t.small;
         b.tag = i;
         b.identifier = [NSString stringWithFormat:@"works.chip.%ld", (long)i];
-        [chips addArrangedSubview:b];
+        [chips addSubview:b];
         [self.sampleButtons addObject:b];
     }
     [stack addArrangedSubview:chips];
-    [chips.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48].active = YES;
+    self.chipsHeightConstraint = [chips.heightAnchor constraintEqualToConstant:28];
+    [NSLayoutConstraint activateConstraints:@[
+        [chips.widthAnchor constraintEqualToAnchor:stack.widthAnchor constant:-48],
+        self.chipsHeightConstraint,
+    ]];
     self.sampleData = samples;
+    [self layoutResponsiveControls];
 
     // 概要头 + 结果容器
     self.headTitle = RLPLabel(@"", t.heading, t.hero);
@@ -261,22 +290,33 @@
 }
 
 - (void)showMessage:(NSString *)text {
+    [self showMessageWithKey:nil text:text];
+}
+
+- (void)showMessageWithKey:(nullable NSString *)zhKey text:(NSString *)text {
+    self.statusMessageZh = zhKey;
     [self clearResult];
     RLPTheme *t = [RLPTheme current];
     NSTextField *l = RLPLabel(text, t.body, t.mut);
     l.maximumNumberOfLines = 0;
     l.lineBreakMode = NSLineBreakByWordWrapping;
-    [l.widthAnchor constraintEqualToConstant:560].active = YES;
+    l.translatesAutoresizingMaskIntoConstraints = NO;
     [self.resultStack addArrangedSubview:l];
+    [l.widthAnchor constraintLessThanOrEqualToAnchor:self.resultStack.widthAnchor].active = YES;
 }
 
 /// 检索版本。两道守卫：页面已切走 / 请求已过期 ⟹ 整段丢弃（web stillWorks + req 同口径）。
 - (void)queryTitle:(NSString *)title composer:(NSString *)composer refresh:(BOOL)refresh {
-    if (![RLPCoreClient shared].started) { [self showMessage:RLPTr(@"核心未启动")]; return; }
+    if (![RLPCoreClient shared].started) {
+        self.lastJSON = nil;
+        [self showMessageWithKey:@"核心未启动" text:RLPTr(@"核心未启动")];
+        return;
+    }
     self.lastTitle = title;
     self.lastComposer = composer ?: @"";
+    self.lastJSON = nil;
     const NSUInteger req = ++self.reqSeq;
-    [self showMessage:RLPTr(@"正在从 Discogs 检索版本…")];
+    [self showMessageWithKey:@"正在从 Discogs 检索版本…" text:RLPTr(@"正在从 Discogs 检索版本…")];
     NSMutableString *u = [NSMutableString stringWithFormat:@"/api/entity/versions?kind=work&name=%@",
                           RLPEnc(title)];
     if (composer.length) [u appendFormat:@"&composer=%@", RLPEnc(composer)];
@@ -291,6 +331,7 @@
 
 - (void)renderResult:(NSDictionary *)json {
     self.lastJSON = json;
+    self.statusMessageZh = nil;
     NSArray *perfs = [json[@"performances"] isKindOfClass:[NSArray class]] ? json[@"performances"] : @[];
     const BOOL ok = json && [json[@"ok"] boolValue] && perfs.count > 0;
     RLPTheme *t = [RLPTheme current];
@@ -308,8 +349,9 @@
         NSTextField *msg = RLPLabel(err, t.small, t.mut);
         msg.maximumNumberOfLines = 0;
         msg.lineBreakMode = NSLineBreakByWordWrapping;
-        [msg.widthAnchor constraintEqualToConstant:560].active = YES;
+        msg.translatesAutoresizingMaskIntoConstraints = NO;
         [self.resultStack addArrangedSubview:msg];
+        [msg.widthAnchor constraintLessThanOrEqualToAnchor:self.resultStack.widthAnchor].active = YES;
         NSButton *retry = [NSButton buttonWithTitle:RLPTr(@"重试查询") target:self action:@selector(onRefreshQuery:)];
         retry.bezelStyle = NSBezelStyleRounded;
         retry.identifier = @"works.retry";
@@ -391,11 +433,96 @@
     }
 }
 
+- (void)onWorksClipFrameChanged:(NSNotification *)note {
+    (void)note;
+    [self layoutResponsiveControls];
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    [self layoutResponsiveControls];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    [self layoutResponsiveControls];
+}
+
+- (void)layoutResponsiveControls {
+    if (!self.isViewLoaded || self.layingOutControls) return;
+    self.layingOutControls = YES;
+    CGFloat contentW = NSWidth(self.scrollView.contentView.bounds);
+    const CGFloat hostW = NSWidth(self.view.bounds);
+    if (!(contentW > 1.0) || (hostW > 1.0 && fabs(contentW - hostW) > 16.0)) contentW = hostW;
+    if (!(contentW > 1.0)) contentW = 674.0;
+    const CGFloat cardW = MAX(240.0, contentW - 48.0);
+    const CGFloat availFields = MAX(180.0, cardW - 48.0); // 16 left + 16 gap + 16 right
+    const CGFloat titleW = MIN(260.0, floor(availFields * 0.52));
+    const CGFloat compW = MIN(240.0, MAX(90.0, availFields - titleW));
+    self.titleWidthConstraint.constant = titleW;
+    self.composerWidthConstraint.constant = compW;
+
+    if (!self.chipsContainer || !self.chipLabel) {
+        self.layingOutControls = NO;
+        return;
+    }
+    [self.chipLabel sizeToFit];
+    const CGFloat lblW = ceil(NSWidth(self.chipLabel.frame));
+    const CGFloat lblH = ceil(NSHeight(self.chipLabel.frame));
+    const CGFloat rowH = 26.0;
+    const CGFloat gapX = 8.0, gapY = 6.0;
+    CGFloat x = lblW + gapX, y = 0.0;
+    NSMutableArray<NSValue *> *logicalRects = [NSMutableArray arrayWithCapacity:self.sampleButtons.count];
+    for (NSButton *b in self.sampleButtons) {
+        [b sizeToFit];
+        const CGFloat bw = MIN(cardW, MAX(44.0, ceil(NSWidth(b.frame))));
+        const CGFloat bh = MAX(22.0, ceil(NSHeight(b.frame)));
+        if (x > 0.0 && x + bw > cardW) {
+            x = 0.0;
+            y += rowH + gapY;
+        }
+        [logicalRects addObject:[NSValue valueWithRect:NSMakeRect(x, y, bw, bh)]];
+        x += bw + gapX;
+    }
+    const CGFloat totalH = y + rowH;
+    // chipsContainer 是非翻转坐标（y=0 在底部），按逻辑行 y 从上往下换算。
+    self.chipLabel.frame = NSMakeRect(0, totalH - rowH + floor((rowH - lblH) * 0.5), lblW, lblH);
+    for (NSUInteger i = 0; i < self.sampleButtons.count && i < logicalRects.count; ++i) {
+        const NSRect r = logicalRects[i].rectValue;
+        self.sampleButtons[i].frame = NSMakeRect(
+            r.origin.x,
+            totalH - (r.origin.y + rowH) + floor((rowH - r.size.height) * 0.5),
+            r.size.width,
+            r.size.height);
+    }
+    if (fabs(self.chipsHeightConstraint.constant - totalH) > 0.5) {
+        self.chipsHeightConstraint.constant = totalH;
+        [self.chipsContainer setNeedsUpdateConstraints:YES];
+        [self.searchCard setNeedsUpdateConstraints:YES];
+        [self.contentView setNeedsUpdateConstraints:YES];
+        [self.contentView setNeedsLayout:YES];
+        [self.view setNeedsUpdateConstraints:YES];
+        [self.view setNeedsLayout:YES];
+    }
+    self.layingOutControls = NO;
+}
+
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     for (NSTextField *l in self.dynamicLabels)
         l.textColor = (l.tag == 1) ? t.mut : t.hero;
+    if (self.searchCard) {
+        self.searchCard.layer.backgroundColor = t.card.CGColor;
+        self.searchCard.layer.borderColor = t.hairline.CGColor;
+    }
+    if (self.searchBtn) {
+        self.searchBtn.layer.backgroundColor = t.accent.CGColor;
+        self.searchBtn.contentTintColor = NSColor.whiteColor;
+    }
+    if (self.titleField) self.titleField.textColor = t.text;
+    if (self.composerField) self.composerField.textColor = t.text;
     // 结果行只重刷颜色，**不重建**（重建会丢掉已检索到的版本数据）。
     for (NSView *row in self.resultStack.arrangedSubviews) {
         if (row.wantsLayer && row.layer.cornerRadius > 0) {
@@ -431,8 +558,11 @@
     for (NSUInteger i = 0; i < self.sampleButtons.count && i < chipTitles.count; ++i) {
         self.sampleButtons[i].title = RLPTr(chipTitles[i]);
     }
+    [self layoutResponsiveControls];
     if (self.lastJSON) {
         [self renderResult:self.lastJSON];
+    } else if (self.statusMessageZh.length) {
+        [self showMessageWithKey:self.statusMessageZh text:RLPTr(self.statusMessageZh)];
     }
 }
 

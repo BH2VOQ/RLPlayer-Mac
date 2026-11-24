@@ -804,3 +804,11 @@ AI 整理内容	AI-organized content
 正在检查更新与反馈通道…	Checking update and feedback channels…
 通道检查失败	Channel check failed
 通道检查失败：核心未响应	Channel check failed: core did not respond
+Metal 卷积（只保留，效果差）	Metal Convolution (legacy only, lower quality)
+macOS 实测慢于 64-bit CPU（仅作兼容保留，建议关闭）	Tested slower than 64-bit CPU on macOS (legacy only, off recommended)
+唱片作品	Discography
+ · 回环	 · Loopback
+选择带「回环」标记的端点可采集系统混音（需 macOS 14.2+ 与录音权限）；输出处于独占模式时无法抓取系统混音。	Select an endpoint marked 'Loopback' to capture system audio (requires macOS 14.2+ and audio capture permission); unavailable during strict exclusive (Hog) output.
+硬件直通	Hardware Direct
+按设备降级（原采样率）	Device fallback (source rate)
+当前输出不支持升频，切回高规格设备将自动恢复	Upsampling not supported on current output; switches back automatically on high-rate DAC

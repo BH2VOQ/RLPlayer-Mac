@@ -67,7 +67,7 @@ static NSStackView *SheetStack(NSString *title, NSString *note) {
 - (nullable NSDictionary<NSString *, NSNumber *> *)rlp_cueRangeForRow:(NSInteger)row;
 @end
 
-static NSMenu *RLPTrackMenuForCue(NSString *path, double cs, double ce, id target, SEL playAction, SEL removeAction) {
+static NSMenu *RLPTrackMenuForCue(NSString *path, double cs, double ce, id _Nullable target, SEL _Nullable playAction, SEL _Nullable removeAction) {
     if (cs < 0) return RLPTrackMenuForPath(path, target, playAction, removeAction);
     if (!path.length) return nil;
     NSMenu *m = [[NSMenu alloc] init];

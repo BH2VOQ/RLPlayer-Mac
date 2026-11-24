@@ -38,6 +38,23 @@
 @property (nonatomic, strong) NSButton *micCalImportBtn;
 @property (nonatomic, strong) NSButton *micCalClearBtn;
 @property (nonatomic, strong) NSTextField *status;
+@property (nonatomic, strong) NSTextField *warnLabel;
+@property (nonatomic, strong) NSTextField *measTitleLabel;
+@property (nonatomic, strong) NSTextField *layoutLabel;
+@property (nonatomic, strong) NSTextField *sweepSecLabel;
+@property (nonatomic, strong) NSTextField *irTitleLabel;
+@property (nonatomic, strong) NSTextField *irDescLabel;
+@property (nonatomic, strong) NSTextField *irFileLabel;
+@property (nonatomic, strong) NSButton *irPickBtn;
+@property (nonatomic, strong) NSButton *irApplyBtn;
+@property (nonatomic, strong) NSTextField *irGpuLabel;
+@property (nonatomic, strong) NSTextField *irGpuHintLabel;
+@property (nonatomic, strong) NSTextField *micTitleLabel;
+@property (nonatomic, strong) NSTextField *micHintLabel;
+@property (nonatomic, strong) NSTextField *micFileLabel;
+@property (nonatomic, assign) NSInteger micCalState;
+@property (nonatomic, strong) NSMutableArray<NSTextField *> *themeTextLabels;
+@property (nonatomic, strong) NSMutableArray<NSTextField *> *themeMutedLabels;
 @property (nonatomic, copy) NSDictionary *plan;   // 最近一次 plan 的原始返回
 @end
 
@@ -45,7 +62,11 @@
 
 - (instancetype)initWithFrame:(NSRect)r {
     self = [super initWithFrame:r];
-    if (self) [self build];
+    if (self) {
+        _themeTextLabels = [NSMutableArray array];
+        _themeMutedLabels = [NSMutableArray array];
+        [self build];
+    }
     return self;
 }
 
@@ -57,9 +78,18 @@
     r.spacing = 10;
     NSTextField *l = RLPLabel(label, t.body, t.text);
     [[l.widthAnchor constraintEqualToConstant:150] setActive:YES];
+    [self.themeTextLabels addObject:l];
     [r addArrangedSubview:l];
     [r addArrangedSubview:ctl];
-    if (hint.length) [r addArrangedSubview:RLPLabel(hint, t.small, t.mut)];
+    if (hint.length) {
+        NSTextField *h = RLPLabel(hint, t.small, t.mut);
+        h.maximumNumberOfLines = 0;
+        h.lineBreakMode = NSLineBreakByWordWrapping;
+        [h setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [self.themeMutedLabels addObject:h];
+        [r addArrangedSubview:h];
+    }
     return r;
 }
 
@@ -86,26 +116,36 @@
     ];
     [NSLayoutConstraint activateConstraints:self.scrollConstraints];
 
-    [self.stack addArrangedSubview:RLPLabel(RLPTr(@"房间测量"),
-        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
+    NSTextField *measTitle = RLPLabel(RLPTr(@"房间测量"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    [self.themeTextLabels addObject:measTitle];
+    self.measTitleLabel = measTitle;
+    [self.stack addArrangedSubview:measTitle];
 
     NSTextField *warn = RLPLabel(
         RLPTr(@"测量会真的向输出设备播放扫频信号。生成计划后请先核对设备、时长与电平，再决定是否开始。"),
         t.small, t.danger);
-    warn.maximumNumberOfLines = 2;
+    warn.maximumNumberOfLines = 0;
     warn.lineBreakMode = NSLineBreakByWordWrapping;
-    [[warn.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [warn setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    self.warnLabel = warn;
     [self.stack addArrangedSubview:warn];
+    [warn.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     self.layout = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.layout addItemsWithTitles:@[ @"2.0", @"2.1", @"5.1", @"7.1" ]];
     [[self.layout.widthAnchor constraintEqualToConstant:120] setActive:YES];
-    [self.stack addArrangedSubview:[self row:RLPTr(@"声道布局") control:self.layout hint:nil]];
+    NSStackView *layoutRow = (NSStackView *)[self row:RLPTr(@"声道布局") control:self.layout hint:nil];
+    self.layoutLabel = (NSTextField *)layoutRow.arrangedSubviews.firstObject;
+    [self.stack addArrangedSubview:layoutRow];
 
     self.sweepSec = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.sweepSec.stringValue = @"6";
     [[self.sweepSec.widthAnchor constraintEqualToConstant:80] setActive:YES];
-    [self.stack addArrangedSubview:[self row:RLPTr(@"每声道扫频（秒）") control:self.sweepSec hint:nil]];
+    NSStackView *sweepRow = (NSStackView *)[self row:RLPTr(@"每声道扫频（秒）") control:self.sweepSec hint:nil];
+    self.sweepSecLabel = (NSTextField *)sweepRow.arrangedSubviews.firstObject;
+    [self.stack addArrangedSubview:sweepRow];
 
     NSStackView *btns = [[NSStackView alloc] init];
     btns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -118,10 +158,12 @@
     [self.stack addArrangedSubview:btns];
 
     self.planInfo = RLPLabel(@"", t.small, t.mut);
-    self.planInfo.maximumNumberOfLines = 6;
+    self.planInfo.maximumNumberOfLines = 0;
     self.planInfo.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.planInfo.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [self.planInfo setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.stack addArrangedSubview:self.planInfo];
+    [self.planInfo.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     // ---- 房间校正 IR（web cal 页第三张 sgroup「房间校正 IR（WAV 脉冲响应）」）----
     // 独立成一段（settings 页把这一整段搬进第三张卡片）：同一份视图/交互，不复制控件。
@@ -130,34 +172,57 @@
     self.irSection.alignment = NSLayoutAttributeLeading;
     self.irSection.spacing = 10;
     self.irSection.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.irSection addArrangedSubview:RLPLabel(RLPTr(@"房间校正 IR"),
-        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
-    [self.irSection addArrangedSubview:RLPLabel(
+    NSTextField *irTitle = RLPLabel(RLPTr(@"房间校正 IR"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    [self.themeTextLabels addObject:irTitle];
+    self.irTitleLabel = irTitle;
+    [self.irSection addArrangedSubview:irTitle];
+    NSTextField *irDesc = RLPLabel(
         RLPTr(@"填入卷积用的 IR WAV 路径；留空 = 不做房间校正。也可用 REW / AutoEq 导出的文件。"),
-        t.small, t.mut)];
+        t.small, t.mut);
+    irDesc.maximumNumberOfLines = 0;
+    irDesc.lineBreakMode = NSLineBreakByWordWrapping;
+    [irDesc setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.themeMutedLabels addObject:irDesc];
+    self.irDescLabel = irDesc;
+    [self.irSection addArrangedSubview:irDesc];
+    [irDesc.widthAnchor constraintLessThanOrEqualToAnchor:self.irSection.widthAnchor].active = YES;
 
     self.irPath = [[NSTextField alloc] initWithFrame:NSZeroRect];
     self.irPath.identifier = @"sp_ir";          // web #sp_ir（设置页「房间校正 IR」路径输入）
     self.irPath.placeholderString = RLPTr(@"例如 /Volumes/Music/ir/room.wav");
-    [self.irPath.widthAnchor constraintGreaterThanOrEqualToConstant:260].active = YES;
+    [self.irPath.widthAnchor constraintGreaterThanOrEqualToConstant:160].active = YES;
+    [self.irPath setContentHuggingPriority:NSLayoutPriorityDefaultLow - 10
+                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.irPath setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     // 回车即落盘（web 表单保存时同样写 ir）；「应用」按钮保留给鼠标用户。
     self.irPath.target = self;
     self.irPath.action = @selector(onApplyIR:);
     NSStackView *irRow = (NSStackView *)[self row:RLPTr(@"IR 文件") control:self.irPath hint:nil];
+    self.irFileLabel = (NSTextField *)irRow.arrangedSubviews.firstObject;
     NSButton *pick = [NSButton buttonWithTitle:RLPTr(@"选择…") target:self action:@selector(onPickIR:)];
     pick.bezelStyle = NSBezelStyleRounded;
+    self.irPickBtn = pick;
     [irRow addArrangedSubview:pick];
     NSButton *apply = [NSButton buttonWithTitle:RLPTr(@"应用") target:self action:@selector(onApplyIR:)];
     apply.bezelStyle = NSBezelStyleRounded;
+    self.irApplyBtn = apply;
     [irRow addArrangedSubview:apply];
     [self.irSection addArrangedSubview:irRow];
+    [irRow.widthAnchor constraintLessThanOrEqualToAnchor:self.irSection.widthAnchor].active = YES;
 
     self.irGpu = [[NSSwitch alloc] initWithFrame:NSZeroRect];
     self.irGpu.identifier = @"sp_irgpu";        // web #sp_irgpu（GPU 卷积开关）
     self.irGpu.target = self;
     self.irGpu.action = @selector(onIrGpu:);
-    [self.irSection addArrangedSubview:[self row:RLPTr(@"GPU 卷积") control:self.irGpu
-                                       hint:RLPTr(@"长 IR 用 GPU 更省 CPU")]];
+    NSStackView *irGpuRow = (NSStackView *)[self row:RLPTr(@"Metal 卷积（只保留，效果差）") control:self.irGpu
+                            hint:RLPTr(@"macOS 实测慢于 64-bit CPU（仅作兼容保留，建议关闭）")];
+    self.irGpuLabel = (NSTextField *)irGpuRow.arrangedSubviews.firstObject;
+    self.irGpuHintLabel = (NSTextField *)irGpuRow.arrangedSubviews.lastObject;
+    [self.irSection addArrangedSubview:irGpuRow];
+    [irGpuRow.widthAnchor constraintLessThanOrEqualToAnchor:self.irSection.widthAnchor].active = YES;
 
     // IR 段自己的状态行：不再借用测量向导卡里的 status（那会让用户以为测量出了事）。
     self.irStatus = RLPLabel(@"", t.small, t.mut);
@@ -175,15 +240,22 @@
     micCalSection.orientation = NSUserInterfaceLayoutOrientationVertical;
     micCalSection.alignment = NSLayoutAttributeLeading;
     micCalSection.spacing = 8;
-    [micCalSection addArrangedSubview:RLPLabel(RLPTr(@"麦克风校准"),
-        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text)];
+    NSTextField *micTitle = RLPLabel(RLPTr(@"麦克风校准"),
+        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], t.text);
+    [self.themeTextLabels addObject:micTitle];
+    self.micTitleLabel = micTitle;
+    [micCalSection addArrangedSubview:micTitle];
     NSTextField *micHint = RLPLabel(
         RLPTr(@"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv）。校准表已可导入，接入校正计算将在下一版完成。"),
         t.small, t.mut);
-    micHint.maximumNumberOfLines = 2;
+    micHint.maximumNumberOfLines = 0;
     micHint.lineBreakMode = NSLineBreakByWordWrapping;
-    [[micHint.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [micHint setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self.themeMutedLabels addObject:micHint];
+    self.micHintLabel = micHint;
     [micCalSection addArrangedSubview:micHint];
+    [micHint.widthAnchor constraintLessThanOrEqualToAnchor:micCalSection.widthAnchor].active = YES;
 
     NSStackView *micBtns = [[NSStackView alloc] init];
     micBtns.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -197,7 +269,9 @@
     for (NSButton *b in @[ self.micCalImportBtn, self.micCalClearBtn ]) b.bezelStyle = NSBezelStyleRounded;
     [micBtns addArrangedSubview:self.micCalImportBtn];
     [micBtns addArrangedSubview:self.micCalClearBtn];
-    [micCalSection addArrangedSubview:[self row:RLPTr(@"麦克风校准文件") control:micBtns hint:nil]];
+    NSStackView *micRow = (NSStackView *)[self row:RLPTr(@"麦克风校准文件") control:micBtns hint:nil];
+    self.micFileLabel = (NSTextField *)micRow.arrangedSubviews.firstObject;
+    [micCalSection addArrangedSubview:micRow];
 
     self.micCalNote = RLPLabel(RLPTr(@"未导入"), t.small, t.mut);
     self.micCalNote.identifier = @"sp_miccal_note";
@@ -205,6 +279,7 @@
     self.micCalNote.lineBreakMode = NSLineBreakByWordWrapping;
     [micCalSection addArrangedSubview:self.micCalNote];
     [self.stack addArrangedSubview:micCalSection];
+    [micCalSection.widthAnchor constraintEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     self.status = RLPLabel(@"", t.small, t.mut);
     self.status.maximumNumberOfLines = 2;
@@ -363,6 +438,7 @@
 /// 后端其实没换表」这种自欺。
 - (void)refreshMicCalState {
     if (![RLPCoreClient shared].started) {
+        self.micCalState = 1;
         self.micCalNote.stringValue = RLPTr(@"核心未启动");
         return;
     }
@@ -371,10 +447,12 @@
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
         if (!json || ![json[@"ok"] boolValue] || ![json[@"active"] boolValue]) {
+            self_.micCalState = 0;
             self_.micCalNote.stringValue = RLPTr(@"未导入");
             self_.micCalNote.toolTip = nil;
             return;
         }
+        self_.micCalState = 2;
         const NSInteger n = [json[@"n_points"] respondsToSelector:@selector(integerValue)]
                                 ? [json[@"n_points"] integerValue] : 0;
         const double mn = [json[@"min_db"] respondsToSelector:@selector(doubleValue)]
@@ -402,16 +480,14 @@
     p.canChooseFiles = YES;
     p.canChooseDirectories = NO;
     p.allowsMultipleSelection = NO;
-    if (@available(macOS 11.0, *)) {
-        p.allowedContentTypes = @[];
-    }
-    p.allowedFileTypes = @[ @"txt", @"csv" ];   // 只选文本校准文件（UMIK / REW 导出）
+    RLPConfigureOpenPanelFileTypes(p, @[ @"txt", @"csv" ]);   // 只选文本校准文件（UMIK / REW 导出）
     p.message = RLPTr(@"选择麦克风校准文件");
     __weak __typeof__(self) weakSelf = self;
     [p beginWithCompletionHandler:^(NSModalResponse r) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || r != NSModalResponseOK || !p.URL.path.length) return;
         NSString *url = [NSString stringWithFormat:@"/api/miccal?path=%@", RLPEnc(p.URL.path)];
+        self_.micCalState = 2;
         self_.micCalNote.stringValue = RLPTr(@"导入中…");
         [[RLPCoreClient shared] postJSON:url body:nil completion:^(NSDictionary * _Nullable json) {
             __typeof__(self) self2 = weakSelf;
@@ -449,10 +525,12 @@
 #pragma mark - 校正 IR
 
 - (void)onPickIR:(id)sender {
+    (void)sender;
     NSOpenPanel *p = [NSOpenPanel openPanel];
     p.canChooseFiles = YES;
     p.canChooseDirectories = NO;
     p.allowsMultipleSelection = NO;
+    RLPConfigureOpenPanelFileTypes(p, @[ @"wav" ]);
     if ([p runModal] != NSModalResponseOK || !p.URL) return;
     self.irPath.stringValue = p.URL.path ?: @"";
 }
@@ -502,6 +580,8 @@
         id g = kv[@"irgpu"];
         if ([g respondsToSelector:@selector(boolValue)])
             self_.irGpu.state = [g boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+        else
+            self_.irGpu.state = NSControlStateValueOff;
     }];
     [[RLPCoreClient shared] getJSON:@"/api/roomcorr/status" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
@@ -515,9 +595,58 @@
 
 - (void)applyTheme {
     RLPTheme *t = [RLPTheme current];
+    self.warnLabel.textColor = t.danger;
+    for (NSTextField *l in self.themeTextLabels) l.textColor = t.text;
+    for (NSTextField *l in self.themeMutedLabels) l.textColor = t.mut;
+    self.irStatus.textColor = t.mut;
     self.status.textColor = t.mut;
     self.planInfo.textColor = t.mut;
     self.micCalNote.textColor = t.mut;
+}
+
+- (void)applyLanguage {
+    self.measTitleLabel.stringValue = RLPTr(@"房间测量");
+    self.warnLabel.stringValue = RLPTr(@"测量会真的向输出设备播放扫频信号。生成计划后请先核对设备、时长与电平，再决定是否开始。");
+    self.layoutLabel.stringValue = RLPTr(@"声道布局");
+    self.sweepSecLabel.stringValue = RLPTr(@"每声道扫频（秒）");
+    self.planBtn.title = RLPTr(@"生成计划并确认");
+    self.cancelBtn.title = RLPTr(@"取消测量");
+    self.irTitleLabel.stringValue = RLPTr(@"房间校正 IR");
+    self.irDescLabel.stringValue = RLPTr(@"填入卷积用的 IR WAV 路径；留空 = 不做房间校正。也可用 REW / AutoEq 导出的文件。");
+    self.irPath.placeholderString = RLPTr(@"例如 /Volumes/Music/ir/room.wav");
+    self.irFileLabel.stringValue = RLPTr(@"IR 文件");
+    self.irPickBtn.title = RLPTr(@"选择…");
+    self.irApplyBtn.title = RLPTr(@"应用");
+    self.irGpuLabel.stringValue = RLPTr(@"Metal 卷积（只保留，效果差）");
+    self.irGpuHintLabel.stringValue = RLPTr(@"macOS 实测慢于 64-bit CPU（仅作兼容保留，建议关闭）");
+    self.micTitleLabel.stringValue = RLPTr(@"麦克风校准");
+    self.micHintLabel.stringValue = RLPTr(@"导入两列文本（频率 Hz、幅度 dB；支持 UMIK / REW 导出的 txt、csv）。校准表已可导入，接入校正计算将在下一版完成。");
+    self.micCalImportBtn.title = RLPTr(@"导入麦克风校准文件…");
+    self.micCalClearBtn.title = RLPTr(@"清除");
+    self.micFileLabel.stringValue = RLPTr(@"麦克风校准文件");
+    if (self.micCalState == 0) {
+        self.micCalNote.stringValue = RLPTr(@"未导入");
+    } else if (self.micCalState == 1) {
+        self.micCalNote.stringValue = RLPTr(@"核心未启动");
+    } else if ([RLPCoreClient shared].started) {
+        [self refreshMicCalState];
+    }
+    if (self.plan) {
+        NSDictionary *p = self.plan;
+        NSString *playDev = [p[@"playDevice"] isKindOfClass:[NSString class]] ? p[@"playDevice"] : @"?";
+        NSString *capDev = [p[@"captureDevice"] isKindOfClass:[NSString class]] ? p[@"captureDevice"] : @"?";
+        const NSInteger ch = [p[@"chCount"] respondsToSelector:@selector(integerValue)] ? [p[@"chCount"] integerValue] : 0;
+        const double total = [p[@"totalSeconds"] respondsToSelector:@selector(doubleValue)] ? [p[@"totalSeconds"] doubleValue] : 0;
+        const double sweep = [p[@"sweepSeconds"] respondsToSelector:@selector(doubleValue)] ? [p[@"sweepSeconds"] doubleValue] : 0;
+        const double level = [p[@"levelDbfs"] respondsToSelector:@selector(doubleValue)] ? [p[@"levelDbfs"] doubleValue] : 0;
+        NSArray<NSString *> *lines = @[
+            [NSString stringWithFormat:@"%@：%ld · %@ %.0f %@", RLPTr(@"声道"), (long)ch, RLPTr(@"约"), total, RLPTr(@"秒")],
+            [NSString stringWithFormat:@"%@：%.0f ms · %@ %.1f dBFS", RLPTr(@"每声道扫频"), sweep * 1000.0, RLPTr(@"电平"), level],
+            [NSString stringWithFormat:@"%@：%@", RLPTr(@"输出设备"), playDev],
+            [NSString stringWithFormat:@"%@：%@", RLPTr(@"采集设备"), capDev],
+        ];
+        self.planInfo.stringValue = [lines componentsJoinedByString:@"\n"];
+    }
 }
 
 @end

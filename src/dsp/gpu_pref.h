@@ -24,18 +24,47 @@
 // 返回值类型必须是 std::vector<std::string>（不能是 const char*）：
 // 拼接出来的名字是临时 std::string，返回其 .c_str() 会立刻悬垂。
 #pragma once
+#include <cctype>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "platform/dynlib.h"   // 提供 rta::platform::lib_name_for()（macOS/POSIX 实现）
 
 namespace rta::dsp {
 
+inline std::string normalize_gpu_vendor(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (unsigned char ch : raw) {
+        if (!std::isspace(ch)) out.push_back((char)std::tolower(ch));
+    }
+    if (out.empty()) return "auto";
+    return out;
+}
+
+// 统一管理本地播放升频与 UPnP 投放升频是否走 Apple Metal GPU：
+//   * "metal" -> true（显式开启 Apple Metal GPU 升频；32-bit 单精度）
+//   * "auto" / "off" / 其它 -> false（升频走 64-bit IEEE double CPU + NEON）
+inline bool gpu_vendor_wants_metal_resample(const std::string& raw) {
+    return normalize_gpu_vendor(raw) == "metal";
+}
+
+inline std::mutex& gpu_vendor_mtx() {
+    static std::mutex m;
+    return m;
+}
 inline std::string& gpu_vendor_ref() {
     static std::string v = "auto";
     return v;
 }
-inline void set_gpu_vendor(const std::string& v) { gpu_vendor_ref() = v; }
-inline const std::string& gpu_vendor() { return gpu_vendor_ref(); }
+inline void set_gpu_vendor(const std::string& v) {
+    std::lock_guard<std::mutex> lk(gpu_vendor_mtx());
+    gpu_vendor_ref() = v.empty() ? std::string("auto") : v;
+}
+inline std::string gpu_vendor() {
+    std::lock_guard<std::mutex> lk(gpu_vendor_mtx());
+    return gpu_vendor_ref();
+}
 
 // 把一批"库基名"映射成当前平台的文件名（Windows: 原样 .dll；macOS: lib*.dylib）
 inline std::vector<std::string> gpu_map_names(const std::vector<const char*>& bases) {
@@ -54,7 +83,7 @@ inline std::vector<std::string> gpu_map_names(const std::vector<const char*>& ba
 
 // 按偏好给出要尝试的库名（按顺序）
 inline std::vector<std::string> gpu_dll_candidates() {
-    const std::string& v = gpu_vendor();
+    const std::string v = normalize_gpu_vendor(gpu_vendor());
     if (v == "off") return {};
 
 #if defined(__APPLE__)

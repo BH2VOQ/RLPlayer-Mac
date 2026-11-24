@@ -2,3 +2,4 @@
 勾选后投放按上限与设备声明能力升频（独立于全局播放方式）	When checked, casting upsamples to the lower of the ceiling and what the device advertises (independent of global playback mode)	投放升频开关提示
 已按投放设置独立升频：目标率取上限与设备声明的最低者（上限 %@ Hz）	Casting upsamples independently: target rate is the lower of the ceiling and what the device advertises (ceiling %@ Hz)	投放升频状态说明
 自动（跟随设备）	Auto (follow device)	投放升频上限下拉：跟随渲染器声明
+默认自动（跟随设备）	Default: Auto (follow device)	投放升频上限说明

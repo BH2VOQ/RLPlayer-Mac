@@ -33,6 +33,7 @@
 @property (nonatomic, strong) NSTextField *upLabel;
 @property (nonatomic, strong) NSPopUpButton *upCeilPopup;
 @property (nonatomic, strong) NSSwitch *upForceSwitch;
+@property (nonatomic, strong) NSTextField *forceLabel;
 @property (nonatomic, strong) NSTextField *upInfo;
 /// 实时状态（web sp_cast_stat_*）
 @property (nonatomic, strong) NSTextField *statPhase;
@@ -49,10 +50,14 @@
 @property (nonatomic, strong) NSView *prepBox;
 @property (nonatomic, strong) NSView *warnBox;
 @property (nonatomic, strong) NSView *errBox;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *statLabelEntries;
 @property (nonatomic, strong) NSTimer *poll;
 @property (nonatomic, assign, readwrite) BOOL polling;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
 @property (nonatomic, copy) NSString *savedUpnpDev;
+@property (nonatomic, copy, nullable) NSDictionary *lastSettingsJson;
+@property (nonatomic, copy, nullable) NSDictionary *lastDevicesJson;
+@property (nonatomic, copy, nullable) NSDictionary *lastStateJson;
 @end
 
 @implementation RLPCastView
@@ -62,6 +67,7 @@
     if (self) {
         _devices = @[];
         _savedUpnpDev = @"";
+        _statLabelEntries = [NSMutableArray array];
         [self build];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(onExternalSettingsChanged:)
@@ -76,6 +82,12 @@
     [self stopPolling];
 }
 
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (!self.window) [self stopPolling];
+    else if ([RLPCoreClient shared].started) [self reload];
+}
+
 - (void)onExternalSettingsChanged:(NSNotification *)note {
     if (note.object == self) return;
     if (![RLPCoreClient shared].started) return;
@@ -83,12 +95,22 @@
 }
 
 /// 一行「标签 : 值」，值控件带 web 的 identifier。
-- (NSStackView *)statRow:(NSString *)label value:(NSTextField *)value t:(RLPTheme *)t {
+- (NSStackView *)statRow:(NSString *)labelKey value:(NSTextField *)value t:(RLPTheme *)t {
     NSStackView *row = [[NSStackView alloc] init];
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeTop;
     row.spacing = 8;
-    NSTextField *l = RLPLabel(label, t.small, t.mut);
-    [[l.widthAnchor constraintEqualToConstant:130] setActive:YES];
+    NSTextField *l = RLPLabel(RLPTr(labelKey), t.small, t.mut);
+    l.maximumNumberOfLines = 2;
+    l.lineBreakMode = NSLineBreakByWordWrapping;
+    NSLayoutConstraint *lw = [l.widthAnchor constraintEqualToConstant:130];
+    lw.priority = 750;
+    lw.active = YES;
+    [l.widthAnchor constraintLessThanOrEqualToConstant:130].active = YES;
+    NSLayoutConstraint *lmin = [l.widthAnchor constraintGreaterThanOrEqualToConstant:88];
+    lmin.priority = 750;
+    lmin.active = YES;
+    [self.statLabelEntries addObject:@{ @"key": labelKey, @"label": l }];
     [row addArrangedSubview:l];
     [row addArrangedSubview:value];
     return row;
@@ -97,18 +119,32 @@
 - (NSTextField *)statValue:(NSString *)identifier t:(RLPTheme *)t {
     NSTextField *f = RLPLabel(@"-", t.small, t.text);
     f.identifier = identifier;
-    [[f.widthAnchor constraintEqualToConstant:300] setActive:YES];
+    f.maximumNumberOfLines = 0;
+    f.lineBreakMode = NSLineBreakByWordWrapping;
+    [f setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSLayoutConstraint *fw = [f.widthAnchor constraintEqualToConstant:300];
+    fw.priority = 250;
+    fw.active = YES;
     return f;
 }
 
 - (void)build {
     RLPTheme *t = [RLPTheme current];
-    self.stack = [[NSStackView alloc] initWithFrame:self.bounds];
-    self.stack.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    self.stack.translatesAutoresizingMaskIntoConstraints = NO;
     self.stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.stack.alignment = NSLayoutAttributeLeading;
     self.stack.spacing = 10;
     [self addSubview:self.stack];
+    NSLayoutConstraint *bottomEq = [self.stack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor];
+    bottomEq.priority = NSLayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [self.stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [self.stack.topAnchor constraintEqualToAnchor:self.topAnchor],
+        bottomEq,
+    ]];
 
     // ---- 设备选择 + 重新发现（web sp_cast_dev / sp_cast_scan / sp_cast_devmsg）----
     NSStackView *r1 = [[NSStackView alloc] init];
@@ -120,20 +156,31 @@
     [[self.devicePop lastItem] setRepresentedObject:@""];
     self.devicePop.target = self;
     self.devicePop.action = @selector(onDeviceChanged:);
-    [[self.devicePop.widthAnchor constraintEqualToConstant:360] setActive:YES];
+    [self.devicePop setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                             forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSLayoutConstraint *devPref = [self.devicePop.widthAnchor constraintEqualToConstant:360];
+    devPref.priority = 750;
+    devPref.active = YES;
+    [self.devicePop.widthAnchor constraintLessThanOrEqualToConstant:360].active = YES;
+    NSLayoutConstraint *devMin = [self.devicePop.widthAnchor constraintGreaterThanOrEqualToConstant:140];
+    devMin.priority = 750;
+    devMin.active = YES;
     [r1 addArrangedSubview:self.devicePop];
     self.scanBtn = [NSButton buttonWithTitle:RLPTr(@"重新发现") target:self action:@selector(onRefresh:)];
     self.scanBtn.bezelStyle = NSBezelStyleRounded;
     self.scanBtn.identifier = @"sp_cast_scan";
     [r1 addArrangedSubview:self.scanBtn];
     [self.stack addArrangedSubview:r1];
+    [r1.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     self.devMsg = RLPLabel(RLPTr(@"点「重新发现」扫描局域网里的 MediaRenderer"), t.small, t.mut);
     self.devMsg.identifier = @"sp_cast_devmsg";
-    self.devMsg.maximumNumberOfLines = 3;
+    self.devMsg.maximumNumberOfLines = 0;
     self.devMsg.lineBreakMode = NSLineBreakByWordWrapping;
-    [[self.devMsg.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    [self.devMsg setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.stack addArrangedSubview:self.devMsg];
+    [self.devMsg.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     // ---- 投放升频（web cast_up / cast_ceil / cast_force / cast_up_info）----
     self.upSwitch = [[NSSwitch alloc] initWithFrame:NSZeroRect];
@@ -149,8 +196,13 @@
     upRow.spacing = 8;
     [upRow addArrangedSubview:self.upSwitch];
     self.upLabel = RLPLabel(RLPTr(@"投放升频"), t.small, t.text);
+    self.upLabel.maximumNumberOfLines = 2;
+    self.upLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.upLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
     [upRow addArrangedSubview:self.upLabel];
     [self.stack addArrangedSubview:upRow];
+    [upRow.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     self.upCeilPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     self.upCeilPopup.identifier = @"cast_ceil";
@@ -168,8 +220,11 @@
     }
     self.upCeilPopup.target = self;
     self.upCeilPopup.action = @selector(onCastCeiling:);
-    [[self.upCeilPopup.widthAnchor constraintEqualToConstant:160] setActive:YES];
+    NSLayoutConstraint *ceilPref = [self.upCeilPopup.widthAnchor constraintEqualToConstant:160];
+    ceilPref.priority = 750;
+    ceilPref.active = YES;
     [self.stack addArrangedSubview:self.upCeilPopup];
+    [self.upCeilPopup.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     self.upForceSwitch = [[NSSwitch alloc] initWithFrame:NSZeroRect];
     self.upForceSwitch.identifier = @"cast_force";
@@ -179,14 +234,23 @@
     forceRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     forceRow.spacing = 8;
     [forceRow addArrangedSubview:self.upForceSwitch];
-    [forceRow addArrangedSubview:RLPLabel(RLPTr(@"强制目标率（忽略渲染器声明）"), t.small, t.text)];
+    self.forceLabel = RLPLabel(RLPTr(@"强制目标率（忽略渲染器声明）"), t.small, t.text);
+    self.forceLabel.maximumNumberOfLines = 2;
+    self.forceLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.forceLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                              forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [forceRow addArrangedSubview:self.forceLabel];
     [self.stack addArrangedSubview:forceRow];
+    [forceRow.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     self.upInfo = RLPLabel(RLPTr(@"跟随播放方式（加载设置后同步）"), t.small, t.mut);
     self.upInfo.identifier = @"sp_cast_up_info";
-    self.upInfo.maximumNumberOfLines = 2;
-    [[self.upInfo.widthAnchor constraintEqualToConstant:560] setActive:YES];
+    self.upInfo.maximumNumberOfLines = 0;
+    self.upInfo.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.upInfo setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self.stack addArrangedSubview:self.upInfo];
+    [self.upInfo.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     // ---- 推送 / 停止 / 消息（web sp_cast_push / sp_cast_stop / sp_cast_msg）----
     NSStackView *r2 = [[NSStackView alloc] init];
@@ -201,10 +265,15 @@
     self.stopBtn.enabled = NO;
     self.msg = RLPLabel(@"", t.small, t.mut);
     self.msg.identifier = @"sp_cast_msg";
+    self.msg.maximumNumberOfLines = 2;
+    self.msg.lineBreakMode = NSLineBreakByWordWrapping;
+    [self.msg setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                       forOrientation:NSLayoutConstraintOrientationHorizontal];
     [r2 addArrangedSubview:self.pushBtn];
     [r2 addArrangedSubview:self.stopBtn];
     [r2 addArrangedSubview:self.msg];
     [self.stack addArrangedSubview:r2];
+    [r2.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
 
     // ---- 实时状态（web sp_cast_stat_*，1 秒轮询 /api/cast/state）----
     self.statPhase = [self statValue:@"sp_cast_stat_phase" t:t];
@@ -217,20 +286,22 @@
     self.statRateMatch = [self statValue:@"sp_cast_stat_ratematch" t:t];
     self.statPrep = [self statValue:@"sp_cast_stat_prep" t:t];
     self.statWarn = [self statValue:@"sp_cast_stat_warn" t:t];
+    self.statWarn.textColor = t.warn;
     self.statErr = [self statValue:@"sp_cast_stat_err" t:t];
+    self.statErr.textColor = t.danger;
 
     for (NSArray *pair in @[
-        @[ RLPTr(@"运行阶段"), self.statPhase ],
-        @[ RLPTr(@"目标渲染器"), self.statDev ],
-        @[ RLPTr(@"播放进度"), self.statPos ],
-        @[ RLPTr(@"传输状态"), self.statTransport ],
-        @[ RLPTr(@"供源传输字节"), self.statBytes ],
-        @[ RLPTr(@"供源请求数"), self.statReqs ],
-        @[ RLPTr(@"供源端口"), self.statPort ],
-        @[ RLPTr(@"采样率取证"), self.statRateMatch ],
-        @[ RLPTr(@"准备进度"), self.statPrep ],
-        @[ RLPTr(@"采样率告警"), self.statWarn ],
-        @[ RLPTr(@"错误信息"), self.statErr ],
+        @[ @"运行阶段", self.statPhase ],
+        @[ @"目标渲染器", self.statDev ],
+        @[ @"播放进度", self.statPos ],
+        @[ @"传输状态", self.statTransport ],
+        @[ @"供源传输字节", self.statBytes ],
+        @[ @"供源请求数", self.statReqs ],
+        @[ @"供源端口", self.statPort ],
+        @[ @"采样率取证", self.statRateMatch ],
+        @[ @"准备进度", self.statPrep ],
+        @[ @"采样率告警", self.statWarn ],
+        @[ @"错误信息", self.statErr ],
     ]) {
         NSView *row = [self statRow:pair[0] value:pair[1] t:t];
         // web 把「准备进度 / 采样率告警 / 错误信息」三行各包在一个 id 为 *_box 的容器里，
@@ -239,6 +310,7 @@
         else if ([pair[1] isEqual:self.statWarn]) { row.identifier = @"sp_cast_stat_warn_box"; self.warnBox = row; row.hidden = YES; }
         else if ([pair[1] isEqual:self.statErr])  { row.identifier = @"sp_cast_stat_err_box";  self.errBox = row;  row.hidden = YES; }
         [self.stack addArrangedSubview:row];
+        [row.widthAnchor constraintLessThanOrEqualToAnchor:self.stack.widthAnchor].active = YES;
     }
 }
 
@@ -303,6 +375,7 @@
         (void)json;
         __typeof__(self) self_ = weakSelf;
         if (!self_) return;
+        [self_ reloadSettings];
         [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
     }];
 }
@@ -322,12 +395,17 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     // 用户显式选择「投放升频」。写 cast_upsample 后由后端
     // resolve_cast_upsample_from_playback 的 ⓪ 分支接管：目标率取 max，
     // 再由 cast_upsample_plan 按 ceiling 与渲染器声明能力收口。
+    __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:@"/api/settings"
                               body:[NSString stringWithFormat:@"cast_upsample=%@",
                                     s.state == NSControlStateValueOn ? @"1" : @"0"]
                         completion:^(NSDictionary * _Nullable json) {
         (void)json;
-        [self refreshState];
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ reloadSettings];
+        [self_ refreshState];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
     }];
 }
 - (void)onCastCeiling:(NSPopUpButton *)s {
@@ -336,15 +414,31 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     NSString *v = [s.selectedItem.representedObject isKindOfClass:[NSString class]]
         ? (NSString *)s.selectedItem.representedObject
         : (s.titleOfSelectedItem ?: @"auto");
+    __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:@"/api/settings"
                               body:[NSString stringWithFormat:@"cast_upsample_ceiling=%@", v]
-                        completion:nil];
+                        completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ reloadSettings];
+        [self_ refreshState];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+    }];
 }
 - (void)onCastForce:(NSSwitch *)s {
+    __weak __typeof__(self) weakSelf = self;
     [RLPCoreClient.shared postJSON:@"/api/settings"
                               body:[NSString stringWithFormat:@"cast_upsample_force=%@",
                                     s.state == NSControlStateValueOn ? @"1" : @"0"]
-                        completion:nil];
+                        completion:^(NSDictionary * _Nullable json) {
+        (void)json;
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
+        [self_ reloadSettings];
+        [self_ refreshState];
+        [[NSNotificationCenter defaultCenter] postNotificationName:RLPSettingsChangedNotification object:self_];
+    }];
 }
 
 #pragma mark - 数据
@@ -364,96 +458,104 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     [self.devicePop selectItemAtIndex:self.devicePop.numberOfItems - 1];
 }
 
+- (void)applySettingsPayload:(NSDictionary *)json {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    self.lastSettingsJson = json;
+    NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : json;
+
+    id dirObj = kv[@"directsdm"];
+    NSString *dirStr = [dirObj isKindOfClass:[NSString class]] ? (NSString *)dirObj
+                     : ([dirObj respondsToSelector:@selector(stringValue)] ? [dirObj stringValue] : @"0");
+    const BOOL directSdm = [dirStr isEqualToString:@"1"] || [[dirStr lowercaseString] isEqualToString:@"true"];
+
+    id rateObj = kv[@"rate"];
+    NSString *rateRaw = [rateObj isKindOfClass:[NSString class]] ? (NSString *)rateObj
+                      : ([rateObj respondsToSelector:@selector(stringValue)] ? [rateObj stringValue] : @"");
+    NSString *rateStr = [rateRaw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    const BOOL rateIsSrc = (!rateStr.length || [rateStr isEqualToString:@"src"] || [rateStr isEqualToString:@"follow"]);
+
+    const NSInteger dsdLevel = RLPCastParseDsdLevel(kv[@"dsd"]);
+
+    id filtObj = kv[@"filter"];
+    NSString *filterStr = [filtObj isKindOfClass:[NSString class]]
+        ? [(NSString *)filtObj stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+        : @"";
+
+    // 用户在投放区显式勾选「投放升频」→ 独立于全局播放方式（见后端
+    // resolve_cast_upsample_from_playback 的 ⓪ 分支）。
+    id cuObj = kv[@"cast_upsample"];
+    NSString *cuStr = [cuObj isKindOfClass:[NSString class]] ? (NSString *)cuObj
+                    : ([cuObj respondsToSelector:@selector(stringValue)] ? [cuObj stringValue] : @"");
+    const BOOL castOptIn = [cuStr isEqualToString:@"1"] || [cuStr isEqualToString:@"true"];
+
+    BOOL followUpsample = NO;
+    NSString *infoText = nil;
+    if (castOptIn && !directSdm) {
+        // 显式选择优先：目标率取 max（= min(上限, 渲染器声明最高率)）
+        followUpsample = YES;
+        infoText = [NSString stringWithFormat:
+                    RLPTr(@"已按投放设置独立升频：目标率取上限与设备声明的最低者（上限 %@ Hz）"),
+                    ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(description)]
+                     ? [kv[@"cast_upsample_ceiling"] description] : @"auto")];
+    } else if (directSdm) {
+        followUpsample = NO;
+        infoText = RLPTr(@"已跟随播放方式：DirectSDM / 原音直通（投放不升频）");
+    } else if (dsdLevel >= 64) {
+        followUpsample = YES;
+        infoText = [NSString stringWithFormat:
+                    RLPTr(@"已跟随播放方式：DSD%ld 升频（PCM 投放按上限升频；DSD 源保持 DoP 直通）"),
+                    (long)dsdLevel];
+    } else if (!rateIsSrc) {
+        followUpsample = YES;
+        infoText = [NSString stringWithFormat:
+                    RLPTr(@"已跟随播放方式：PCM 升频（目标率 %@ · 上限与强制选项生效）"),
+                    rateStr];
+    } else if (filterStr.length > 0) {
+        followUpsample = NO;
+        infoText = RLPTr(@"已跟随播放方式：跟随源采样率（仅滤波器自定义，投放不升频）");
+    } else {
+        followUpsample = NO;
+        infoText = RLPTr(@"已跟随播放方式：原音直通（投放不升频）");
+    }
+
+    // 开关可点击：它现在真的会写 cast_upsample（旧实现是只读镜像）。
+    // DirectSDM 下仍然禁用 —— 那条路径本来就不经过重采样，勾了也不会生效，
+    // 让可点的控件去做一件不发生的事才是欺骗。
+    self.upSwitch.enabled = !directSdm;
+    self.upSwitch.state = followUpsample ? NSControlStateValueOn : NSControlStateValueOff;
+    self.upInfo.stringValue = infoText;
+
+    NSString *ceilVal = [kv[@"cast_upsample_ceiling"] isKindOfClass:[NSString class]]
+        ? kv[@"cast_upsample_ceiling"]
+        : ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(stringValue)] ? [kv[@"cast_upsample_ceiling"] stringValue] : @"auto");
+    if (!ceilVal.length || [ceilVal isEqualToString:@"0"]) ceilVal = @"auto";
+    // 按 representedObject 选，不是按显示文案（auto 的文案是可翻译的）。
+    NSInteger wantIdx = 0;
+    for (NSInteger i = 0; i < (NSInteger)self.upCeilPopup.numberOfItems; ++i) {
+        id ro = [self.upCeilPopup itemAtIndex:i].representedObject;
+        if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:ceilVal]) { wantIdx = i; break; }
+    }
+    [self.upCeilPopup selectItemAtIndex:wantIdx];
+    NSString *force = [kv[@"cast_upsample_force"] respondsToSelector:@selector(description)] ? [kv[@"cast_upsample_force"] description] : @"0";
+    self.upForceSwitch.state = [force isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSString *upnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
+    self.savedUpnpDev = upnpDev;
+    [self syncDeviceSelection];
+}
+
 - (void)reloadSettings {
     if (![RLPCoreClient shared].started) return;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/settings" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
-        NSDictionary *kv = [json[@"kv"] isKindOfClass:[NSDictionary class]] ? json[@"kv"] : json;
-
-        id dirObj = kv[@"directsdm"];
-        NSString *dirStr = [dirObj isKindOfClass:[NSString class]] ? (NSString *)dirObj
-                         : ([dirObj respondsToSelector:@selector(stringValue)] ? [dirObj stringValue] : @"0");
-        const BOOL directSdm = [dirStr isEqualToString:@"1"] || [[dirStr lowercaseString] isEqualToString:@"true"];
-
-        id rateObj = kv[@"rate"];
-        NSString *rateRaw = [rateObj isKindOfClass:[NSString class]] ? (NSString *)rateObj
-                          : ([rateObj respondsToSelector:@selector(stringValue)] ? [rateObj stringValue] : @"");
-        NSString *rateStr = [rateRaw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        const BOOL rateIsSrc = (!rateStr.length || [rateStr isEqualToString:@"src"] || [rateStr isEqualToString:@"follow"]);
-
-        const NSInteger dsdLevel = RLPCastParseDsdLevel(kv[@"dsd"]);
-
-        id filtObj = kv[@"filter"];
-        NSString *filterStr = [filtObj isKindOfClass:[NSString class]]
-            ? [(NSString *)filtObj stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
-            : @"";
-
-        // 用户在投放区显式勾选「投放升频」→ 独立于全局播放方式（见后端
-        // resolve_cast_upsample_from_playback 的 ⓪ 分支）。
-        id cuObj = kv[@"cast_upsample"];
-        NSString *cuStr = [cuObj isKindOfClass:[NSString class]] ? (NSString *)cuObj
-                        : ([cuObj respondsToSelector:@selector(stringValue)] ? [cuObj stringValue] : @"");
-        const BOOL castOptIn = [cuStr isEqualToString:@"1"] || [cuStr isEqualToString:@"true"];
-
-        BOOL followUpsample = NO;
-        NSString *infoText = nil;
-        if (castOptIn && !directSdm) {
-            // 显式选择优先：目标率取 max（= min(上限, 渲染器声明最高率)）
-            followUpsample = YES;
-            infoText = [NSString stringWithFormat:
-                        RLPTr(@"已按投放设置独立升频：目标率取上限与设备声明的最低者（上限 %@ Hz）"),
-                        ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(description)]
-                         ? [kv[@"cast_upsample_ceiling"] description] : @"192000")];
-        } else if (directSdm) {
-            followUpsample = NO;
-            infoText = RLPTr(@"已跟随播放方式：DirectSDM / 原音直通（投放不升频）");
-        } else if (dsdLevel >= 64) {
-            followUpsample = YES;
-            infoText = [NSString stringWithFormat:
-                        RLPTr(@"已跟随播放方式：DSD%ld 升频（PCM 投放按上限升频；DSD 源保持 DoP 直通）"),
-                        (long)dsdLevel];
-        } else if (!rateIsSrc) {
-            followUpsample = YES;
-            infoText = [NSString stringWithFormat:
-                        RLPTr(@"已跟随播放方式：PCM 升频（目标率 %@ · 上限与强制选项生效）"),
-                        rateStr];
-        } else if (filterStr.length > 0) {
-            followUpsample = NO;
-            infoText = RLPTr(@"已跟随播放方式：跟随源采样率（仅滤波器自定义，投放不升频）");
-        } else {
-            followUpsample = NO;
-            infoText = RLPTr(@"已跟随播放方式：原音直通（投放不升频）");
-        }
-
-        // 开关可点击：它现在真的会写 cast_upsample（旧实现是只读镜像）。
-        // DirectSDM 下仍然禁用 —— 那条路径本来就不经过重采样，勾了也不会生效，
-        // 让可点的控件去做一件不发生的事才是欺骗。
-        self_.upSwitch.enabled = !directSdm;
-        self_.upSwitch.state = followUpsample ? NSControlStateValueOn : NSControlStateValueOff;
-        self_.upInfo.stringValue = infoText;
-
-        NSString *ceilVal = [kv[@"cast_upsample_ceiling"] isKindOfClass:[NSString class]]
-            ? kv[@"cast_upsample_ceiling"]
-            : ([kv[@"cast_upsample_ceiling"] respondsToSelector:@selector(stringValue)] ? [kv[@"cast_upsample_ceiling"] stringValue] : @"auto");
-        if (!ceilVal.length || [ceilVal isEqualToString:@"0"]) ceilVal = @"auto";
-        // 按 representedObject 选，不是按显示文案（auto 的文案是可翻译的）。
-        NSInteger wantIdx = 0;
-        for (NSInteger i = 0; i < (NSInteger)self_.upCeilPopup.numberOfItems; ++i) {
-            id ro = [self_.upCeilPopup itemAtIndex:i].representedObject;
-            if ([ro isKindOfClass:[NSString class]] && [(NSString *)ro isEqualToString:ceilVal]) { wantIdx = i; break; }
-        }
-        [self_.upCeilPopup selectItemAtIndex:wantIdx];
-        NSString *force = [kv[@"cast_upsample_force"] respondsToSelector:@selector(description)] ? [kv[@"cast_upsample_force"] description] : @"0";
-        self_.upForceSwitch.state = [force isEqualToString:@"1"] ? NSControlStateValueOn : NSControlStateValueOff;
-        NSString *upnpDev = [kv[@"upnpdev"] isKindOfClass:[NSString class]] ? kv[@"upnpdev"] : @"";
-        self_.savedUpnpDev = upnpDev;
-        [self_ syncDeviceSelection];
+        [self_ applySettingsPayload:json];
     }];
 }
 
 - (void)applyDevicesPayload:(NSDictionary *)json {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    self.lastDevicesJson = json;
     NSArray *list = [json[@"devices"] isKindOfClass:[NSArray class]] ? json[@"devices"] : @[];
     self.devices = list;
     [self.devicePop removeAllItems];
@@ -506,59 +608,65 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     }];
 }
 
+- (void)applyStatePayload:(NSDictionary *)json {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    self.lastStateJson = json;
+    const BOOL running = [json[@"running"] boolValue];
+    self.stopBtn.enabled = running;
+    self.pushBtn.enabled = !running;
+    self.statPhase.stringValue = running ? RLPTr(@"投放中") : RLPTr(@"已停止");
+    self.statDev.stringValue = [json[@"device"] isKindOfClass:[NSString class]]
+        ? json[@"device"] : @"-";
+    // 进度：后端给秒数；没有时间格式化成 m:ss
+    id pos = json[@"pos"];
+    self.statPos.stringValue = [pos respondsToSelector:@selector(doubleValue)]
+        ? RLPFmtDuration([pos doubleValue]) : @"0:00";
+    self.statTransport.stringValue = [json[@"transport"] isKindOfClass:[NSString class]]
+        ? json[@"transport"] : (running ? @"PLAYING" : @"STOPPED");
+    id bytes = json[@"bytes"];
+    self.statBytes.stringValue = [bytes respondsToSelector:@selector(doubleValue)]
+        ? RLPFmtBytes([bytes doubleValue]) : @"0 B";
+    id reqs = json[@"reqs"];
+    self.statReqs.stringValue = [reqs respondsToSelector:@selector(integerValue)]
+        ? [NSString stringWithFormat:RLPTr(@"%ld 次"), (long)[reqs integerValue]] : @"0";
+    id port = json[@"port"];
+    self.statPort.stringValue = [port respondsToSelector:@selector(integerValue)]
+        ? [NSString stringWithFormat:@"%ld", (long)[port integerValue]] : @"-";
+    // 采样率取证：源/供出不一致时明说，不假装 bit-perfect
+    id srcR = json[@"sourceRate"], srvR = json[@"servedRate"];
+    if ([srcR respondsToSelector:@selector(integerValue)] &&
+        [srvR respondsToSelector:@selector(integerValue)] &&
+        [srcR integerValue] > 0 && [srvR integerValue] > 0) {
+        const BOOL same = [srcR integerValue] == [srvR integerValue];
+        self.statRateMatch.stringValue = same
+            ? [NSString stringWithFormat:RLPTr(@"一致 %ld Hz"), (long)[srcR integerValue]]
+            : [NSString stringWithFormat:RLPTr(@"已重采样 %ld → %ld Hz"),
+               (long)[srcR integerValue], (long)[srvR integerValue]];
+    } else {
+        self.statRateMatch.stringValue = RLPTr(@"未取证");
+    }
+    id prep = json[@"prep"];
+    const BOOL hasPrep = [prep respondsToSelector:@selector(doubleValue)] && [prep doubleValue] > 0.0;
+    self.statPrep.stringValue = hasPrep
+        ? [NSString stringWithFormat:@"%.0f%%", [prep doubleValue] * 100.0] : @"-";
+    self.prepBox.hidden = !hasPrep;
+
+    NSString *warnStr = [json[@"warn"] isKindOfClass:[NSString class]] ? json[@"warn"] : @"";
+    self.statWarn.stringValue = warnStr.length ? warnStr : @"-";
+    self.warnBox.hidden = (warnStr.length == 0);
+
+    NSString *errStr = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
+    self.statErr.stringValue = errStr.length ? errStr : @"-";
+    self.errBox.hidden = (errStr.length == 0);
+}
+
 - (void)refreshState {
     if (![RLPCoreClient shared].started) return;
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:@"/api/cast/state" completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || ![json isKindOfClass:[NSDictionary class]]) return;
-        const BOOL running = [json[@"running"] boolValue];
-        self_.stopBtn.enabled = running;
-        self_.pushBtn.enabled = !running;
-        self_.statPhase.stringValue = running ? RLPTr(@"投放中") : RLPTr(@"已停止");
-        self_.statDev.stringValue = [json[@"device"] isKindOfClass:[NSString class]]
-            ? json[@"device"] : @"-";
-        // 进度：后端给秒数；没有时间格式化成 m:ss
-        id pos = json[@"pos"];
-        self_.statPos.stringValue = [pos respondsToSelector:@selector(doubleValue)]
-            ? RLPFmtDuration([pos doubleValue]) : @"0:00";
-        self_.statTransport.stringValue = [json[@"transport"] isKindOfClass:[NSString class]]
-            ? json[@"transport"] : (running ? @"PLAYING" : @"STOPPED");
-        id bytes = json[@"bytes"];
-        self_.statBytes.stringValue = [bytes respondsToSelector:@selector(doubleValue)]
-            ? RLPFmtBytes([bytes doubleValue]) : @"0 B";
-        id reqs = json[@"reqs"];
-        self_.statReqs.stringValue = [reqs respondsToSelector:@selector(integerValue)]
-            ? [NSString stringWithFormat:RLPTr(@"%ld 次"), (long)[reqs integerValue]] : @"0";
-        id port = json[@"port"];
-        self_.statPort.stringValue = [port respondsToSelector:@selector(integerValue)]
-            ? [NSString stringWithFormat:@"%ld", (long)[port integerValue]] : @"-";
-        // 采样率取证：源/供出不一致时明说，不假装 bit-perfect
-        id srcR = json[@"sourceRate"], srvR = json[@"servedRate"];
-        if ([srcR respondsToSelector:@selector(integerValue)] &&
-            [srvR respondsToSelector:@selector(integerValue)] &&
-            [srcR integerValue] > 0 && [srvR integerValue] > 0) {
-            const BOOL same = [srcR integerValue] == [srvR integerValue];
-            self_.statRateMatch.stringValue = same
-                ? [NSString stringWithFormat:RLPTr(@"一致 %ld Hz"), (long)[srcR integerValue]]
-                : [NSString stringWithFormat:RLPTr(@"已重采样 %ld → %ld Hz"),
-                   (long)[srcR integerValue], (long)[srvR integerValue]];
-        } else {
-            self_.statRateMatch.stringValue = RLPTr(@"未取证");
-        }
-        id prep = json[@"prep"];
-        const BOOL hasPrep = [prep respondsToSelector:@selector(doubleValue)] && [prep doubleValue] > 0.0;
-        self_.statPrep.stringValue = hasPrep
-            ? [NSString stringWithFormat:@"%.0f%%", [prep doubleValue] * 100.0] : @"-";
-        self_.prepBox.hidden = !hasPrep;
-
-        NSString *warnStr = [json[@"warn"] isKindOfClass:[NSString class]] ? json[@"warn"] : @"";
-        self_.statWarn.stringValue = warnStr.length ? warnStr : @"-";
-        self_.warnBox.hidden = (warnStr.length == 0);
-
-        NSString *errStr = [json[@"error"] isKindOfClass:[NSString class]] ? json[@"error"] : @"";
-        self_.statErr.stringValue = errStr.length ? errStr : @"-";
-        self_.errBox.hidden = (errStr.length == 0);
+        [self_ applyStatePayload:json];
     }];
 }
 
@@ -567,7 +675,7 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     [self reloadSettings];
     [self loadDevicesForce:NO];
     [self refreshState];
-    [self startPolling];
+    if (self.window) [self startPolling];
 }
 
 - (void)startPolling {
@@ -592,11 +700,51 @@ static NSInteger RLPCastParseDsdLevel(id _Nullable obj) {
     self.devMsg.textColor = t.mut;
     self.msg.textColor = t.mut;
     self.upLabel.textColor = t.text;
+    self.forceLabel.textColor = t.text;
     self.upInfo.textColor = t.mut;
+    for (NSDictionary *entry in self.statLabelEntries) {
+        NSTextField *lbl = entry[@"label"];
+        lbl.textColor = t.mut;
+    }
     for (NSTextField *f in @[ self.statPhase, self.statDev, self.statPos, self.statTransport,
                               self.statBytes, self.statReqs, self.statPort, self.statRateMatch,
-                              self.statPrep, self.statWarn, self.statErr ])
+                              self.statPrep ])
         f.textColor = t.text;
+    self.statWarn.textColor = t.warn;
+    self.statErr.textColor = t.danger;
+}
+
+- (void)applyLanguage {
+    self.scanBtn.title = RLPTr(@"重新发现");
+    self.pushBtn.title = RLPTr(@"推送当前曲");
+    self.stopBtn.title = RLPTr(@"停止投放");
+    self.upLabel.stringValue = RLPTr(@"投放升频");
+    self.upSwitch.toolTip = RLPTr(@"勾选后投放按上限与设备声明能力升频（独立于全局播放方式）");
+    self.forceLabel.stringValue = RLPTr(@"强制目标率（忽略渲染器声明）");
+    if (self.upCeilPopup.numberOfItems > 0) {
+        [self.upCeilPopup itemAtIndex:0].title = RLPTr(@"自动（跟随设备）");
+    }
+    for (NSDictionary *entry in self.statLabelEntries) {
+        NSString *key = entry[@"key"];
+        NSTextField *lbl = entry[@"label"];
+        lbl.stringValue = RLPTr(key);
+    }
+    if (self.lastDevicesJson) {
+        [self applyDevicesPayload:self.lastDevicesJson];
+    } else {
+        if (self.devicePop.numberOfItems > 0) {
+            [self.devicePop itemAtIndex:0].title = RLPTr(@"（未发现 UPnP 渲染器）");
+        }
+        self.devMsg.stringValue = RLPTr(@"点「重新发现」扫描局域网里的 MediaRenderer");
+    }
+    if (self.lastSettingsJson) {
+        [self applySettingsPayload:self.lastSettingsJson];
+    } else {
+        self.upInfo.stringValue = RLPTr(@"跟随播放方式（加载设置后同步）");
+    }
+    if (self.lastStateJson) {
+        [self applyStatePayload:self.lastStateJson];
+    }
 }
 
 @end

@@ -947,7 +947,7 @@ int main(void) {
                 Pump(0.3);
                 std::printf("  (diag) after POST held=%d block=%p payload=%p\n", (int)gDelayDone, (void *)gDelayedBlock, (__bridge void *)gDelayedPayload);
 
-                std::printf("  (diag) flushing block=%p payload=%@\n", (void *)gDelayedBlock, (gDelayedPayload[@"kv"][@"buffer"] ?: @"(nil)"));
+                std::printf("  (diag) flushing block=%p payload=%s\n", (void *)gDelayedBlock, [((NSString *)(gDelayedPayload[@"kv"][@"buffer"] ?: @"(nil)")) description].UTF8String);
                 FlushDelayed();   // 放行 GET 回包（kv.buffer = 120）
                 Pump(0.3);
                 Ck([bf.stringValue isEqualToString:@"120"],

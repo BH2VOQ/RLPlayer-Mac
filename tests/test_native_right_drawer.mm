@@ -453,6 +453,77 @@ int main() {
            "D5 同一行连点两次只发一次 /api/play",
            [NSString stringWithFormat:@"plays=%ld", (long)PostsWithPrefix(@"/api/play").count]);
 
+        // ---- D6/D7/D8：右侧抽屉 refreshTabs 约束不泄漏 + 语言切换对齐 + 主题切换保活高亮 ----
+        {
+            [d showTab:@"q"];
+            Pump(0.05);
+            [d layoutSubtreeIfNeeded];
+            NSButton *qTab = [d valueForKey:@"qTab"];
+            NSButton *lTab = [d valueForKey:@"lTab"];
+            auto countWidthConstraints = ^NSUInteger(NSButton *b) {
+                NSUInteger cnt = 0;
+                Class contentSizeCls = NSClassFromString(@"NSContentSizeLayoutConstraint");
+                for (NSLayoutConstraint *c in b.constraints) {
+                    if (contentSizeCls && [c isKindOfClass:contentSizeCls]) continue;
+                    if (c.firstItem == b && c.firstAttribute == NSLayoutAttributeWidth && c.secondItem == nil) ++cnt;
+                }
+                return cnt;
+            };
+            [d showTab:@"l"];
+            [d showTab:@"q"];
+            [d applyTheme];
+            [d showTab:@"l"];
+            const NSUInteger qWc = countWidthConstraints(qTab);
+            const NSUInteger lWc = countWidthConstraints(lTab);
+            Ck(qWc == 1 && lWc == 1,
+               "D6 多次切换页签与主题后 qTab/lTab 宽度约束不重复累积",
+               [NSString stringWithFormat:@"q=%lu l=%lu", (unsigned long)qWc, (unsigned long)lWc]);
+
+            // D7: 切英文后 tab 文案、宽度约束与歌词右键 AI 菜单同步刷新
+            RLPSetLanguage(@"en");
+            [d applyLanguage];
+            [d layoutSubtreeIfNeeded];
+            const CGFloat qAttrW = [qTab.attributedTitle size].width;
+            const CGFloat lAttrW = [lTab.attributedTitle size].width;
+            NSLayoutConstraint *qW = [d valueForKey:@"qTabWidthConstraint"];
+            NSLayoutConstraint *lW = [d valueForKey:@"lTabWidthConstraint"];
+            NSView *lStack = [d valueForKey:@"lStack"];
+            NSMenu *lMenuEn = lStack.menu;
+            NSString *enFirst = lMenuEn.itemArray.count ? lMenuEn.itemArray[0].title : @"";
+            Ck([qTab.attributedTitle.string isEqualToString:@"Queue"] &&
+               [lTab.attributedTitle.string isEqualToString:@"Lyrics"] &&
+               qW.constant >= qAttrW + 18.0 && lW.constant >= lAttrW + 18.0 &&
+               ![enFirst containsString:@"翻译"],
+               "D7 切英文后抽屉标签、宽度与歌词 AI 右键菜单同步更新",
+               [NSString stringWithFormat:@"q='%@'(%.1f/%.1f) l='%@'(%.1f/%.1f) menu0='%@'",
+                qTab.attributedTitle.string, qW.constant, qAttrW,
+                lTab.attributedTitle.string, lW.constant, lAttrW, enFirst]);
+
+            // D8: 切主题时保留当前歌词行高亮；切回中文后同步恢复
+            [d showTab:@"l"];
+            Pump(0.06);
+            [d updatePosition:40.0 duration:100.0];
+            const NSInteger activeBefore = [[d valueForKey:@"activeLine"] integerValue];
+            [RLPTheme setThemeName:@"light"];
+            [d applyTheme];
+            const NSInteger activeAfter = [[d valueForKey:@"activeLine"] integerValue];
+            NSArray *rows = [d valueForKey:@"lyricRows"];
+            BOOL rowHighlighted = NO;
+            if (activeAfter >= 0 && activeAfter < (NSInteger)rows.count) {
+                id row = rows[(NSUInteger)activeAfter];
+                rowHighlighted = [[row valueForKey:@"active"] boolValue];
+            }
+            Ck(activeBefore >= 0 && activeAfter == activeBefore && rowHighlighted,
+               "D8 切换主题重新渲染歌词后保持当前高亮行",
+               [NSString stringWithFormat:@"before=%ld after=%ld rowActive=%d",
+                (long)activeBefore, (long)activeAfter, rowHighlighted]);
+
+            [RLPTheme setThemeName:@"dark"];
+            [d applyTheme];
+            RLPSetLanguage(@"zh");
+            [d applyLanguage];
+        }
+
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);
         return g_fail == 0 ? 0 : 1;
     }

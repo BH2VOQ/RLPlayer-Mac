@@ -1150,21 +1150,52 @@ inline void dl_gate_reset_for_test() {
 // 但 dizzylab 只有这一条调用路径,且 enrich 侧本来就是串行,阻塞可接受)。
 // 返回 false = 熔断中,调用方直接返回空候选(不重试、不抛)。
 inline bool dl_gate_acquire(std::string& err) {
-    std::lock_guard<std::mutex> lk(dl_gate_mtx());
-    DlGate& g = dl_gate();
-    const auto now = dl_now();
-    if (now < g.coolUntil) {
-        const long long left = (long long)std::chrono::duration_cast<std::chrono::seconds>(
-                                   g.coolUntil - now).count() + 1;
-        err = "dizzylab: 连续失败熔断中,剩 " + std::to_string(left) + "s 不发起请求";
+    auto is_cancelled = []() -> bool {
+        const std::atomic<bool>* tok = rta::net::http_detail::current_cancellation_token();
+        return tok && tok->load(std::memory_order_acquire);
+    };
+    if (is_cancelled()) {
+        err = "dizzylab: 请求已取消";
         return false;
     }
-    if (g.lastCall.time_since_epoch().count() != 0) {
-        const auto wait = std::chrono::milliseconds(kDizzylabMinIntervalMs) - (now - g.lastCall);
-        // 若注入了测试时钟，由时钟控制时间推进，不在此做真实线程 sleep
-        if (wait.count() > 0 && !dl_clock_hook()) std::this_thread::sleep_for(wait);
+    std::chrono::steady_clock::time_point sleepUntil{};
+    bool needSleep = false;
+    {
+        std::lock_guard<std::mutex> lk(dl_gate_mtx());
+        DlGate& g = dl_gate();
+        const auto now = dl_now();
+        if (now < g.coolUntil) {
+            const long long left = (long long)std::chrono::duration_cast<std::chrono::seconds>(
+                                       g.coolUntil - now).count() + 1;
+            err = "dizzylab: 连续失败熔断中,剩 " + std::to_string(left) + "s 不发起请求";
+            return false;
+        }
+        if (g.lastCall.time_since_epoch().count() != 0) {
+            const auto target = g.lastCall + std::chrono::milliseconds(kDizzylabMinIntervalMs);
+            if (target > now && !dl_clock_hook()) {
+                // 预约槽位后先解锁，避免多请求持锁串行睡眠导致退出卡死
+                g.lastCall = target;
+                sleepUntil = target;
+                needSleep = true;
+            } else {
+                g.lastCall = now;
+            }
+        } else {
+            g.lastCall = now;
+        }
     }
-    g.lastCall = now;
+    if (needSleep) {
+        while (true) {
+            if (is_cancelled()) {
+                err = "dizzylab: 请求已取消";
+                return false;
+            }
+            const auto now = dl_now();
+            if (now >= sleepUntil) break;
+            const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(sleepUntil - now);
+            std::this_thread::sleep_for(std::min(rem, std::chrono::milliseconds(25)));
+        }
+    }
     return true;
 }
 

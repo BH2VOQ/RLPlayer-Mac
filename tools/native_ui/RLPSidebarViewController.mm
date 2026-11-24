@@ -26,6 +26,11 @@
     NSArray<NSDictionary *> *_savedQueues;   // @{@"name":…, @"n":…}
     NSUInteger _sqSeq;                       // 异步竞态序号：晚到的旧响应直接丢弃
     NSString *_pendingSavedQueueName;        // 详情页压栈时记住目标歌单（页面可能尚未创建）
+    NSView *_brandHair;
+    NSImageView *_brandLogo;
+    NSTextField *_brandTitle;
+    NSTextField *_brandVer;
+    NSTextField *_brandSub;
 }
 @end
 
@@ -414,6 +419,7 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     hairB.layer.backgroundColor = t.line.CGColor;
     hairB.translatesAutoresizingMaskIntoConstraints = NO;
     [brand addSubview:hairB];
+    _brandHair = hairB;
 
     NSImageView *logo = [[NSImageView alloc] initWithFrame:NSZeroRect];
     logo.image = [NSImage imageWithSystemSymbolName:@"waveform" accessibilityDescription:@"RLPlayer"];
@@ -422,12 +428,14 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     logo.layer.cornerRadius = 7;
     logo.translatesAutoresizingMaskIntoConstraints = NO;
     [brand addSubview:logo];
+    _brandLogo = logo;
 
     NSTextField *title = [NSTextField labelWithString:@"RLPlayer"];
     title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     title.textColor = t.text;
     title.translatesAutoresizingMaskIntoConstraints = NO;
     [brand addSubview:title];
+    _brandTitle = title;
 
     NSTextField *ver = [NSTextField labelWithString:[NSString stringWithFormat:@"v%s", RLPLAYER_VERSION]];
     ver.font = [NSFont systemFontOfSize:10];
@@ -437,12 +445,14 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
     ver.layer.backgroundColor = t.hov.CGColor;
     ver.translatesAutoresizingMaskIntoConstraints = NO;
     [brand addSubview:ver];
+    _brandVer = ver;
 
     NSTextField *sub = [NSTextField labelWithString:@"HI-FI AUDIO ENGINE"];
     sub.font = [NSFont systemFontOfSize:9.5 weight:NSFontWeightMedium];
     sub.textColor = t.mut;
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     [brand addSubview:sub];
+    _brandSub = sub;
 
     // ---- 导航表 ----
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -946,13 +956,29 @@ static BOOL RLPRowIsSection(NSArray<NSDictionary *> *items, NSInteger row) {
 }
 
 - (void)applyTheme {
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     self.view.layer.backgroundColor = t.bg2.CGColor;
+    if (_brandHair) _brandHair.layer.backgroundColor = t.line.CGColor;
+    if (_brandLogo) _brandLogo.contentTintColor = t.accent;
+    if (_brandTitle) _brandTitle.textColor = t.text;
+    if (_brandVer) {
+        _brandVer.textColor = t.mut;
+        _brandVer.layer.backgroundColor = t.hov.CGColor;
+    }
+    if (_brandSub) _brandSub.textColor = t.mut;
+    NSScrollView *scroll = _tableView.enclosingScrollView;
+    NSPoint savedOrigin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
     [_tableView reloadData];
+    if (scroll) {
+        [scroll.contentView scrollToPoint:savedOrigin];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
     [self.view setNeedsDisplay:YES];
 }
 
 - (void)applyLanguage {
+    if (!self.isViewLoaded) return;
     NSScrollView *scroll = _tableView.enclosingScrollView;
     NSPoint savedOrigin = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
     [_tableView reloadData];

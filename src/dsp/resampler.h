@@ -14,6 +14,8 @@
 //  * inRate == outRate 时按位透传（比特完美）
 #pragma once
 #include "fp_strict.h"   // 261030-01 审计：DSP 路径严格 IEEE
+#include "resampler_simd.h"
+#include "parallel.h"
 #include "gpu_pref.h"
 #include "filter_design.h"
 #include "filter_families.h"
@@ -68,6 +70,10 @@ struct ResamplerConfig {
     // 内核长度 × L 的上限（防御：L 很大时系数表会膨胀）。0 = 不限制。
     // 对齐 Windows v3.3.11：2^24（16.8M 抽头），支持 tight-lp T=1600 @ 44.1->384k (2.05M) 等。
     int maxPrototypeTaps = 1 << 24;
+
+    // ---- CPU SIMD 与多核调度 ----
+    ResamplerCpuKernel cpuKernel = ResamplerCpuKernel::Auto;
+    bool cpuParallel = true;
 };
 
 // 把 FilterPreset 的全部参数应用到 ResamplerConfig
@@ -462,10 +468,16 @@ public:
     // in/out 为每声道指针数组。
     size_t process(const double* const* in, size_t inFrames,
                    double* const* out) {
+        cpuSimdOutputsLastBlock_ = 0;
+        cpuParallelThreadsLastBlock_ = 0;
+        if (inFrames == 0) return 0;
+        if (inFrames > (unsigned long long)(std::numeric_limits<int64_t>::max() - inAbs_))
+            throw std::length_error("Resampler absolute input counter overflow");
         // ---- 两段式：第一级 -> 中间缓冲 -> 第二级 ----
         if (stage1_) {
-            if (inFrames == 0) return 0;
             const size_t cap = stage1_->maxOutFrames(inFrames);
+            if (cap > tmp_.max_size() / size_t(ch_))
+                throw std::length_error("Cascade intermediate block exceeds addressable storage");
             if (tmp_.size() < cap * (size_t)ch_) {
                 tmp_.assign(cap * (size_t)ch_, 0.0);
                 for (int c = 0; c < ch_; ++c) tmpP_[(size_t)c] = tmp_.data() + (size_t)c * cap;
@@ -478,7 +490,6 @@ public:
                 std::copy(in[c], in[c] + inFrames, out[c]);
             return inFrames;
         }
-        if (inFrames == 0) return 0;
 
         // 历史缓冲中第一个样本的绝对序号（追加新输入之前计算）
         const int64_t firstAbs = inAbs_ - (int64_t)hist_[0].size();
@@ -526,20 +537,181 @@ public:
             }
         }
 
-        // CPU 路径（也是 GPU 不可用时的回退）
+        // CPU 路径（NEON SIMD + 常驻有界线程池；也是 GPU 不可用时的回退）
         if (!gpuDone) {
-            for (size_t n = 0; n < produced; ++n) {
-                const size_t base = (size_t)bases_[n];
-                const int p = phs_[n];
-                const int uEnd = (base + 1 < (size_t)T_) ? (int)(base + 1) : T_;
-                for (int c = 0; c < ch_; ++c) {
-                    const auto& hh = hist_[(size_t)c];
-                    const auto& ph = phases_[(size_t)p];
-                    double acc = 0.0;
-                    for (int u = 0; u < uEnd; ++u)
-                        acc += ph[(size_t)u] * hh[base - (size_t)u];
-                    out[c][n] = acc;
+            const bool simdAvail = (cfg_.cpuKernel != ResamplerCpuKernel::Scalar) && resampler_simd_available();
+            const bool usePhaseGroup = (M_ == 1 && L_ >= 2 && simdAvail);
+            const bool useTemporal = (M_ > 1 && simdAvail);
+            if (usePhaseGroup && phases_tap_major_.empty()) {
+                phases_tap_major_.resize((size_t)T_ * (size_t)L_);
+                for (int u = 0; u < T_; ++u)
+                    for (int p = 0; p < L_; ++p)
+                        phases_tap_major_[(size_t)u * (size_t)L_ + (size_t)p] =
+                            phases_flat_[(size_t)p * (size_t)T_ + (size_t)u];
+            }
+
+            auto range = [&](size_t begin, size_t end) -> size_t {
+                size_t simdOutputs = 0;
+                for (size_t n = begin; n < end; ++n) {
+                    const size_t base = (size_t)bases_[n];
+                    const int p = phs_[n];
+#if RTA_RESAMPLER_NEON
+                    if (simdAvail && M_ == 1 && L_ >= 2 && L_ <= 4 && p == 0 &&
+                        base >= (size_t)(T_ - 1) && n + size_t(8 * L_) <= end) {
+                        for (int c = 0; c < ch_; ++c) {
+                            const double* hptr = hist_[(size_t)c].data();
+                            if (L_ == 2)      resampler_m1_interleaved8<2>(phases_flat_.data(), T_, hptr, base, out[c] + n);
+                            else if (L_ == 3) resampler_m1_interleaved8<3>(phases_flat_.data(), T_, hptr, base, out[c] + n);
+                            else              resampler_m1_interleaved8<4>(phases_flat_.data(), T_, hptr, base, out[c] + n);
+                        }
+                        const size_t stepOut = size_t(8 * L_);
+                        simdOutputs += stepOut * (size_t)ch_;
+                        n += stepOut - 1;
+                        continue;
+                    }
+#endif
+                    const int uEnd = (base + 1 < (size_t)T_) ? (int)(base + 1) : T_;
+#if RTA_RESAMPLER_NEON
+                    if (usePhaseGroup && p + 2 <= L_ && n + 2 <= end) {
+                        const size_t width =
+                            (p + 16 <= L_ && n + 16 <= end) ? 16 :
+                            (p + 8  <= L_ && n + 8  <= end) ? 8  :
+                            (p + 4  <= L_ && n + 4  <= end) ? 4  : 2;
+                        for (int c = 0; c < ch_; ++c) {
+                            const double* coeff = phases_tap_major_.data() + p;
+                            const double* hptr = hist_[(size_t)c].data();
+                            if (width == 16)     resampler_phase_group<8>(coeff, (size_t)L_, hptr, base, uEnd, out[c] + n);
+                            else if (width == 8) resampler_phase_group<4>(coeff, (size_t)L_, hptr, base, uEnd, out[c] + n);
+                            else if (width == 4) resampler_phase_group<2>(coeff, (size_t)L_, hptr, base, uEnd, out[c] + n);
+                            else                 resampler_phase_group<1>(coeff, (size_t)L_, hptr, base, uEnd, out[c] + n);
+                        }
+                        simdOutputs += width * (size_t)ch_;
+                        n += width - 1;
+                        continue;
+                    }
+#endif
+                    for (int c = 0; c < ch_; ++c) {
+                        const auto& hh = hist_[(size_t)c];
+                        const double* ph = phases_flat_.data() + (size_t)p * (size_t)T_;
+                        double acc = 0.0;
+                        for (int u = 0; u < uEnd; ++u)
+                            acc += ph[(size_t)u] * hh[base - (size_t)u];
+                        out[c][n] = acc;
+                    }
                 }
+                return simdOutputs;
+            };
+
+            auto runTemporalSegment = [&](size_t nStart, size_t nEndLimit) -> size_t {
+                size_t count = 0;
+                size_t n = nStart;
+                while (n < nEndLimit) {
+                    const size_t base = (size_t)bases_[n];
+                    const int p = phs_[n];
+#if RTA_RESAMPLER_NEON
+                    const size_t remaining = 1 + (nEndLimit - 1 - n) / (size_t)L_;
+                    if (useTemporal && base >= (size_t)(T_ - 1) && remaining >= 2) {
+                        const size_t width = (remaining >= 8) ? 8 : (remaining >= 4) ? 4 : 2;
+                        for (int c = 0; c < ch_; ++c) {
+                            const double* ph = phases_flat_.data() + (size_t)p * (size_t)T_;
+                            const double* hptr = hist_[(size_t)c].data();
+                            if (width == 8)      resampler_temporal_group<4>(ph, hptr, base, T_, (size_t)M_, out[c] + n, (size_t)L_);
+                            else if (width == 4) resampler_temporal_group<2>(ph, hptr, base, T_, (size_t)M_, out[c] + n, (size_t)L_);
+                            else                 resampler_temporal_group<1>(ph, hptr, base, T_, (size_t)M_, out[c] + n, (size_t)L_);
+                        }
+                        count += width * (size_t)ch_;
+                        n += width * (size_t)L_;
+                        continue;
+                    }
+#endif
+                    const int endTap = (base + 1 < (size_t)T_) ? (int)(base + 1) : T_;
+                    for (int c = 0; c < ch_; ++c) {
+                        double acc = 0.0;
+                        const double* ph = phases_flat_.data() + (size_t)p * (size_t)T_;
+                        const double* hptr = hist_[(size_t)c].data();
+                        for (int u = 0; u < endTap; ++u)
+                            acc += ph[u] * hptr[base - (size_t)u];
+                        out[c][n] = acc;
+                    }
+                    n += (size_t)L_;
+                }
+                return count;
+            };
+
+            auto phaseRange = [&](size_t begin, size_t end) -> size_t {
+                size_t count = 0;
+                for (size_t q = begin; q < end; ++q)
+                    count += runTemporalSegment(q, produced);
+                return count;
+            };
+
+            const size_t totalPhases = std::min(produced, (size_t)L_);
+            const size_t maxWorkers = std::min<size_t>(size_t(8), hardware_threads());
+            const bool canParallel =
+                simdAvail && cfg_.cpuParallel && maxWorkers > 1 && produced >= 512 &&
+                (long double)produced * (long double)T_ * (long double)ch_ >= 2000000.0L;
+
+            if (canParallel) {
+                size_t tasks = 1;
+                const bool splitByPhase = (M_ > 1) && (totalPhases >= maxWorkers * 2);
+                const bool splitTemporalWithinPhase = (M_ > 1) && !splitByPhase;
+                if (splitByPhase) {
+                    tasks = std::min(maxWorkers, totalPhases);
+                } else if (splitTemporalWithinPhase) {
+                    tasks = std::min(maxWorkers, std::max<size_t>(1, produced / 16));
+                } else {
+                    tasks = std::min(maxWorkers, std::max<size_t>(1, produced / 64));
+                }
+                if (tasks > 1) {
+                    std::array<size_t, 8> counts{};
+                    std::array<std::thread::id, 8> ids{};
+                    ParallelFor::instance().run(tasks, [&](size_t task) {
+                        ids[task] = std::this_thread::get_id();
+                        if (splitByPhase) {
+                            const size_t begin = (totalPhases / tasks) * task + std::min(task, totalPhases % tasks);
+                            const size_t end = begin + totalPhases / tasks + (task < totalPhases % tasks ? 1u : 0u);
+                            counts[task] = phaseRange(begin, end);
+                        } else if (splitTemporalWithinPhase) {
+                            size_t csum = 0;
+                            for (size_t q = 0; q < totalPhases; ++q) {
+                                const size_t countForQ = 1 + (produced - 1 - q) / (size_t)L_;
+                                const size_t kBegin = (countForQ * task) / tasks;
+                                const size_t kEnd = (countForQ * (task + 1)) / tasks;
+                                if (kBegin >= kEnd) continue;
+                                const size_t nStart = q + kBegin * (size_t)L_;
+                                const size_t nEndLimit = (kEnd == countForQ)
+                                    ? produced
+                                    : std::min(produced, q + (kEnd - 1) * (size_t)L_ + 1);
+                                csum += runTemporalSegment(nStart, nEndLimit);
+                            }
+                            counts[task] = csum;
+                        } else {
+                            auto splitAt = [&](size_t t) -> size_t {
+                                if (t == 0) return 0;
+                                if (t >= tasks) return produced;
+                                size_t pos = (produced * t) / tasks;
+                                if (L_ <= 8) pos -= (pos % (size_t)L_);
+                                return std::min(pos, produced);
+                            };
+                            const size_t begin = splitAt(task);
+                            const size_t end = splitAt(task + 1);
+                            counts[task] = (begin < end) ? range(begin, end) : 0;
+                        }
+                    });
+                    for (size_t task = 0; task < tasks; ++task) {
+                        cpuSimdOutputsLastBlock_ += counts[task];
+                        bool first = true;
+                        for (size_t prior = 0; prior < task; ++prior)
+                            if (ids[prior] == ids[task]) first = false;
+                        if (first) ++cpuParallelThreadsLastBlock_;
+                    }
+                } else {
+                    cpuSimdOutputsLastBlock_ = (M_ > 1) ? phaseRange(0, totalPhases) : range(0, produced);
+                    cpuParallelThreadsLastBlock_ = 1;
+                }
+            } else {
+                cpuSimdOutputsLastBlock_ = (M_ > 1) ? phaseRange(0, totalPhases) : range(0, produced);
+                cpuParallelThreadsLastBlock_ = 1;
             }
         }
 
@@ -552,14 +724,34 @@ public:
         return produced;
     }
 
+    size_t cpu_simd_outputs_last_block() const {
+        if (stage1_) return stage1_->cpu_simd_outputs_last_block() + stage2_->cpu_simd_outputs_last_block();
+        return cpuSimdOutputsLastBlock_;
+    }
+    size_t cpu_parallel_threads_last_block() const {
+        if (stage1_) return std::max(stage1_->cpu_parallel_threads_last_block(), stage2_->cpu_parallel_threads_last_block());
+        return cpuParallelThreadsLastBlock_;
+    }
+
     // 输出缓冲上界
     size_t maxOutFrames(size_t inFrames) const {
         if (stage1_) return stage2_->maxOutFrames(stage1_->maxOutFrames(inFrames));
         if (passthrough_) return inFrames;
-        return (size_t)(((double)inFrames * (double)L_) / (double)M_) + (size_t)L_ + 8;
+        const size_t limit = (std::numeric_limits<size_t>::max)();
+        const size_t quotient = inFrames / (size_t)M_;
+        const size_t remainder = inFrames % (size_t)M_;
+        if (quotient > limit / (size_t)L_)
+            throw std::length_error("Resampler output capacity overflow");
+        const size_t whole = quotient * (size_t)L_;
+        const size_t extra = size_t(uint64_t(remainder) * uint64_t(L_) / uint64_t(M_)) + (size_t)L_ + 8;
+        if (whole > limit - extra)
+            throw std::length_error("Resampler output capacity overflow");
+        return whole + extra;
     }
 
     void reset() {
+        cpuSimdOutputsLastBlock_ = 0;
+        cpuParallelThreadsLastBlock_ = 0;
         if (stage1_) { stage1_->reset(); stage2_->reset(); return; }
         for (auto& hh : hist_) hh.clear();
         outIdx_ = 0; inAbs_ = 0; histHeld_ = 0;
@@ -568,6 +760,9 @@ public:
 
 private:
     ResamplerConfig cfg_;
+    size_t cpuSimdOutputsLastBlock_ = 0;
+    size_t cpuParallelThreadsLastBlock_ = 0;
+    std::vector<double> phases_tap_major_;
     int L_ = 1, M_ = 1, T_ = 0, ch_ = 2;
     bool passthrough_ = false;
     // ---- GPU 做多相乘加的桥接 ----

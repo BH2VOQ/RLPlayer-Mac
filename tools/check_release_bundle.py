@@ -38,8 +38,9 @@ def check_bundle(app, version):
         return r.stdout
 
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    numeric_version = re.sub(r'[^0-9.].*$', '', version).rstrip('.')
     ck(info['CFBundleShortVersionString'] == version, 'bundle version', info['CFBundleShortVersionString'])
-    ck(info['CFBundleVersion'] == version, 'numeric build version', info['CFBundleVersion'])
+    ck(info['CFBundleVersion'] == numeric_version, 'numeric build version', info['CFBundleVersion'])
     ck(info['LSMinimumSystemVersion'] == '13.0', 'minimum OS')
     ck('_raop._tcp' in info.get('NSBonjourServices', []), 'Bonjour declaration')
     for name in ['RLPlayer', 'ffmpeg', 'ffprobe', 'librtagpu.dylib', 'rtadiag']:

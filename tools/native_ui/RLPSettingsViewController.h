@@ -32,6 +32,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 同步当前界面模式（"listen" / "pro"）。两种模式均可打开全部 10 个设置页签，不强制切 pro。
 @property (nonatomic, copy) NSString *uiMode;
 - (void)applyUiMode:(NSString *)mode;
+- (void)stopPolling;
 
 @end
 

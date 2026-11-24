@@ -73,8 +73,12 @@ static const void *kRLPQueueDeletePathKey = &kRLPQueueDeletePathKey;
 /// P7：空队列时「保存为歌单」必须禁用（web 空队列根本不渲染保存按钮）。
 @property (nonatomic, strong) NSButton *saveButton;
 @property (nonatomic, strong) NSTextField *sortLabel;
+@property (nonatomic, strong) NSView *barView;
+@property (nonatomic, strong) NSLayoutConstraint *barHeightConstraint;
+@property (nonatomic, assign) BOOL layingOutBar;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *actionButtons;
 @property (nonatomic, assign) BOOL hasLoaded;
+@property (nonatomic, assign) BOOL lastLoadFailed;
 @property (nonatomic, assign) NSInteger hoveredRow;
 /// 行删除的「同一时刻只允许一个在途」闸门：连点行尾 × / 右键重复时，
 /// 第二次用的还是旧 tag，会把顶上来那一首也删掉（2026-11-18 夜间评审 A1）。
@@ -284,10 +288,10 @@ static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSAr
     RLPTheme *t = [RLPTheme current];
     NSView *host = self.contentView;
 
-    NSStackView *bar = [[NSStackView alloc] init];
-    bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    bar.spacing = 8;
+    NSView *bar = [[NSView alloc] initWithFrame:NSZeroRect];
     bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.identifier = @"queue.header";
+    self.barView = bar;
     // web 的排序是一个下拉（#qSort: 默认 / 标题 / 艺术家 / …），不是三个按钮。
     self.sortPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     // web #qSort 的 8 档，顺序/representedObject 逐值照抄（ui_script.h:12564-12574）。
@@ -307,10 +311,11 @@ static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSAr
     self.sortPopup.target = self;
     self.sortPopup.action = @selector(onSortPicked:);
     [self.sortPopup selectItemAtIndex:0];   // 生效档位 = 默认顺序（P6 回滚基准）
-    self.sortPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    self.sortPopup.translatesAutoresizingMaskIntoConstraints = YES;
     self.sortLabel = RLPLabel(RLPTr(@"排序："), [NSFont systemFontOfSize:11], [RLPTheme current].mut2);
-    [bar addArrangedSubview:self.sortLabel];
-    [bar addArrangedSubview:self.sortPopup];
+    self.sortLabel.translatesAutoresizingMaskIntoConstraints = YES;
+    [bar addSubview:self.sortLabel];
+    [bar addSubview:self.sortPopup];
     self.actionButtons = [NSMutableArray array];
     NSArray *acts = @[
         @[ RLPTr(@"刷新"), @"refresh" ],
@@ -322,7 +327,8 @@ static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSAr
         NSButton *b = [NSButton buttonWithTitle:a[0] target:self action:@selector(onAction:)];
         b.bezelStyle = NSBezelStyleRounded;
         b.identifier = a[1];
-        [bar addArrangedSubview:b];
+        b.translatesAutoresizingMaskIntoConstraints = YES;
+        [bar addSubview:b];
         [self.actionButtons addObject:b];
         if ([a[1] isEqualToString:@"save"]) {
             self.saveButton = b;
@@ -330,6 +336,11 @@ static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSAr
         }
     }
     [host addSubview:bar];
+    bar.postsFrameChangedNotifications = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onQueueBarFrameChanged:)
+                                                 name:NSViewFrameDidChangeNotification
+                                               object:bar];
 
     self.table = [[RLPTrackActionTableView alloc] initWithFrame:NSZeroRect];
     self.table.dataSource = self;
@@ -398,9 +409,12 @@ static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSAr
     self.empty.hidden = YES;
     [host addSubview:self.empty];
 
+    self.barHeightConstraint = [bar.heightAnchor constraintEqualToConstant:28];
     [NSLayoutConstraint activateConstraints:@[
         [bar.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
+        [bar.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
         [bar.topAnchor constraintEqualToAnchor:host.topAnchor constant:8],
+        self.barHeightConstraint,
         [sc.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:16],
         [sc.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-16],
         [sc.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:10],
@@ -408,14 +422,97 @@ static NSInteger RLPQueueResolveCurrentIndex(NSDictionary * _Nullable json, NSAr
         [self.empty.centerXAnchor constraintEqualToAnchor:sc.centerXAnchor],
         [self.empty.centerYAnchor constraintEqualToAnchor:sc.centerYAnchor],
     ]];
+    [self layoutBarControls];
 }
 
 #pragma mark - 布局
+
+- (void)onQueueBarFrameChanged:(NSNotification *)note {
+    (void)note;
+    [self layoutBarControls];
+}
+
+- (void)layoutBarControls {
+    if (!self.isViewLoaded || self.layingOutBar || !self.barView) return;
+    self.layingOutBar = YES;
+    CGFloat barW = NSWidth(self.barView.bounds);
+    const CGFloat hostBarW = (NSWidth(self.view.bounds) > 33.0) ? (NSWidth(self.view.bounds) - 32.0) : 0.0;
+    if (!(barW > 1.0) || (hostBarW > 1.0 && fabs(barW - hostBarW) > 1.0)) {
+        barW = MAX(200.0, hostBarW);
+    }
+    const CGFloat rowH = 28.0;
+    const CGFloat gapX = 8.0, gapY = 6.0;
+    CGFloat x = 0.0, y = 0.0;
+
+    NSMutableArray<NSView *> *items = [NSMutableArray array];
+    NSMutableArray<NSValue *> *rects = [NSMutableArray array];
+
+    if (self.sortLabel && self.sortPopup) {
+        [self.sortLabel sizeToFit];
+        [self.sortPopup sizeToFit];
+        const CGFloat lblW = MIN(barW, ceil(NSWidth(self.sortLabel.frame)));
+        const CGFloat lblH = MAX(14.0, ceil(NSHeight(self.sortLabel.frame)));
+        const CGFloat popW = MIN(barW, MAX(96.0, ceil(NSWidth(self.sortPopup.frame))));
+        const CGFloat popH = MAX(22.0, ceil(NSHeight(self.sortPopup.frame)));
+        if (lblW + 4.0 + popW <= barW) {
+            [items addObject:self.sortLabel];
+            [rects addObject:[NSValue valueWithRect:NSMakeRect(x, y, lblW, lblH)]];
+            [items addObject:self.sortPopup];
+            [rects addObject:[NSValue valueWithRect:NSMakeRect(x + lblW + 4.0, y, popW, popH)]];
+            x += lblW + 4.0 + popW + gapX;
+        } else {
+            [items addObject:self.sortLabel];
+            [rects addObject:[NSValue valueWithRect:NSMakeRect(0.0, y, lblW, lblH)]];
+            y += rowH + gapY;
+            [items addObject:self.sortPopup];
+            [rects addObject:[NSValue valueWithRect:NSMakeRect(0.0, y, popW, popH)]];
+            x = popW + gapX;
+        }
+    }
+
+    for (NSButton *b in self.actionButtons) {
+        [b sizeToFit];
+        const CGFloat bw = MIN(barW, MAX(48.0, ceil(NSWidth(b.frame))));
+        const CGFloat bh = MAX(22.0, ceil(NSHeight(b.frame)));
+        if (x > 0.0 && x + bw > barW) {
+            x = 0.0;
+            y += rowH + gapY;
+        }
+        [items addObject:b];
+        [rects addObject:[NSValue valueWithRect:NSMakeRect(x, y, bw, bh)]];
+        x += bw + gapX;
+    }
+
+    const CGFloat totalH = y + rowH;
+    for (NSUInteger i = 0; i < items.count && i < rects.count; ++i) {
+        const NSRect r = rects[i].rectValue;
+        items[i].frame = NSMakeRect(
+            r.origin.x,
+            totalH - (r.origin.y + rowH) + floor((rowH - r.size.height) * 0.5),
+            r.size.width,
+            r.size.height);
+    }
+    if (fabs(self.barHeightConstraint.constant - totalH) > 0.5) {
+        self.barHeightConstraint.constant = totalH;
+        [self.barView setNeedsUpdateConstraints:YES];
+        [self.contentView setNeedsUpdateConstraints:YES];
+        [self.contentView setNeedsLayout:YES];
+        [self.view setNeedsUpdateConstraints:YES];
+        [self.view setNeedsLayout:YES];
+    }
+    self.layingOutBar = NO;
+}
+
+- (void)viewWillLayout {
+    [super viewWillLayout];
+    [self layoutBarControls];
+}
 
 /// 表格宽度必须等于滚动视口的宽度：NSTableView 的列布局按**表格自己的 frame** 算，
 /// 表格比视口宽时，最右侧的列会落到视口外（行尾 × 就是这么消失的）。
 - (void)viewDidLayout {
     [super viewDidLayout];
+    [self layoutBarControls];
     NSScrollView *sc = self.tableScroll;
     if (!sc) return;
     const NSSize clip = sc.contentSize;
@@ -1005,10 +1102,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     p.canChooseFiles = YES;
     p.canChooseDirectories = NO;
     p.allowsMultipleSelection = NO;
-    if (@available(macOS 11.0, *)) {
-        p.allowedContentTypes = @[];
-    }
-    p.allowedFileTypes = @[ @"m3u", @"m3u8" ];
+    RLPConfigureOpenPanelFileTypes(p, @[ @"m3u", @"m3u8" ]);
     p.message = RLPTr(@"选择 M3U 歌单");
     __weak __typeof__(self) ws = self;
     [p beginWithCompletionHandler:^(NSModalResponse r) {
@@ -1221,11 +1315,15 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
     }
 }
 
-- (void)viewDidDisappear {
+- (void)stopPolling {
     [self.poll invalidate];
     self.poll = nil;
     ++self.seq;
     self.inflightSeq = 0;
+}
+
+- (void)viewDidDisappear {
+    [self stopPolling];
     [super viewDidDisappear];
 }
 
@@ -1342,6 +1440,7 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 }
 
 - (void)reloadData {
+    self.lastLoadFailed = NO;
     if (![RLPCoreClient shared].started) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         self.saveButton.enabled = NO;   // P7：没有队列数据 ⟹ 不能保存
@@ -1363,9 +1462,11 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
                                               [json[@"ok"] boolValue])) &&
                             [json[@"items"] isKindOfClass:[NSArray class]];
         if (!okFlag) {
+            self_.lastLoadFailed = YES;
             [self_ setSubtitle:RLPTr(@"读取失败")];
             return;
         }
+        self_.lastLoadFailed = NO;
         // 「播放中不许替换队列」的守卫需要真实播放态：与页面同一份 /api/status 轮询口径，
         // 不自己维护第二份播放状态（核心是唯一真相源）。
         [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary * _Nullable st) {
@@ -1390,7 +1491,9 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
+    self.sortLabel.textColor = t.mut2;
     self.table.backgroundColor = t.bg;
     self.empty.textColor = t.mut;
     [self.table reloadData];
@@ -1415,9 +1518,12 @@ static NSString *RLPQueueMetaText(NSDictionary *m, NSString *k,
         NSString *zh = btnMap[b.identifier ?: @""];
         if (zh.length) b.title = RLPTr(zh);
     }
+    [self layoutBarControls];
     self.empty.stringValue = [RLPTr(@"队列是空的") stringByAppendingFormat:@"\n%@",
         RLPTr(@"把文件拖进窗口，或右键专辑/曲目「加入队列」")];
-    if (self.hasLoaded) {
+    if (self.lastLoadFailed) {
+        [self setSubtitle:RLPTr(@"读取失败")];
+    } else if (self.hasLoaded) {
         NSArray *names = @[ RLPTr(@"顺序"), RLPTr(@"列表循环"), RLPTr(@"单曲循环"), RLPTr(@"随机") ];
         NSString *mn = names[MIN(MAX(self.mode, 0), 3)];
         [self setSubtitle:[NSString stringWithFormat:RLPTr(@"%ld 首 · 当前第 %ld 首 · %@"),

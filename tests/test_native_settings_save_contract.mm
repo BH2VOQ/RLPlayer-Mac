@@ -88,6 +88,8 @@ static void SimulateTextEdit(NSTextField *field, NSString *value) {
 @property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *heldLlmPosts;
 @property (nonatomic, copy) NSDictionary *serverSettingsKV;
 @property (nonatomic, copy) NSDictionary *serverLlmPayload;
+@property (nonatomic, strong) NSMutableArray<NSString *> *postedSettingsBodies;
+@property (nonatomic, strong) NSMutableArray<NSString *> *postedInputStartBodies;
 @end
 
 @implementation RLPSaveMockClient
@@ -97,6 +99,8 @@ static void SimulateTextEdit(NSTextField *field, NSString *value) {
     if (self) {
         _heldLibRootsPosts = [NSMutableArray array];
         _heldLlmPosts = [NSMutableArray array];
+        _postedSettingsBodies = [NSMutableArray array];
+        _postedInputStartBodies = [NSMutableArray array];
         _serverSettingsKV = @{
             @"backend": @"null",
             @"volume": @(-120),
@@ -141,7 +145,8 @@ static void SimulateTextEdit(NSTextField *field, NSString *value) {
 }
 
 - (void)postJSON:(NSString *)path body:(nullable NSString *)body completion:(nullable RLPJSONCompletion)completion {
-    (void)body;
+    if ([path isEqualToString:@"/api/settings"] && body) [self.postedSettingsBodies addObject:body];
+    if ([path isEqualToString:@"/api/input/start"] && body) [self.postedInputStartBodies addObject:body];
     if ([path isEqualToString:@"/api/lib/roots"] && self.holdLibRootsPost) {
         if (completion) [self.heldLibRootsPosts addObject:[completion copy]];
         return;
@@ -195,8 +200,18 @@ static void SimulateTextEdit(NSTextField *field, NSString *value) {
     if ([path hasPrefix:@"/api/llm/test"]) {
         return @{ @"ok": @YES, @"model": @"deepseek-chat", @"latencyMs": @12 };
     }
-    if ([path hasPrefix:@"/api/devices"]) return @{ @"ok": @YES, @"devices": @[] };
-    if ([path hasPrefix:@"/api/input/devices"]) return @{ @"ok": @YES, @"devices": @[] };
+    if ([path hasPrefix:@"/api/devices"]) {
+        return @{ @"ok": @YES, @"devices": @[ @{ @"id": @"76", @"name": @"MockOutputSpeaker" } ] };
+    }
+    if ([path hasPrefix:@"/api/input/devices"]) {
+        return @{
+            @"ok": @YES,
+            @"devices": @[
+                @{ @"id": @"__system_loopback__", @"name": @"系统混音回环（本机正在播放的声音）", @"loopback": @YES, @"default": @NO },
+                @{ @"id": @"106", @"name": @"MockPhysicalMic", @"loopback": @NO, @"default": @YES }
+            ]
+        };
+    }
     if ([path hasPrefix:@"/api/filters"]) return @{ @"ok": @YES, @"items": @[] };
     if ([path hasPrefix:@"/api/playmode"]) return @{ @"ok": @YES, @"repeat": @0, @"shuffle": @NO };
     if ([path hasPrefix:@"/api/lib/roots"]) return @{ @"ok": @YES, @"roots": @[] };
@@ -396,6 +411,47 @@ int main(void) {
         Ck(IsDirtyId(settings, @"search.key"),
            "2b-2. POST /api/llm 旧成功回调不可清除新草稿的 search.key dirty",
            [NSString stringWithFormat:@"dirty=%d", IsDirtyId(settings, @"search.key")]);
+
+        // 3. 输入页：/api/devices 不可覆盖 sp_indev；回环端点可选且保存/启动传 __system_loopback__
+        [settings selectPane:@"in"];
+        Pump(0.1);
+        [settings reloadData];
+        Pump(0.1);
+        NSPopUpButton *inDev = (NSPopUpButton *)FindById(settings.view, @"sp_indev");
+        NSInteger lbIdx = NSNotFound;
+        BOOL pollutedByOut = NO;
+        for (NSInteger i = 0; i < (NSInteger)inDev.numberOfItems; ++i) {
+            NSMenuItem *it = [inDev itemAtIndex:i];
+            if ([it.title containsString:@"MockOutputSpeaker"]) pollutedByOut = YES;
+            if ([it.representedObject isKindOfClass:[NSString class]] &&
+                [(NSString *)it.representedObject isEqualToString:@"__system_loopback__"]) {
+                lbIdx = i;
+            }
+        }
+        Ck(inDev && !pollutedByOut,
+           "3-1. /api/devices 输出设备不得覆盖输入设备下拉 sp_indev",
+           [NSString stringWithFormat:@"polluted=%d count=%ld", pollutedByOut, (long)inDev.numberOfItems]);
+        Ck(lbIdx != NSNotFound && [inDev itemAtIndex:lbIdx].isEnabled &&
+           [[inDev itemAtIndex:lbIdx].title containsString:@"回环"],
+           "3-2. sp_indev 包含已启用的 __system_loopback__ 回环项",
+           [NSString stringWithFormat:@"lbIdx=%ld", (long)lbIdx]);
+        if (lbIdx != NSNotFound) {
+            [gMockClient.postedSettingsBodies removeAllObjects];
+            [gMockClient.postedInputStartBodies removeAllObjects];
+            [inDev selectItemAtIndex:lbIdx];
+            [settings performSelector:@selector(onInDevice:) withObject:inDev];
+            [settings performSelector:@selector(onInputStart:) withObject:nil];
+            Pump(0.05);
+            BOOL savedLb = NO, startedLb = NO;
+            for (NSString *b in gMockClient.postedSettingsBodies)
+                if ([b containsString:@"indev=__system_loopback__"]) savedLb = YES;
+            for (NSString *b in gMockClient.postedInputStartBodies)
+                if ([b containsString:@"dev=__system_loopback__"] && [b containsString:@"mode=record"]) startedLb = YES;
+            Ck(savedLb, "3-3. 选中回环项保存设置 POST indev=__system_loopback__",
+               [gMockClient.postedSettingsBodies componentsJoinedByString:@" | "]);
+            Ck(startedLb, "3-4. 点击开始采集 POST mode=record&dev=__system_loopback__",
+               [gMockClient.postedInputStartBodies componentsJoinedByString:@" | "]);
+        }
 
         std::printf("结果：%d passed, %d failed\n", gPass, gFail);
         return gFail == 0 ? 0 : 1;

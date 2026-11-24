@@ -15,8 +15,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// path 为空返回 nil；网络曲目（http/https）自动省略"音质体检/对比版本"
 /// ——后端没有本地路径，摆出来只会失败。
 NSMenu *_Nullable RLPTrackMenuForPath(NSString *_Nullable path,
-                                     id target,
-                                     SEL playAction,
+                                     id _Nullable target,
+                                     SEL _Nullable playAction,
                                      SEL _Nullable removeAction);
 
 /// 音质体检弹层（/api/health?file=…）：19 项指标，数字全部来自后端。

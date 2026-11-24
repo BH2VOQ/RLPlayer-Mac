@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RLPCalibrationView : NSView
 - (void)reload;
 - (void)applyTheme;
+- (void)applyLanguage;
 /// 嵌入设置页时调用：去掉本视图自己的滚动条，由外层页面统一滚动。
 - (void)setEmbeddedInPage:(BOOL)embedded;
 /// 房间校正 IR 段（web cal 页第三张 sgroup 的卡体）。设置页整段搬进那张卡片；

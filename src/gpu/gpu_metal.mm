@@ -123,6 +123,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#define RL_NO_ACCELERATE 1   // keep librtagpu.dylib dependency-minimal (Metal + Foundation only)
 #include "dsp/fft.h"
 
 #include <cstdio>

@@ -107,6 +107,7 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     NSInteger _limit;
     NSInteger _totalCount;
     BOOL _hasLoaded;
+    BOOL _lastLoadFailed;
     NSInteger _searchSeq;
     NSTimer *_debounceTimer;
     NSMutableSet<NSString *> *_favoritePaths;   // /api/fav/list 的路径集合（心形实心/空心）
@@ -497,20 +498,24 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *theme = [RLPTheme current];
     _emptyLabel.textColor = theme.mut;
+    _searchEmptyTitle.textColor = theme.text;
+    _searchEmptyHint.textColor = theme.mut2;
     [_tableView reloadData];
 }
 
 #pragma mark - 数据请求
 
 - (void)fetchTracks {
+    _lastLoadFailed = NO;
     if (![RLPCoreClient shared].started) {
         [self setSubtitle:RLPTr(@"核心未启动")];
         [_tracks removeAllObjects];
         [_rawTracks removeAllObjects];
         _totalCount = 0;
-        _hasLoaded = YES;
+        _hasLoaded = NO;
         _emptyLabel.stringValue = RLPTr(@"核心未启动");
         _emptyLabel.hidden = NO;
         _searchEmptyView.hidden = YES;
@@ -528,12 +533,13 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
     [[RLPCoreClient shared] getJSON:path completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
         if (!self_ || self_->_searchSeq != seq) return;
-        self_->_hasLoaded = YES;
 
         // web：头部标题随查询词变化（head(q ? ('搜索：' + q) : '曲目', …)，ui_script.h:3334）。
         [self_ setPageTitle:q.length ? [NSString stringWithFormat:RLPTr(@"搜索：%@"), q] : RLPTr(@"曲目")];
 
         if (!json || ![json[@"ok"] boolValue]) {
+            self_->_hasLoaded = NO;
+            self_->_lastLoadFailed = YES;
             [self_ setSubtitle:RLPTr(@"读取失败")];
             [self_->_tracks removeAllObjects];
             [self_->_rawTracks removeAllObjects];
@@ -545,6 +551,8 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
             [self_->_tableView reloadData];
             return;
         }
+        self_->_hasLoaded = YES;
+        self_->_lastLoadFailed = NO;
 
         NSArray<RLPTrack *> *list = [RLPTrack tracksFromJSON:json key:@"tracks"];
         [self_->_rawTracks setArray:list];   // P5：只维护原始序；_tracks 由 applyTrackSort 派生
@@ -958,7 +966,8 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
 }
 
 - (void)applyLanguage {
-    self.pageTitle = RLPTr(@"曲目");
+    NSString *curQ = [_searchField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    self.pageTitle = (_hasLoaded && curQ.length) ? [NSString stringWithFormat:RLPTr(@"搜索：%@"), curQ] : RLPTr(@"曲目");
     if (!self.isViewLoaded) return;
     _searchField.placeholderString = RLPTr(@"搜索专辑 / 艺术家 / 曲目…");
     NSArray<NSString *> *sortTitles = @[@"默认排序", @"标题", @"艺术家", @"专辑", @"时长", @"年份", @"收藏优先"];
@@ -979,7 +988,13 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
             _searchEmptyTitle.stringValue = [NSString stringWithFormat:RLPTr(@"未找到与 “%@” 相关的曲目"), q];
         }
     }
-    if (_hasLoaded) {
+    if (![RLPCoreClient shared].started && !_hasLoaded) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        if (!_emptyLabel.hidden) _emptyLabel.stringValue = RLPTr(@"核心未启动");
+    } else if (_lastLoadFailed && _tracks.count == 0) {
+        [self setSubtitle:RLPTr(@"读取失败")];
+        if (!_emptyLabel.hidden) _emptyLabel.stringValue = RLPTr(@"读取失败");
+    } else if (_hasLoaded) {
         if (_tracks.count == 0) {
             [self setSubtitle:RLPTr(@"没有匹配的曲目")];
             if (!_emptyLabel.hidden) _emptyLabel.stringValue = RLPTr(@"没有匹配的曲目");
@@ -989,8 +1004,6 @@ static NSString *RLPTrackArtistAlbumText(RLPTrack *t) {
         } else {
             [self setSubtitle:[NSString stringWithFormat:@"%ld %@", (long)_tracks.count, RLPTr(@"首")]];
         }
-    } else if (![RLPCoreClient shared].started) {
-        [self setSubtitle:RLPTr(@"核心未启动")];
     }
     NSIndexSet *sel = [_tableView.selectedRowIndexes copy];
     NSPoint origin = _scrollView ? _scrollView.contentView.bounds.origin : NSZeroPoint;

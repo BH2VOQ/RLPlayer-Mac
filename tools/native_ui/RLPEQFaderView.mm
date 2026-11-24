@@ -186,6 +186,20 @@ static const CGFloat kKnobR = 9.0;
     }
 }
 
+- (void)applyTheme {
+    RLPTheme *t = [RLPTheme current];
+    for (NSTextField *f in _fields) {
+        f.textColor = t.text;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)applyLanguage {
+    for (NSTextField *f in _fields) {
+        f.toolTip = RLPTr(@"直接输入该段的增益，范围 ±24 dB");
+    }
+}
+
 - (void)onValueFieldCommitted:(NSTextField *)f {
     const NSInteger i = f.tag;
     if (i < 0 || !self.onBandGainEdited) return;

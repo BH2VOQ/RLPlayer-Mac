@@ -173,7 +173,7 @@ class Quantizer {
 public:
     Quantizer(Shaper s, int bits, uint64_t seed = 12345, double sampleRate = 44100.0,
               double cornerHz = 20000.0)
-        : s_(s), bits_(bits), rng_(seed), fs_(sampleRate) {
+        : s_(s), bits_(bits), fs_(sampleRate), rng_(seed) {
         auto sp = shaper_spec(s);
         order_ = sp.order;
         q_ = 2.0 / std::pow(2.0, (double)bits_);          // 量化步长（输入范围 [-1,1)）

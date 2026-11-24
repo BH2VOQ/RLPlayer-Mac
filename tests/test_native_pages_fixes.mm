@@ -49,11 +49,13 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)reloadData;
 - (void)onDoubleClick:(id)sender;
 - (void)playRowAtIndex:(NSInteger)row;
+- (void)applyTheme;
 @end
 
 @interface RLPPlaylistsViewController (PagesFixesAudit)
 - (void)openPlaylist:(NSString *)name;
 - (void)playFromIndex:(NSInteger)index;
+- (void)applyLanguage;
 @end
 
 @interface RLPAlbumDetailViewController (PagesFixesAudit)
@@ -61,6 +63,8 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)onRowDoubleClick:(id)sender;
 - (void)onRowAdd:(NSButton *)sender;
 - (void)onShuffle:(id)sender;
+- (void)applyLanguage;
+- (void)layoutAlbum;
 @end
 
 @interface RLPArtistDetailViewController (PagesFixesAudit)
@@ -78,6 +82,7 @@ static NSMutableArray<NSDictionary *> *g_posts;
 static NSMutableArray<NSString *> *g_getDatas;
 static NSInteger g_mode;    // 桩里的播放模式（GET /api/playmode 的真相）
 static BOOL g_favListBackslash = NO;
+static BOOL g_favListEmpty = NO;
 static BOOL g_addShouldFail = NO;
 static NSInteger g_knowPollCount = 0;
 static BOOL g_holdArtistB = NO;
@@ -132,6 +137,10 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
     if (!done) return;
     [g_gets addObject:@{ @"path": path ?: @"" }];
     if ([path hasPrefix:@"/api/fav/list"]) {
+        if (g_favListEmpty) {
+            done(@{ @"ok": @YES, @"files": @[] });
+            return;
+        }
         if (g_favListBackslash) {
             done(@{ @"ok": @YES, @"files": @[ @"\\Music\\Fav\\Two.flac" ] });
             return;
@@ -304,11 +313,6 @@ static NSArray<NSDictionary *> *PlaylistItemsFixture(void) {
 
 #pragma mark - 小工具
 
-static void CollectAll(NSView *v, NSMutableArray<NSView *> *out) {
-    if (!v) return;
-    [out addObject:v];
-    for (NSView *s in v.subviews) CollectAll(s, out);
-}
 static void Pump(double seconds) {
     NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
     while ([until timeIntervalSinceNow] > 0)
@@ -354,7 +358,7 @@ int main() {
                                                     styleMask:NSWindowStyleMaskBorderless
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 700)];
-        static NSWindow *sWindow; sWindow = win;   // 不 close：离屏测试不承担 dealloc 顺序
+        static NSWindow *sWindow; sWindow = win; (void)sWindow;   // 不 close：离屏测试不承担 dealloc 顺序
 
         // ---- P1 我的最爱：单击只选中，不整列开播 ----
         {
@@ -658,7 +662,37 @@ int main() {
                "缺口3 serverChanged 成功后清空面包屑并禁用返回按钮",
                [NSString stringWithFormat:@"crumb=%lu back=%d", (unsigned long)crumb.count, (int)backBtn.enabled]);
 
-            // browseId 返回 !ok：必须清空旧 _items 并显示错误空态
+            // 网格卡片几何：正方形封面、subLabel 不超出卡片底边、auto-fill 列宽随容器适配
+            NSCollectionView *grid = [st valueForKey:@"_grid"];
+            NSCollectionViewFlowLayout *fl = (NSCollectionViewFlowLayout *)grid.collectionViewLayout;
+            [st.view layoutSubtreeIfNeeded];
+            Pump(0.05);
+            const CGFloat w900Item = fl.itemSize.width;
+            const CGFloat h900Item = fl.itemSize.height;
+            Ck(w900Item >= 152.0 && h900Item >= w900Item + 40.0,
+               "缺口3 流媒体卡片按 auto-fill 铺满且高度足以容纳两行文字",
+               [NSString stringWithFormat:@"size=%.1fx%.1f", w900Item, h900Item]);
+            NSCollectionViewItem *card = [grid itemAtIndexPath:[NSIndexPath indexPathForItem:0 inSection:0]];
+            if (!card) {
+                [grid layoutSubtreeIfNeeded];
+                card = [grid itemAtIndexPath:[NSIndexPath indexPathForItem:0 inSection:0]];
+            }
+            if ([card isKindOfClass:[RLPStreamItem class]]) {
+                RLPStreamItem *si = (RLPStreamItem *)card;
+                [si.view setFrameSize:fl.itemSize];
+                [si.view layoutSubtreeIfNeeded];
+                const CGFloat cw = NSWidth(si.coverView.frame);
+                const CGFloat ch = NSHeight(si.coverView.frame);
+                const CGFloat subTopOrBot = si.view.isFlipped ? NSMaxY(si.subLabel.frame) : (NSHeight(si.view.bounds) - NSMinY(si.subLabel.frame));
+                Ck(cw > 100.0 && fabs(cw - ch) < 0.5,
+                   "缺口3 流媒体卡片封面保持 1:1 正方形",
+                   [NSString stringWithFormat:@"cover=%.1fx%.1f", cw, ch]);
+                Ck(subTopOrBot <= NSHeight(si.view.bounds) + 0.5,
+                   "缺口3 流媒体卡片副标题不超出底边",
+                   [NSString stringWithFormat:@"subExtent=%.1f itemH=%.1f", subTopOrBot, NSHeight(si.view.bounds)]);
+            }
+
+            // browseId 返回 !ok：必须清空旧 _items 并显示错误空态；窄窗下空态卡不溢出
             g_browseShouldFail = YES;
             [st browseId:@""];
             Pump(0.05);
@@ -666,6 +700,43 @@ int main() {
             Ck(itemsNow.count == 0 && [st emptyStateVisible],
                "缺口3 browseId !ok 时清空旧 _items 并显示错误空态",
                [NSString stringWithFormat:@"items=%lu emptyVisible=%d", (unsigned long)itemsNow.count, (int)[st emptyStateVisible]]);
+            [win setContentSize:NSMakeSize(500, 640)];
+            st.view.frame = win.contentView.bounds;
+            [win.contentView layoutSubtreeIfNeeded];
+            [st.view layoutSubtreeIfNeeded];
+            NSView *emptyCard = [st valueForKey:@"_emptyCard"];
+            Ck(emptyCard && NSWidth(emptyCard.frame) <= 468.5 && NSMinX(emptyCard.frame) >= 15.5,
+               "缺口3 窄窗下流媒体空态卡自适应收窄不溢出",
+               [NSString stringWithFormat:@"emptyFrame=%@", NSStringFromRect(emptyCard.frame)]);
+
+            // v2.0.3 流媒体列表视图：Plain 表格样式 + 454pt 窄窗下列宽贴合视口不水平溢出
+            g_browseShouldFail = NO;
+            [st browseId:@""];
+            Pump(0.05);
+            NSSegmentedControl *vt = [st valueForKey:@"_viewToggle"];
+            vt.selectedSegment = 1;
+            [(id)st viewToggleChanged:vt];
+            [win setContentSize:NSMakeSize(454, 640)];
+            st.view.frame = win.contentView.bounds;
+            [win.contentView layoutSubtreeIfNeeded];
+            [st.view layoutSubtreeIfNeeded];
+            NSTableView *stTable = [st valueForKey:@"_tableView"];
+            NSScrollView *stListScroll = [st valueForKey:@"_listScroll"];
+            BOOL stPlainOk = YES;
+            if (@available(macOS 11.0, *)) {
+                stPlainOk = (stTable.style == NSTableViewStylePlain);
+            }
+            const CGFloat stClipW = stListScroll ? NSWidth(stListScroll.contentView.bounds) : 0.0;
+            const CGFloat stColW = (stTable.tableColumns.count > 0) ? stTable.tableColumns[0].width : 0.0;
+            Ck(stPlainOk && stClipW > 0.0 && stColW <= stClipW + 1.0 && fabs(NSWidth(stTable.frame) - stClipW) <= 1.0,
+               "v2.0.3 流媒体列表采用 Plain 表格样式且 454pt 窄窗列宽贴合视口",
+               [NSString stringWithFormat:@"colW=%.1f tableW=%.1f clipW=%.1f",
+                stColW, NSWidth(stTable.frame), stClipW]);
+            vt.selectedSegment = 0;
+            [(id)st viewToggleChanged:vt];
+
+            [win setContentSize:NSMakeSize(900, 640)];
+            [win.contentView layoutSubtreeIfNeeded];
         }
 
         // ---- 审计缺口1：专辑详情 CUE 区间播放、入队、右键菜单 ----
@@ -894,6 +965,204 @@ int main() {
             Ck(albumPlays.count == 1 && [albumPlays[0][@"body"] containsString:@"k=alb-cue"],
                "S3 valid delayed shuffle plays clicked album snapshot",
                [g_posts componentsJoinedByString:@" | "]);
+        }
+
+        // ---- 收藏页 UI 修复回归（hintBanner/table 不重叠、heart 列不出界、空态隐藏表头、主题刷新）----
+        {
+            [RLPTheme setThemeName:@"light"];
+            g_favListEmpty = NO;
+            g_favListBackslash = NO;
+            RLPFavoritesViewController *favUI = [RLPFavoritesViewController new];
+            favUI.view.frame = NSMakeRect(0, 0, 674, 520);
+            [win.contentView addSubview:favUI.view];
+            [favUI.view layoutSubtreeIfNeeded];
+            [favUI reloadData];
+            Pump(0.1);
+            [favUI.view layoutSubtreeIfNeeded];
+
+            NSView *banner = [favUI valueForKey:@"_hintBanner"];
+            NSTextField *hint = [favUI valueForKey:@"_hintLabel"];
+            NSTextField *emptyLbl = [favUI valueForKey:@"_emptyLabel"];
+            NSScrollView *scroll = [favUI valueForKey:@"_scrollView"];
+            NSTableView *tv = [favUI valueForKey:@"_tableView"];
+
+            Ck(banner != nil && !banner.hidden && hint != nil && [hint.stringValue containsString:@"双击"],
+               "FavUI 有数据时显示顶部提示横幅", hint.stringValue ?: @"nil");
+            Ck(scroll != nil && !scroll.hidden && emptyLbl != nil && emptyLbl.hidden,
+               "FavUI 有数据时显示列表、隐藏空态文案", @"visibility");
+            const NSRect bRect = [banner convertRect:banner.bounds toView:favUI.contentView];
+            const NSRect sRect = [scroll convertRect:scroll.bounds toView:favUI.contentView];
+            Ck(!NSIntersectsRect(bRect, sRect),
+               "FavUI 顶部提示横幅与表格滚动区绝不重叠",
+               [NSString stringWithFormat:@"banner=%@ scroll=%@", NSStringFromRect(bRect), NSStringFromRect(sRect)]);
+            Ck(tv.rowHeight >= 30.0 && !tv.usesAlternatingRowBackgroundColors,
+               "FavUI 行高 >= 30 且禁用交替行条带",
+               [NSString stringWithFormat:@"rowH=%.1f alt=%d", tv.rowHeight, (int)tv.usesAlternatingRowBackgroundColors]);
+
+            const CGFloat spacing = tv.intercellSpacing.width * (CGFloat)tv.tableColumns.count;
+            CGFloat colSum = 0.0;
+            for (NSTableColumn *c in tv.tableColumns) colSum += c.width;
+            const CGFloat clipW = NSWidth(scroll.contentView.bounds);
+            Ck(colSum + spacing <= clipW + 1.0,
+               "FavUI 5 列总宽 + 间距不超出视口（心形列不被裁切）",
+               [NSString stringWithFormat:@"sum=%.1f+%.1f clipW=%.1f", colSum, spacing, clipW]);
+
+            favUI.view.frame = NSMakeRect(0, 0, 520, 520);
+            [favUI.view layoutSubtreeIfNeeded];
+            Pump(0.05);
+            CGFloat narrowSum = 0.0;
+            for (NSTableColumn *c in tv.tableColumns) narrowSum += c.width;
+            const CGFloat narrowClip = NSWidth(scroll.contentView.bounds);
+            Ck(narrowSum + spacing <= narrowClip + 1.0 && tv.tableColumns.lastObject.width >= 30.0,
+               "FavUI 窄窗 520pt 下仍完整保留心形列且不溢出",
+               [NSString stringWithFormat:@"sum=%.1f+%.1f clipW=%.1f heartW=%.1f",
+                narrowSum, spacing, narrowClip, tv.tableColumns.lastObject.width]);
+
+            [tv selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+            [RLPTheme setThemeName:@"dark"];
+            [favUI applyTheme];
+            Ck(tv.selectedRow == 1 && [hint.textColor isEqual:[RLPTheme current].text2],
+               "FavUI applyTheme 切换暗色后更新提示色并保留行选中",
+               [NSString stringWithFormat:@"sel=%ld", (long)tv.selectedRow]);
+            [RLPTheme setThemeName:@"light"];
+            [favUI applyTheme];
+
+            g_favListEmpty = YES;
+            [favUI reloadData];
+            Pump(0.1);
+            Ck(banner.hidden && scroll.hidden && !emptyLbl.hidden,
+               "FavUI 空态时隐藏提示横幅与空白表头，只显示居中空态",
+               [NSString stringWithFormat:@"bannerH=%d scrollH=%d emptyH=%d",
+                (int)banner.hidden, (int)scroll.hidden, (int)emptyLbl.hidden]);
+            g_favListEmpty = NO;
+            [favUI.view removeFromSuperview];
+        }
+
+        // ---- v2.0.2 专辑详情页：语言切换保留随机圆形图标键无文字 + 窄窗换行与 tracksMeta 不溢出 ----
+        {
+            RLPAlbumDetailViewController *albUI = [[RLPAlbumDetailViewController alloc] initWithAlbumKey:@"alb-cue"];
+            albUI.view.frame = NSMakeRect(0, 0, 954, 640);
+            [win.contentView addSubview:albUI.view];
+            [albUI.view layoutSubtreeIfNeeded];
+            [albUI reloadData];
+            Pump(0.08);
+
+            NSArray<NSButton *> *heroBtns = [albUI valueForKey:@"heroButtons"];
+            NSTextField *kindLbl = [albUI valueForKey:@"kindLabel"];
+            NSTextField *tracksMeta = [albUI valueForKey:@"tracksMeta"];
+            NSButton *shuffleBtn = (heroBtns.count >= 4) ? heroBtns[3] : nil;
+
+            RLPSetLanguage(@"en");
+            [(id)albUI applyLanguage];
+            [albUI.view layoutSubtreeIfNeeded];
+            Ck(shuffleBtn != nil && shuffleBtn.title.length == 0 &&
+               [shuffleBtn.toolTip isEqualToString:@"Shuffle"] &&
+               [shuffleBtn.image.accessibilityDescription isEqualToString:@"Shuffle"],
+               "v2.0.2 专辑页切换英文后随机圆形按钮仍无文字标题且保留英文 toolTip",
+               [NSString stringWithFormat:@"title='%@' tip='%@'", shuffleBtn.title, shuffleBtn.toolTip]);
+            Ck([kindLbl.stringValue isEqualToString:@"ALBUM"],
+               "v2.0.2 专辑页切换英文后 kindLabel 保持 ALBUM 且保留字距样式",
+               kindLbl.stringValue ?: @"nil");
+            BOOL heroEnFits = YES;
+            for (NSButton *b in heroBtns) {
+                if (NSMaxX(b.frame) > 954.0 - 22.0 + 1.0) heroEnFits = NO;
+            }
+            Ck(heroEnFits, "v2.0.2 专辑页切换英文后操作按钮不溢出右边界", @"");
+
+            // 窄窗 454pt：按钮应自动换行且 tracksMeta 不超出 right edge (454 - 26)
+            albUI.view.frame = NSMakeRect(0, 0, 454, 640);
+            [albUI.view layoutSubtreeIfNeeded];
+            [(id)albUI layoutAlbum];
+            BOOL narrowHeroWrapsCleanly = YES;
+            CGFloat maxHeroY = 0.0;
+            for (NSButton *b in heroBtns) {
+                if (NSMaxX(b.frame) > 454.0 - 22.0 + 1.0) narrowHeroWrapsCleanly = NO;
+                if (NSMinY(b.frame) > maxHeroY) maxHeroY = NSMinY(b.frame);
+            }
+            Ck(narrowHeroWrapsCleanly && maxHeroY > 153.0,
+               "v2.0.2 专辑页 454pt 窄窗下操作按钮自动换行且不溢出右边界",
+               [NSString stringWithFormat:@"maxHeroY=%.1f shuffle=%@", maxHeroY, NSStringFromRect(shuffleBtn.frame)]);
+            Ck(tracksMeta != nil && NSMaxX(tracksMeta.frame) <= 454.0 - 26.0 + 1.0,
+               "v2.0.2 专辑页 454pt 窄窗下 tracksMeta 不溢出右边界",
+               NSStringFromRect(tracksMeta.frame));
+
+            NSTableView *albTable = [albUI valueForKey:@"table"];
+            BOOL albPlainOk = YES;
+            if (@available(macOS 11.0, *)) {
+                albPlainOk = (albTable.style == NSTableViewStylePlain);
+            }
+            Ck(albPlainOk, "v2.0.3 专辑详情表格采用 NSTableViewStylePlain", @"");
+
+            RLPSetLanguage(@"zh");
+            [(id)albUI applyLanguage];
+            [albUI.view removeFromSuperview];
+        }
+
+        // ---- v2.0.2 歌单页：Plain 表格样式 + 窄窗按钮换行 + 响应式列宽不溢出 ----
+        {
+            RLPPlaylistsViewController *plUI = [RLPPlaylistsViewController new];
+            plUI.view.frame = NSMakeRect(0, 0, 454, 640);
+            [win.contentView addSubview:plUI.view];
+            [plUI.view layoutSubtreeIfNeeded];
+            [plUI openPlaylist:@"Night Drive"];
+            Pump(0.08);
+            [plUI.view layoutSubtreeIfNeeded];
+
+            NSView *barView = [plUI valueForKey:@"barView"];
+            NSScrollView *itemScroll = [plUI valueForKey:@"itemScroll"];
+            NSTableView *itemTable = [plUI valueForKey:@"itemTable"];
+            BOOL stylePlainOk = YES;
+            if (@available(macOS 11.0, *)) {
+                stylePlainOk = (itemTable.style == NSTableViewStylePlain);
+            }
+            Ck(stylePlainOk, "v2.0.2 歌单页表格采用 NSTableViewStylePlain 消除额外左右留白", @"");
+
+            BOOL barFits = (barView != nil && NSHeight(barView.bounds) >= 26.0);
+            for (NSView *sub in barView.subviews) {
+                if (NSMinX(sub.frame) < -0.5 || NSMaxX(sub.frame) > NSWidth(barView.bounds) + 1.0 ||
+                    NSMinY(sub.frame) < -0.5 || NSMaxY(sub.frame) > NSHeight(barView.bounds) + 1.0) {
+                    barFits = NO;
+                }
+            }
+            Ck(barFits, "v2.0.2 歌单页 454pt 窄窗下顶部 5 个按钮完整落在 barView 内",
+               barView ? NSStringFromRect(barView.bounds) : @"nil");
+
+            // 再缩到 240pt 极窄宽度：barW=208pt < 5 个按钮最小总宽，必然折成多行且全部落在 barView 内
+            plUI.view.frame = NSMakeRect(0, 0, 240, 640);
+            [plUI.view layoutSubtreeIfNeeded];
+            Pump(0.05);
+            [plUI.view layoutSubtreeIfNeeded];
+            BOOL wrapTwoRowsFits = (barView != nil && NSHeight(barView.bounds) > 30.0);
+            for (NSView *sub in barView.subviews) {
+                if (NSMinX(sub.frame) < -0.5 || NSMaxX(sub.frame) > NSWidth(barView.bounds) + 1.0 ||
+                    NSMinY(sub.frame) < -0.5 || NSMaxY(sub.frame) > NSHeight(barView.bounds) + 1.0) {
+                    wrapTwoRowsFits = NO;
+                }
+            }
+            Ck(wrapTwoRowsFits, "v2.0.2 歌单页 240pt 极窄窗下顶部按钮自动折行且不裁切溢出",
+               barView ? NSStringFromRect(barView.bounds) : @"nil");
+            plUI.view.frame = NSMakeRect(0, 0, 454, 640);
+            [plUI.view layoutSubtreeIfNeeded];
+
+            const CGFloat plClipW = itemScroll ? NSWidth(itemScroll.contentView.bounds) : 0.0;
+            CGFloat plColSum = 0.0;
+            for (NSTableColumn *c in itemTable.tableColumns) plColSum += c.width;
+            const CGFloat plSpacing = 2.0 * itemTable.intercellSpacing.width;
+            Ck(plClipW > 0.0 && plColSum + plSpacing <= plClipW + 1.0,
+               "v2.0.2 歌单页 454pt 窄窗下三列表宽之和不超出视口（告别 924pt 水平溢出）",
+               [NSString stringWithFormat:@"sum=%.1f+%.1f clip=%.1f", plColSum, plSpacing, plClipW]);
+
+            RLPSetLanguage(@"en");
+            [(id)plUI applyLanguage];
+            [plUI.view layoutSubtreeIfNeeded];
+            BOOL enBarFits = YES;
+            for (NSView *sub in barView.subviews) {
+                if (NSMaxX(sub.frame) > NSWidth(barView.bounds) + 1.0) enBarFits = NO;
+            }
+            Ck(enBarFits, "v2.0.2 歌单页切英文后按钮重排不截断不溢出", NSStringFromRect(barView.bounds));
+            RLPSetLanguage(@"zh");
+            [(id)plUI applyLanguage];
+            [plUI.view removeFromSuperview];
         }
 
         std::printf("结果：%d passed, %d failed\n", g_pass, g_fail);

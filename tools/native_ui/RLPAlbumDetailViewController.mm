@@ -124,6 +124,7 @@
 @property (nonatomic, strong) RLPAlbum *album;
 @property (nonatomic, strong) NSArray<RLPTrack *> *tracks;
 @property (nonatomic) BOOL loaded;
+@property (nonatomic) NSUInteger reloadSeq;
 
 @property (nonatomic, strong) NSImageView *cover;
 @property (nonatomic, strong) NSTextField *nameLabel;
@@ -247,6 +248,7 @@
     self.table.headerView = nil;
     self.table.rowHeight = 38;
     self.table.intercellSpacing = NSMakeSize(8,0);
+    if (@available(macOS 11.0, *)) self.table.style = NSTableViewStylePlain;
     self.table.dataSource = self; self.table.delegate = self;
     self.table.target = self;
     self.table.action = @selector(onRowDoubleClick:);
@@ -312,19 +314,27 @@
     self.kindLabel.frame=NSMakeRect(x,64,infoWidth,13);
     self.nameLabel.frame=NSMakeRect(x,82,infoWidth,32);
     self.metaLabel.frame=NSMakeRect(x,121,infoWidth,17);
-    CGFloat bx=x;
-    for(NSButton *b in self.heroButtons) {
+    CGFloat bx = x, by = 153;
+    const CGFloat maxBtnRight = MAX(x, w - 22);
+    for (NSButton *b in self.heroButtons) {
         // 圆形图标键固定 32x32（图一）；文字键按标题宽度算。
         CGFloat bw;
-        if ([b.identifier isEqualToString:@"album.shuffle"]) bw=32;
-        else bw=ceil([b.title sizeWithAttributes:@{NSFontAttributeName:b.font}].width)+26+(b.image?15:0);
-        b.frame=NSMakeRect(bx,153,bw,32); bx+=bw+(bw==32?8:4);
+        if ([b.identifier isEqualToString:@"album.shuffle"]) bw = 32;
+        else bw = ceil([b.title sizeWithAttributes:@{NSFontAttributeName:b.font}].width) + 26 + (b.image ? 15 : 0);
+        if (bx > x && bx + bw > maxBtnRight) {
+            bx = x;
+            by += 38;
+        }
+        b.frame = NSMakeRect(bx, by, bw, 32);
+        bx += bw + (bw == 32 ? 8 : 4);
     }
-    CGFloat progressHeight=self.progressLabel.hidden?0:29;
-    self.progressLabel.frame=NSMakeRect(22,212,right,17);
-    CGFloat listTop=210+progressHeight;
-    self.tracksTitle.frame=NSMakeRect(26,listTop+2,160,16);
-    self.tracksMeta.frame=NSMakeRect(MAX(190,w-330),listTop+2,304,16);
+    const CGFloat heroBottom = MAX(210, by + 32 + 16);
+    CGFloat progressHeight = self.progressLabel.hidden ? 0 : 29;
+    self.progressLabel.frame = NSMakeRect(22, heroBottom + 2, right, 17);
+    CGFloat listTop = heroBottom + progressHeight;
+    self.tracksTitle.frame = NSMakeRect(26, listTop + 2, 160, 16);
+    CGFloat metaX = MAX(190, w - 330);
+    self.tracksMeta.frame = NSMakeRect(metaX, listTop + 2, MAX(0, w - metaX - 26), 16);
     self.listRule.frame=NSMakeRect(22,listTop+25,right,1);
     CGFloat tableHeight=self.tracks.count*38;
     self.scroll.frame=NSMakeRect(52,listTop+30,MAX(0,w-104),tableHeight);
@@ -393,22 +403,23 @@
 - (void)reloadData {
     if (![RLPCoreClient shared].started) {
         [self setSubtitle:RLPTr(@"核心未启动")];
-        self.emptyLabel.stringValue = RLPTr(RLPTr(@"核心未启动"));
+        self.emptyLabel.stringValue = RLPTr(@"核心未启动");
         return;
     }
     if (!self.albumKey.length) {
         self.emptyLabel.stringValue = RLPTr(@"缺少专辑标识");
         return;
     }
+    const NSUInteger seq = ++self.reloadSeq;
     NSString *path = [NSString stringWithFormat:@"/api/lib/album?k=%@", RLPEnc(self.albumKey)];
     __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] getJSON:path completion:^(NSDictionary * _Nullable json) {
         __typeof__(self) self_ = weakSelf;
-        if (!self_) return;
+        if (!self_ || seq != self_.reloadSeq) return;
         if (!json || ![json[@"ok"] boolValue]) {
             self_.loaded = YES;
             [self_ setSubtitle:RLPTr(@"读取失败")];
-            self_.emptyLabel.stringValue = RLPTr(RLPTr(@"读取失败"));
+            self_.emptyLabel.stringValue = RLPTr(@"读取失败");
             RLPToast(RLPTr(@"专辑读取失败"));
             return;
         }
@@ -417,7 +428,7 @@
         self_.tracks = [RLPTrack tracksFromJSON:json key:@"tracks"];
         self_.loaded = YES;
 
-        self_.titleLabel.stringValue = album.name.length ? album.name : RLPTr(RLPTr(@"专辑"));
+        self_.titleLabel.stringValue = album.name.length ? album.name : RLPTr(@"专辑");
         self_.nameLabel.stringValue = album.name.length ? album.name : RLPTr(@"未知专辑");
         self_.artistLabel.stringValue = album.artist.length ? album.artist : RLPTr(@"未知艺术家");
         double totalDur = 0;
@@ -580,12 +591,15 @@
     NSString *normPath = RLPFavNormalizePath(tr.path);
     BOOL wasFavorite=[self.favoritePaths containsObject:normPath];
     NSString *url = [NSString stringWithFormat:@"/api/fav?file=%@&on=%d", RLPEnc(tr.path),wasFavorite?0:1];
+    __weak __typeof__(self) weakSelf = self;
     [[RLPCoreClient shared] postJSON:url body:@"" completion:^(NSDictionary * _Nullable json) {
+        __typeof__(self) self_ = weakSelf;
+        if (!self_) return;
         if (json && [json[@"ok"] boolValue]) {
-            if(wasFavorite)[self.favoritePaths removeObject:normPath];else [self.favoritePaths addObject:normPath];
-            [self.table reloadData];
+            if(wasFavorite)[self_.favoritePaths removeObject:normPath];else [self_.favoritePaths addObject:normPath];
+            [self_.table reloadData];
             RLPToast(wasFavorite ? RLPTr(@"已取消收藏") : RLPTr(@"已收藏"));
-            [[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPFavoritesChangedNotification object:self_];
         } else RLPToast(RLPTr(@"收藏失败"));
     }];
 }
@@ -673,6 +687,7 @@
     p.canChooseDirectories = NO;
     p.allowsMultipleSelection = NO;
     p.message = RLPTr(@"选择一张图片作为专辑封面");
+    RLPConfigureOpenPanelFileTypes(p, @[ @"jpg", @"jpeg", @"png", @"webp", @"gif" ]);
     if ([p runModal] != NSModalResponseOK || !p.URL) return;
     NSData *data = [NSData dataWithContentsOfURL:p.URL];
     if (!data.length) { RLPToast(RLPTr(@"图片读取失败")); return; }
@@ -740,7 +755,7 @@
         [[RLPCoreClient shared] getJSON:@"/api/status" completion:^(NSDictionary *status) {
             __typeof__(self) current=weakSelf;
             if(!current || current.metadataGeneration!=generation || !([status[@"hasLlmKey"] boolValue] || [status[@"summaryEnabled"] boolValue])) return;
-            NSPredicate *hasTitle=[NSPredicate predicateWithBlock:^BOOL(RLPTrack *track,NSDictionary *bindings){return track.title.length>0;}];
+            NSPredicate *hasTitle=[NSPredicate predicateWithBlock:^BOOL(RLPTrack *track,NSDictionary *bindings){(void)bindings;return track.title.length>0;}];
             current.prefetchTracks=[current.tracks filteredArrayUsingPredicate:hasTitle];
             current.prefetchNext=0; current.prefetchDone=0; current.prefetchActive=0;
             [current pumpAlbumPrefetch:generation];
@@ -873,18 +888,19 @@
     while(self.prefetchActive<2 && self.prefetchNext<total) {
         RLPTrack *track=self.prefetchTracks[self.prefetchNext++]; self.prefetchActive++;
         NSString *url=[NSString stringWithFormat:@"/api/entity/summary?kind=track&name=%@&artist=%@&album=%@&file=%@&lang=zh",RLPEnc(track.title),RLPEnc(track.artist.length?track.artist:self.album.artist),RLPEnc(self.album.name),RLPEnc(track.path)];
-        [self fetchSummaryURL:url generation:generation attempt:0 completion:^(NSDictionary *json){
+        [self fetchSummaryURL:url generation:generation attempt:0 completion:^(NSDictionary *json){(void)json;
             __typeof__(self) owner=weakSelf; if(!owner || owner.metadataGeneration!=generation)return;
             owner.prefetchDone++; owner.prefetchActive--; [owner pumpAlbumPrefetch:generation];
         }];
     }
     if(self.prefetchDone==total) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.6*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        __typeof__(self) owner=weakSelf; if(owner.metadataGeneration==generation){owner.progressLabel.hidden=YES;[owner layoutAlbum];}
+        __typeof__(self) owner=weakSelf; if(owner && owner.metadataGeneration==generation){owner.progressLabel.hidden=YES;[owner layoutAlbum];}
     });
 }
 
 - (void)applyTheme {
     [super applyTheme];
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     self.cover.layer.backgroundColor = t.cvBg.CGColor;
     self.cover.layer.borderColor = t.line.CGColor;
@@ -901,6 +917,12 @@
     }
     self.nameLabel.textColor = t.text;
     self.kindLabel.textColor = t.mut2;
+    NSString *kindText = self.kindLabel.stringValue.length ? self.kindLabel.stringValue : @"ALBUM";
+    self.kindLabel.attributedStringValue = [[NSAttributedString alloc]
+        initWithString:kindText
+            attributes:@{NSFontAttributeName:self.kindLabel.font ?: [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],
+                         NSForegroundColorAttributeName:t.mut2,
+                         NSKernAttributeName:@1.4}];
     self.tracksTitle.textColor = t.mut2;
     self.tracksMeta.textColor = t.mut;
     self.playAllBtn.layer.backgroundColor = t.accent.CGColor;
@@ -917,16 +939,43 @@
         c.titleLabel.textColor = t.text;
         c.subLabel.textColor = t.mut;
     }
+    NSIndexSet *sel = [self.table.selectedRowIndexes copy];
+    NSScrollView *sc = self.pageScroll ?: self.scroll;
+    NSPoint origin = sc ? sc.contentView.bounds.origin : NSZeroPoint;
     [self.table reloadData];
+    if (sel.count) [self.table selectRowIndexes:sel byExtendingSelection:NO];
+    if (sc) {
+        [sc.contentView scrollToPoint:origin];
+        [sc reflectScrolledClipView:sc.contentView];
+    }
 }
 
 - (void)applyLanguage {
+    if (!self.isViewLoaded) return;
+    RLPTheme *t = [RLPTheme current];
     NSArray *titles = @[@"播放整张", @"加入队列", @"设置封面", @"随机播放"];
     for (NSUInteger i = 0; i < self.heroButtons.count && i < titles.count; ++i) {
-        self.heroButtons[i].title = RLPTr(titles[i]);
+        NSButton *b = self.heroButtons[i];
+        NSString *tr = RLPTr(titles[i]);
+        if ([b.identifier isEqualToString:@"album.shuffle"]) {
+            b.title = @"";
+            b.toolTip = tr;
+            b.image = [NSImage imageWithSystemSymbolName:@"shuffle" accessibilityDescription:tr];
+        } else {
+            b.title = tr;
+            if (i == 0) {
+                b.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:tr];
+            }
+        }
     }
     self.tracksTitle.stringValue = RLPTr(@"曲目列表");
-    self.kindLabel.stringValue = RLPTr(@"专辑");
+    NSString *trKind = RLPTr(@"专辑");
+    NSString *kindText = [trKind isEqualToString:@"Albums"] ? @"ALBUM" : trKind;
+    self.kindLabel.attributedStringValue = [[NSAttributedString alloc]
+        initWithString:kindText
+            attributes:@{NSFontAttributeName:self.kindLabel.font ?: [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],
+                         NSForegroundColorAttributeName:t.mut2,
+                         NSKernAttributeName:@1.4}];
     if (self.album) {
         NSMutableArray<NSString *> *parts = [NSMutableArray array];
         if (self.album.artist.length) [parts addObject:self.album.artist];
@@ -942,8 +991,17 @@
         NSString *artist = self.album.artist.length ? self.album.artist : RLPTr(@"未知艺术家");
         self.otherWorksTitle.stringValue = [NSString stringWithFormat:@"%@ %@ ›", artist, RLPTr(@"的其他作品")];
         if (!self.tracks.count) self.emptyLabel.stringValue = RLPTr(@"没有曲目");
+    } else if (![RLPCoreClient shared].started && !self.loaded) {
+        [self setSubtitle:RLPTr(@"核心未启动")];
+        self.emptyLabel.stringValue = RLPTr(@"核心未启动");
+    } else if (!self.albumKey.length) {
+        self.emptyLabel.stringValue = RLPTr(@"缺少专辑标识");
+    } else if (self.loaded) {
+        [self setSubtitle:RLPTr(@"读取失败")];
+        self.emptyLabel.stringValue = RLPTr(@"读取失败");
     }
     [self refreshPlaybackStatus];
+    [self layoutAlbum];
 }
 
 @end

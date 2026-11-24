@@ -76,50 +76,61 @@ public:
         buf_.assign(frames * (size_t)channels, 0.0f);
         capacity_ = frames;
         channels_ = channels;
-        write_ = read_ = 0;
-        water_ = 0;
-        overflow_ = underflowPolls_ = 0;
+        write_.store(0, std::memory_order_relaxed);
+        read_.store(0, std::memory_order_relaxed);
+        water_.store(0, std::memory_order_relaxed);
+        overflow_.store(0, std::memory_order_relaxed);
+        underflowPolls_.store(0, std::memory_order_relaxed);
     }
     // 仅音频回调线程调用；返回溢出帧数（环满丢弃）
     size_t push(const float* src, size_t frames) {
         const size_t cap = capacity_;
         if (!cap) return frames;
-        const size_t used = write_ - read_;
-        const size_t space = cap - used;
+        const size_t w = write_.load(std::memory_order_relaxed);
+        const size_t r = read_.load(std::memory_order_acquire);
+        const size_t used = w - r;
+        const size_t space = (used < cap) ? (cap - used) : 0;
         const size_t n = frames < space ? frames : space;
         for (size_t i = 0; i < n; ++i)
-            std::memcpy(&buf_[((write_ + i) % cap) * (size_t)channels_],
+            std::memcpy(&buf_[((w + i) % cap) * (size_t)channels_],
                         src + i * (size_t)channels_,
                         sizeof(float) * (size_t)channels_);
-        write_ += n;
-        const size_t u2 = write_ - read_;
-        if (u2 > water_) water_ = u2;
-        if (frames > n) overflow_ += frames - n;
+        write_.store(w + n, std::memory_order_release);
+        const size_t u2 = used + n;
+        size_t curWater = water_.load(std::memory_order_relaxed);
+        while (u2 > curWater &&
+               !water_.compare_exchange_weak(curWater, u2, std::memory_order_relaxed)) {}
+        if (frames > n) overflow_.fetch_add(frames - n, std::memory_order_relaxed);
         return frames - n;
     }
     // 仅消费线程调用
     size_t read_available(float* dst, size_t maxFrames) {
         const size_t cap = capacity_;
         if (!cap) return 0;
-        const size_t used = write_ - read_;
+        const size_t w = write_.load(std::memory_order_acquire);
+        const size_t r = read_.load(std::memory_order_relaxed);
+        const size_t used = w - r;
         const size_t n = maxFrames < used ? maxFrames : used;
         for (size_t i = 0; i < n; ++i)
             std::memcpy(dst + i * (size_t)channels_,
-                        &buf_[((read_ + i) % cap) * (size_t)channels_],
+                        &buf_[((r + i) % cap) * (size_t)channels_],
                         sizeof(float) * (size_t)channels_);
-        read_ += n;
-        if (used == 0) ++underflowPolls_;
+        read_.store(r + n, std::memory_order_release);
+        if (used == 0) underflowPolls_.fetch_add(1, std::memory_order_relaxed);
         return n;
     }
-    double water_level() const { return capacity_ ? (double)water_ / (double)capacity_ : 0.0; }
-    uint64_t overflow_count() const { return overflow_; }
-    uint64_t underflow_count() const { return underflowPolls_; }
+    double water_level() const {
+        return capacity_ ? (double)water_.load(std::memory_order_relaxed) / (double)capacity_ : 0.0;
+    }
+    uint64_t overflow_count() const { return overflow_.load(std::memory_order_relaxed); }
+    uint64_t underflow_count() const { return underflowPolls_.load(std::memory_order_relaxed); }
 private:
-    std::mutex m_;                // 回调与消费不会同时进来（各自单线程），锁只护 reset
+    std::mutex m_;                // 锁护 reset，读写下标用 SPSC acquire/release 原子语义
     std::vector<float> buf_;
-    size_t capacity_ = 0, write_ = 0, read_ = 0, water_ = 0;
+    size_t capacity_ = 0;
     int channels_ = 2;
-    uint64_t overflow_ = 0, underflowPolls_ = 0;
+    std::atomic<size_t> write_{0}, read_{0}, water_{0};
+    std::atomic<uint64_t> overflow_{0}, underflowPolls_{0};
 };
 
 inline AudioDeviceID default_input_device() {
@@ -238,6 +249,8 @@ public:
 
     bool open(const MacCaptureConfig& cfg) {
         close();
+        total_.store(0, std::memory_order_relaxed);
+        err_.clear();
         cfg_ = cfg;
         if (cfg.srcNull) {
             isNull_ = true; rate_ = 48000; channels_ = 2;
@@ -305,8 +318,14 @@ public:
     }
 
     bool start() {
-        if (isNull_) { running_ = true; nullTh_ = std::thread(&CoreAudioInput::null_worker, this); return true; }
-        if (!opened_ || running_) return false;
+        if (running_.load()) return false;
+        if (isNull_) {
+            if (nullTh_.joinable()) nullTh_.join();
+            running_ = true;
+            nullTh_ = std::thread(&CoreAudioInput::null_worker, this);
+            return true;
+        }
+        if (!opened_) return false;
         if (::AudioOutputUnitStart(unit_) != noErr) { err_ = "AudioOutputUnitStart 失败"; return false; }
         running_ = true;
         return true;
@@ -346,12 +365,43 @@ private:
     // 用 AUHAL 输入侧打开 dev（物理输入设备与回环聚合设备共用这一条路径）。
     // 失败时自己 dispose 单元并写 err_，但【不】碰回环资源（由 open() 统一收尾）。
     bool open_auh(AudioDeviceID dev) {
-        // 设备输入流物理格式（率/声道）——客户端格式按它请求（AUHAL 只做位深换算）
+        // 设备输入流格式（率/声道）——先查设备输入流物理格式，失败再查首条输入流的虚拟/物理格式
         AudioStreamBasicDescription phys{};
         UInt32 psz = sizeof(phys);
         AudioObjectPropertyAddress fa{kAudioStreamPropertyPhysicalFormat,
                                       kAudioDevicePropertyScopeInput, 1};
-        if (::AudioObjectGetPropertyData(dev, &fa, 0, nullptr, &psz, &phys) != noErr || phys.mSampleRate <= 0) {
+        bool gotFmt = (::AudioObjectGetPropertyData(dev, &fa, 0, nullptr, &psz, &phys) == noErr && phys.mSampleRate > 0);
+        if (!gotFmt) {
+            AudioObjectPropertyAddress sa{kAudioDevicePropertyStreams,
+                                          kAudioDevicePropertyScopeInput,
+                                          kAudioObjectPropertyElementMain};
+            UInt32 ssz = 0;
+            if (::AudioObjectGetPropertyDataSize(dev, &sa, 0, nullptr, &ssz) == noErr &&
+                ssz >= sizeof(AudioStreamID)) {
+                std::vector<AudioStreamID> streams(ssz / sizeof(AudioStreamID));
+                if (::AudioObjectGetPropertyData(dev, &sa, 0, nullptr, &ssz, streams.data()) == noErr &&
+                    !streams.empty()) {
+                    AudioObjectPropertyAddress va{kAudioStreamPropertyVirtualFormat,
+                                                  kAudioObjectPropertyScopeGlobal,
+                                                  kAudioObjectPropertyElementMain};
+                    psz = sizeof(phys);
+                    if (::AudioObjectGetPropertyData(streams[0], &va, 0, nullptr, &psz, &phys) == noErr &&
+                        phys.mSampleRate > 0) {
+                        gotFmt = true;
+                    } else {
+                        AudioObjectPropertyAddress pa{kAudioStreamPropertyPhysicalFormat,
+                                                      kAudioObjectPropertyScopeGlobal,
+                                                      kAudioObjectPropertyElementMain};
+                        psz = sizeof(phys);
+                        if (::AudioObjectGetPropertyData(streams[0], &pa, 0, nullptr, &psz, &phys) == noErr &&
+                            phys.mSampleRate > 0) {
+                            gotFmt = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (!gotFmt) {
             err_ = isLoopback_ ? "读不到回环聚合设备的输入流格式（tap 未生效？）"
                                : "读不到设备输入流格式";
             return false;
@@ -435,6 +485,7 @@ private:
     }
 
     OSStatus pull(AudioUnitRenderActionFlags* flags, const AudioTimeStamp* ts, UInt32 frames) {
+        if (frames == 0) return noErr;
         if (frames > 4096) frames = 4096;
         AudioBufferList abl{};
         abl.mNumberBuffers = 1;

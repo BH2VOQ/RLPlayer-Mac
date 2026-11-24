@@ -179,6 +179,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <!-- 输入采集（§13.13）：CoreAudio 输入设备采集需要 TCC 授权 -->
     <key>NSMicrophoneUsageDescription</key>
     <string>RLPlayer 的输入采集功能用于录音与电平监测，仅在您于设置页显式开启时访问麦克风。</string>
+    <!-- 系统混音回环采集（Process Tap / kTCCServiceAudioCapture）：macOS 14.2+ 需要此权限说明 -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>RLPlayer 的系统混音回环功能用于录制或实时分析本机播放的音频，仅在您显式开启回环采集时请求访问。</string>
 </dict>
 </plist>
 PLIST

@@ -2037,7 +2037,28 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
     self.emptyTitleLabel.textColor = t.text2 ?: t.text;
     self.emptyDescLabel.textColor = t.mut;
     [self rebuildTabs];
-    if (self.renderedSections.count > 0) [self rebuildSections];
+    if (self.workMode && self.workPayload) {
+        NSArray *perfs = [self.workPayload[@"performances"] isKindOfClass:[NSArray class]]
+            ? self.workPayload[@"performances"] : @[];
+        const BOOL ok = [self.workPayload[@"ok"] respondsToSelector:@selector(boolValue)]
+            && [self.workPayload[@"ok"] boolValue];
+        if (!ok || perfs.count == 0) [self renderWorkEmpty:self.workPayload];
+        else [self renderWorkRows:self.workPayload performances:perfs];
+    } else {
+        if (!self.workMode && self.knowledgePayload &&
+            [self.knowledgePayload[@"ok"] respondsToSelector:@selector(boolValue)] &&
+            [self.knowledgePayload[@"ok"] boolValue]) {
+            if ([self.knowledgePayload[@"materials"] isKindOfClass:[NSArray class]]) {
+                [self renderMaterials:self.knowledgePayload[@"materials"]];
+            } else if ([self.knowledgePayload[@"fields"] isKindOfClass:[NSDictionary class]]) {
+                [self renderFields:self.knowledgePayload[@"fields"]];
+            }
+        }
+        if (self.renderedSections.count > 0 || self.drawerContext || self.fixturePayload ||
+            self.summaryPayload || self.knowledgePayload) {
+            [self rebuildSections];
+        }
+    }
 }
 
 - (void)applyLanguage {
@@ -2046,14 +2067,44 @@ static void RLPKVAddRowUnique(NSMutableArray<NSDictionary *> *rows, NSMutableSet
     self.btnCopy.title = RLPTr(@"复制");
     self.emptyRetryBtn.title = RLPTr(@"重新整理");
     self.openWorksBtn.title = RLPTr(@"查看 Discogs 版本推荐 →");
-    if ([self.kind isEqualToString:@"work"]) {
+    if (self.workMode) {
         self.refreshBtn.title = RLPTr(@"重新查询");
+        if (self.workPayload) {
+            NSArray *perfs = [self.workPayload[@"performances"] isKindOfClass:[NSArray class]]
+                ? self.workPayload[@"performances"] : @[];
+            const BOOL ok = [self.workPayload[@"ok"] respondsToSelector:@selector(boolValue)]
+                && [self.workPayload[@"ok"] boolValue];
+            if (!ok || perfs.count == 0) [self renderWorkEmpty:self.workPayload];
+            else [self renderWorkRows:self.workPayload performances:perfs];
+            return;
+        }
         if (!self.name.length) {
+            self.status.stringValue = RLPTr(@"未在播放");
+        } else if (![RLPCoreClient shared].started) {
+            self.status.stringValue = RLPTr(@"核心未启动");
+        } else if (self.pollTimer) {
+            self.status.stringValue = RLPTr(@"资料整理中…");
+        } else if (self.isLoadingKnowledge) {
+            self.status.stringValue = RLPTr(@"正在整理资料…");
+        } else {
+            self.status.stringValue = RLPTr(@"暂无可确认的资料");
+        }
+    } else if ([self.kind isEqualToString:@"work"]) {
+        self.refreshBtn.title = RLPTr(@"重新查询");
+        if (!self.name.length && !self.drawerContext) {
             self.status.stringValue = RLPTr(@"未在播放");
         }
     } else {
         self.refreshBtn.title = RLPTr(@"重新整理");
-        if (!self.name.length && !self.drawerContext) {
+        if (self.knowledgePayload &&
+            [self.knowledgePayload[@"ok"] respondsToSelector:@selector(boolValue)] &&
+            [self.knowledgePayload[@"ok"] boolValue]) {
+            if ([self.knowledgePayload[@"materials"] isKindOfClass:[NSArray class]]) {
+                [self renderMaterials:self.knowledgePayload[@"materials"]];
+            } else if ([self.knowledgePayload[@"fields"] isKindOfClass:[NSDictionary class]]) {
+                [self renderFields:self.knowledgePayload[@"fields"]];
+            }
+        } else if (!self.name.length && !self.drawerContext) {
             self.status.stringValue = RLPTr(@"未在播放");
         } else if (self.fieldStack.arrangedSubviews.count > 0 && !self.drawerContext && !self.renderedSections.count) {
             self.status.stringValue = [NSString stringWithFormat:RLPTr(@"%ld 项已确认资料"),

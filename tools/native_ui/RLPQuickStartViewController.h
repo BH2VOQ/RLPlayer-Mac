@@ -22,6 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 响应式布局入口（viewDidLayout 自动调用，也可在离线单测中以指定宽度触发）。
 - (void)updateResponsiveLayoutForWidth:(CGFloat)availWidth;
 - (void)applyLanguage;
+- (void)stopPolling;
 
 @end
 

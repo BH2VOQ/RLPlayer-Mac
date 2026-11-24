@@ -61,18 +61,55 @@
     return ok;
 }
 
-- (void)shutdown {
+- (void)prepareForShutdown {
     if (!_startedStorage) return;
-    _shuttingDown.store(true, std::memory_order_release);
-    _generation.fetch_add(1, std::memory_order_acq_rel);
-    // 排空短任务队列：barrier 保证排在此前的任务都执行完，且之后不再插入读任务。
-    dispatch_barrier_sync(_ioQueue, ^{});
-    dispatch_sync(_writeQueue, ^{});
+    const bool wasShuttingDown = _shuttingDown.exchange(true, std::memory_order_acq_rel);
+    if (!wasShuttingDown) {
+        _generation.fetch_add(1, std::memory_order_acq_rel);
+        // 先于队列排空触发 C++ 核心退出标志（停播放 / 取消在途 HTTP / 取消预解码），
+        // 避免主线程干等被超时或限频阻塞的 _ioQueue 任务。
+        rlapp::request_shutdown();
+    }
+}
+
+- (BOOL)drainFastQueuesWithTimeoutMs:(int)timeoutMs {
+    if (timeoutMs <= 0) {
+        dispatch_barrier_sync(_ioQueue, ^{});
+        dispatch_sync(_writeQueue, ^{});
+        return YES;
+    }
+    dispatch_semaphore_t ioSem = dispatch_semaphore_create(0);
+    dispatch_barrier_async(_ioQueue, ^{
+        dispatch_semaphore_signal(ioSem);
+    });
+    dispatch_semaphore_t wrSem = dispatch_semaphore_create(0);
+    dispatch_async(_writeQueue, ^{
+        dispatch_semaphore_signal(wrSem);
+    });
+    const int64_t totalNs = (int64_t)timeoutMs * (int64_t)NSEC_PER_MSEC;
+    const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, totalNs);
+    const long ioRes = dispatch_semaphore_wait(ioSem, deadline);
+    const long wrRes = dispatch_semaphore_wait(wrSem, deadline);
+    return (ioRes == 0 && wrRes == 0);
+}
+
+- (BOOL)shutdownWithTimeoutMs:(int)timeoutMs {
+    if (!_startedStorage) return YES;
+    [self prepareForShutdown];
+    // 排空短任务队列：barrier 保证排在此前的任务都执行完，且之后不再插入读任务；
+    // 有界模式下超时直接返回 NO，由应用退出路径走 _Exit(0)，避免与残留线程发生 UAF。
+    if (![self drainFastQueuesWithTimeoutMs:timeoutMs]) {
+        return NO;
+    }
     // 慢队列可能正卡在不可取消的网络调用：不阻塞退出（那会把「关不掉」变成新 bug），
     // 但已关闸，后续不会再有新任务进 dispatch。
-    rlapp::request_shutdown();
     rlapp::stop_embedded();
     _startedStorage = NO;
+    return YES;
+}
+
+- (void)shutdown {
+    [self shutdownWithTimeoutMs:0];
 }
 
 - (nullable NSDictionary *)jsonWithMethod:(NSString *)method

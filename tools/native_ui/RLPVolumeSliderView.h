@@ -76,6 +76,8 @@ double RLPVolSliderNormToDb(double norm);
 /// 左侧喇叭按钮 / 右侧数值文本（showsAccessories=NO 时为 nil）。
 - (nullable NSButton *)muteButton;
 - (nullable NSTextField *)valueLabel;
+- (void)applyTheme;
+- (void)applyLanguage;
 
 @end
 

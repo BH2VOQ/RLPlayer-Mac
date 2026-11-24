@@ -168,6 +168,7 @@ int main(int argc, const char* argv[]) {
         // 不是生产泄漏 —— 全部断言统计已在下面照常打印，退出码仍按 failures 给出。
         static HostAppDelegate* g_keepAliveUntilExit = nil;
         g_keepAliveUntilExit = host;
+        (void)g_keepAliveUntilExit;
         remote.stop();
         check(unexpected.load() == 0, "no unexpected request or external network proxy attempt");
         ::chdir(cwd);

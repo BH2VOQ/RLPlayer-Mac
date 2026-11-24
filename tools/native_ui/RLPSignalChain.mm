@@ -100,18 +100,23 @@ static RLPSignalNode *Node(NSString *key, NSString *value, NSString *badge, RLPS
     // ③ 采样率转换（方向必须按 inRate/outRate 说话，降采样绝不给"升频"章 —— web 2026-11-09）
     if (castBypass) {
         NSString *v;
-        if (Bool(p, @"upsampleApplied")) {
+        const BOOL castUp = Bool(p, @"upsampleApplied");
+        const BOOL castGpu = castUp && gpuUsed;
+        if (castUp) {
             NSString *f = Str(p, @"servedFilter");
             if (!f.length) f = Str(p, @"filter");
-            v = [NSString stringWithFormat:@"本机升频 %.0f → %@ Hz · %@（投放供源）%@",
-                 inRate, Hz(Num(p, @"servedRate") ?: outRate), f.length ? f : @"poly-sinc-lp",
-                 Bool(p, @"upsampleForced") ? @" · 强制（渲染器未声明该速率）" : @""];
+            v = [NSString stringWithFormat:@"本机升频 %.0f → %@ Hz · %@（投放供源）%@%@",
+                 inRate, Hz(Num(p, @"servedRate") ?: outRate), f.length ? f : @"poly-sinc-tight-lp",
+                 Bool(p, @"upsampleForced") ? @" · 强制（渲染器未声明该速率）" : @"",
+                 castGpu ? @"  ·  GPU" : @""];
         } else if (Str(p, @"upsampleNote").length) {
             v = Str(p, @"upsampleNote");
         } else {
             v = @"旁路（投放不经过本机 DSP：升频/EQ/IR/音量都不参与）";
         }
-        [out addObject:Node(@"采样率转换", v, @"投放旁路", RLPSignalNodeDsp)];
+        [out addObject:Node(@"采样率转换", v,
+                            castGpu ? @"GPU 升频" : @"投放旁路",
+                            castGpu ? RLPSignalNodeGpu : RLPSignalNodeDsp)];
     } else if (Bool(p, @"resample")) {
         NSString *rd = Str(p, @"rateDir");
         if (!rd.length) rd = (inRate > 0 && outRate > 0)

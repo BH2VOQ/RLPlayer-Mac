@@ -16,6 +16,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 从后端拉注册表并重建行（核心未启动时如实提示，不填假数据）。
 - (void)reload;
 - (void)applyTheme;
+- (void)applyLanguage;
 @end
 
 NS_ASSUME_NONNULL_END

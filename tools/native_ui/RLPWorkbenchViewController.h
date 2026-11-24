@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 面向发烧友：凡是会反复调的东西都摆在这里，当场切换，不用进设置。
 @interface RLPWorkbenchViewController : RLPPageViewController
 - (void)applyLanguage;
+- (void)stopPolling;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -542,6 +542,14 @@ async function runTests() {
       check('强制升频：信号链标注「· 强制（渲染器未声明该速率）」',
             mbodyF.includes('本机升频 96000 → 192000 Hz') && mbodyF.includes('强制（渲染器未声明该速率）'), mbodyF);
       check('开+生效：信号链节点带“PCM-PCM 升频”徽章', mbody.includes('PCM-PCM 升频'), mbody);
+      // gpuvendor=metal 且投放升频实际用到 GPU 时：信号链应如实展示「GPU 升频」
+      signalPayload.path = Object.assign({}, signalPayload.path, {
+        gpuUsed: true, gpuResample: true, upsampleForced: false
+      });
+      await env.tick();
+      await env.showChain();
+      const mbodyGpu = env._getEl('mbody').innerHTML;
+      check('开+生效+GPU 参与：信号链节点显示“GPU 升频”', mbodyGpu.includes('GPU 升频') && mbodyGpu.includes('GPU'), mbodyGpu);
     }
 
     // 场景 2: 被压回 (后端返回 upsampleApplied=false + note 含「被渲染器上限压到」)
@@ -638,16 +646,22 @@ async function runTests() {
     env.renderSettingsPage();
     const chkUp = env._getEl('cast_up');
     const selCeil = env._getEl('cast_ceil');
+    const setpage = env._getEl('setpage');
     check('设置页存在 cast_up 开关控件', chkUp !== null && chkUp.id === 'cast_up');
     check('设置页存在 cast_ceil 上限下拉控件', selCeil !== null && selCeil.id === 'cast_ceil');
     check('cast_up 默认状态为关闭 (checked=false)', chkUp.checked === false);
-    check('cast_ceil 默认上限为 192000', selCeil.value === '192000' || selCeil.value === '');
+    check('ADV.cast_upsample_ceiling 默认为 auto', env.ADV.cast_upsample_ceiling === 'auto' && (selCeil.value === 'auto' || selCeil.value === ''));
+    check('cast_ceil 渲染包含自动（跟随设备）选项与默认提示',
+          setpage.innerHTML.includes('自动（跟随设备）') && setpage.innerHTML.includes('默认自动（跟随设备）'),
+          setpage.innerHTML);
 
     // 勾选 cast_up 并保存
     chkUp.checked = true;
     chkUp.dispatchEvent({ type: 'change' });
     env.saveSettings(true);
-    check('勾选 cast_up 后 saveSettings 包含 cast_upsample=1', lastSavedBody.includes('cast_upsample=1'), lastSavedBody);
+    check('勾选 cast_up 后 saveSettings 包含 cast_upsample=1 且默认上限为 auto',
+          lastSavedBody.includes('cast_upsample=1') && lastSavedBody.includes('cast_upsample_ceiling=auto'),
+          lastSavedBody);
 
     // 切换 cast_ceil 为 384000
     selCeil.value = '384000';

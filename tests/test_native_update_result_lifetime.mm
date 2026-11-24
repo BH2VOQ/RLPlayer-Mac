@@ -27,6 +27,8 @@
 // 纪律：隔离 state/library；不联网（不调 begin_check）；不发声；窗口出现后立刻关掉。
 #import <AppKit/AppKit.h>
 #import "RLPUpdateWindowController.h"
+#import "RLPTheme.h"
+#import "RLPSupport.h"
 #include "mac_update.h"   // rta::update::CheckResult / Decision 的真相源
 
 #include <cstdio>
@@ -559,6 +561,67 @@ int main() {
             [ctrl onQuit:nil];
             Ck(confirmMsgs.count == 0 && terminateCount == 1,
                @"【U4-f】安装完成（非安装中）onQuit: 无需提示直接退出", @"");
+
+            // =========================================================================
+            // 7) [v2.0.3] 主题通知同步 + 英文下底部 4 按钮不重叠 + 窗口最小宽度约束
+            // =========================================================================
+            [ctrl resetForTesting];
+            [ctrl.window.contentView layoutSubtreeIfNeeded];
+            Ck(ctrl.window.frame.size.width >= 540.0 && ctrl.window.minSize.width >= 540.0,
+               @"[v2.0.3] 更新窗口初始宽度与 minSize 均 >= 540pt",
+               [NSString stringWithFormat:@"frame=%@ min=%@",
+                NSStringFromSize(ctrl.window.frame.size), NSStringFromSize(ctrl.window.minSize)]);
+
+            [RLPTheme setThemeName:@"dark"];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
+            Pump(0.05);
+            NSTextField *titleFld = [ctrl valueForKey:@"titleField"];
+            NSTextField *progFld = [ctrl valueForKey:@"progressText"];
+            NSTextView *notesV = [ctrl valueForKey:@"notesView"];
+            Ck([ctrl.window.appearance.name isEqualToString:NSAppearanceNameDarkAqua] &&
+               [ctrl.window.backgroundColor isEqual:[RLPTheme current].bg] &&
+               progFld != nil && [progFld.textColor isEqual:[RLPTheme current].mut] &&
+               titleFld != nil && [titleFld.textColor isEqual:[RLPTheme current].text] &&
+               notesV != nil && [notesV.textColor isEqual:[RLPTheme current].text],
+               @"[v2.0.3] 切暗黑主题发出 RLPThemeDidChangeNotification 后同步刷新 appearance 与文本/背景色",
+               ctrl.window.appearance.name ?: @"nil");
+
+            [RLPTheme setThemeName:@"light"];
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
+            Pump(0.05);
+            Ck([ctrl.window.appearance.name isEqualToString:NSAppearanceNameAqua] &&
+               [ctrl.window.backgroundColor isEqual:[RLPTheme current].bg] &&
+               progFld != nil && [progFld.textColor isEqual:[RLPTheme current].mut] &&
+               titleFld != nil && [titleFld.textColor isEqual:[RLPTheme current].text],
+               @"[v2.0.3] 切回浅色主题后同步刷新 Aqua appearance 与文本/背景色",
+               ctrl.window.appearance.name ?: @"nil");
+
+            // 英文文案更长：Info 态下 cancelBtn 隐藏，manualBtn / laterBtn / ignoreBtn / primaryBtn 绝不能重叠
+            RLPSetLanguage(@"en");
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            [ctrl.window.contentView layoutSubtreeIfNeeded];
+            Pump(0.05);
+            NSButton *manualB = [ctrl valueForKey:@"manualBtn"];
+            NSButton *laterB = [ctrl valueForKey:@"laterBtn"];
+            NSArray<NSButton *> *visBottom = @[ manualB, laterB, ignoreBtn, primaryBtn ];
+            BOOL bottomNoOverlap = (manualB && laterB && ignoreBtn && primaryBtn && cancelBtn.hidden);
+            CGFloat cw = NSWidth(ctrl.window.contentView.bounds);
+            for (NSUInteger i = 0; i < visBottom.count && bottomNoOverlap; ++i) {
+                NSRect a = visBottom[i].frame;
+                if (NSMinX(a) < 0.0 || NSMaxX(a) > cw + 1.0) bottomNoOverlap = NO;
+                for (NSUInteger j = i + 1; j < visBottom.count; ++j) {
+                    if (NSIntersectsRect(a, visBottom[j].frame)) bottomNoOverlap = NO;
+                }
+            }
+            Ck(bottomNoOverlap,
+               @"[v2.0.3] 英文 Info 态下底部 4 个按钮不重叠且不溢出窗口左右边界",
+               [NSString stringWithFormat:@"manual=%@ later=%@ ignore=%@ primary=%@",
+                NSStringFromRect(manualB.frame), NSStringFromRect(laterB.frame),
+                NSStringFromRect(ignoreBtn.frame), NSStringFromRect(primaryBtn.frame)]);
+
+            RLPSetLanguage(@"zh");
+            [[NSNotificationCenter defaultCenter] postNotificationName:RLPLanguageDidChangeNotification object:nil];
+            [ctrl.window.contentView layoutSubtreeIfNeeded];
         } @finally {
             [ctrl clearTestHooks];
             [ctrl resetForTesting];

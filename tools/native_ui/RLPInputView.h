@@ -11,8 +11,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 根因就是本视图把**整套配置**和状态一起搬上了页面。用这个入口只留状态。
 - (instancetype)initStatusOnlyWithFrame:(NSRect)frame;
 @property (nonatomic, readonly) BOOL statusOnly;
+@property (nonatomic, copy, nullable) void (^onStateUpdated)(NSDictionary *state);
 - (void)reload;
+- (void)startPolling;
+- (void)stopPolling;
 - (void)applyTheme;
+- (void)applyLanguage;
 /// 嵌入一个**本身已经整页滚动**的宿主（设置页）时调用：去掉本视图自带的 NSScrollView，
 /// 内容直接铺开，由宿主页面滚动（用户 2026-11-15：每个界面只允许整页滚动，禁止小页面滚动）。
 - (void)setEmbeddedInPage:(BOOL)embedded;

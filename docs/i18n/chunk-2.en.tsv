@@ -84,7 +84,7 @@ sinc-S [线性相位]	sinc-S [Linear phase]	[线性相位]</option><option value
 =改 Q；	= Change Q; 	复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。' + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖 /
 =该段复位（0 dB / Q 1.41）。	= Reset band (0 dB / Q 1.41).	复核）· Q 0.1~20 · 频率 10 Hz~20 kHz。' + '曲线上 <b>拖拽节点</b>：水平=频率（对数）、垂直=增益；<b>Shift+拖 / 滚轮</b>=改 Q；<b>双
 ARTIST · 艺术家资料	ARTIST · Artist Profile	>' + '<div class=info>' + '<div class=kind>ARTIST · 艺术家资料</div>' + '<h1>'
-Apple Metal（GPU 加速）· 后端已就位	Apple Metal (GPU Acceleration) · Backend Ready	: 'Apple Metal（GPU 加速）· 后端已就位'); } }); } var m
+Apple Metal（只保留，效果差）· 后端已就位	Apple Metal (legacy only, lower quality) · Backend Ready	: 'Apple Metal（只保留，效果差）· 后端已就位'); } }); } var m
 BIT-PERFECT · 1-bit DSD 直通	BIT-PERFECT · 1-bit DSD Direct Pass-through	ct') { heroCls = ' direct'; heroTitle = 'BIT-PERFECT · 1-bit DSD 直通'; heroIcon = '\u25c6'; } else if (
 Bit-Perfect 音频管线	Bit-Perfect Audio Pipeline	>'; }); h += '</div>'; h += '<div class=chain-foot><span>绿色节点 = 逐位无损或 GPU 参与计算；蓝色节点
 CIC（6 级无乘法 + 补偿）	CIC (6-stage Multiplier-free + Compensation)	ind || 'fir') + opt('cic', 'CIC（6 级无乘法 + 补偿）', ADV.dsdKind || 'fir'),
@@ -305,7 +305,7 @@ rlplayer-llm.conf；不进安装包，界面永不回显明文	rlplayer-llm.conf
 绿色节点 = 逐位无损或 GPU 参与计算；蓝色节点 = 64-Bit DSP 处理	Green node = bit-perfect lossless or GPU computed; Blue node = 64-bit DSP processing	>'; }); h += '</div>'; h += '<div class=chain-foot><span>绿色节点 = 逐位无损或 GPU 参与计算；蓝色节点 = 64-Bit DSP 处理</span><spa
 网络或接口错误	Network or interface error	(e) { var err = (e && e.message) || '网络或接口错误'; if (D('sp_inmsg')) D('sp_inmsg')
 耗时统计	Timing Statistics	: '–'; nodes.push({ k: '耗时统计', v: '解码 ' + tDec + ' \u00b7 临
-自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同	Auto = Prefer Apple Metal, automatically fall back to pure CPU (NEON vectorized) partitioned FFT if unavailable; bit-identical output	ADV.gpuvendor || 'auto'), '自动 = 优先 Apple Metal，不可用时自动退回纯 CPU（NEON 向量）分块 FFT，输出逐位相同') + '<div class="sfld wide"><di
+自动 = 本地与 UPnP 升频及默认卷积均走 64-bit CPU（NEON + vDSP，精度更高）；Apple Metal（只保留，效果差）= 本地与 UPnP 升频及卷积均强制走 Metal（单精度 32-bit，不推荐）；关闭 = 全部纯 CPU	Auto = 64-bit CPU (NEON + vDSP, higher precision) for local & UPnP upsampling and default convolution; Apple Metal (legacy only, lower quality) = force Metal for local & UPnP upsampling and convolution (32-bit float, not recommended); Off = CPU only everywhere	ADV.gpuvendor || 'auto'), '自动 = 本地与 UPnP 升频及默认卷积均走 64-bit CPU（NEON + vDSP，精度更高）；Apple Metal（只保留，效果差）= 本地与 UPnP 升频及卷积均强制走 Metal（单精度 32-bit，不推荐）；关闭 = 全部纯 CPU') + '<div class="sfld wide"><di
 自由场目标：接近消音室直达声	Free Field Target: approximates anechoic direct sound	.3],[1.0,3.6]] }, freefield: { label: '自由场目标：接近消音室直达声', pts: [[0,0],[0.15,-0.2],[0.30,-0
 苹果 Apple	Apple	ta-brand="Sony">索尼 Sony</button>' + '<button class="btn brand-chip" data-brand="Appl
 设备必须支持该声道数；多声道用 WAVEFORMATEXTENSIBLE 的声道掩码声明布局	Device must support this channel count; multi-channel layouts declared via WAVEFORMATEXTENSIBLE channel mask	opt('8', '7.1（8 声道）', CH), '设备必须支持该声道数；多声道用 WAVEFORMATEXTENSIBLE 的声道掩码声明布局') + num({ id: 'sp_buffer', labe

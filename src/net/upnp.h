@@ -46,6 +46,7 @@
 #include <chrono>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <memory>
 #include <algorithm>
 #include <cstdio>
@@ -91,7 +92,24 @@ inline int set_timeout(socket_t s, int opt, int ms) {
     return ::setsockopt(s, SOL_SOCKET, opt, &tv, sizeof(tv));
 }
 
-inline int  io_send(socket_t s, const char* p, int n) { return (int)::send(s, p, (size_t)n, 0); }
+inline void disable_sigpipe(socket_t s) {
+#ifdef SO_NOSIGPIPE
+    if (s != kInvalidSocket) {
+        const int one = 1;
+        ::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+    }
+#else
+    (void)s;
+#endif
+}
+
+inline int  io_send(socket_t s, const char* p, int n) {
+#ifdef MSG_NOSIGNAL
+    return (int)::send(s, p, (size_t)n, MSG_NOSIGNAL);
+#else
+    return (int)::send(s, p, (size_t)n, 0);
+#endif
+}
 inline int  io_recv(socket_t s, char* p, int n)       { return (int)::recv(s, p, (size_t)n, 0); }
 inline int  io_sendto(socket_t s, const char* p, int n, const sockaddr* to, int tolen) {
     return (int)::sendto(s, p, (size_t)n, 0, to, (socklen_t)tolen);
@@ -354,7 +372,10 @@ inline bool http_get(const std::string& host, int port, const std::string& path,
     if (host.rfind("127.", 0) == 0 || host == "localhost") ifindex = 0;
     const bool wsaInit = upnp_os::wsa_init();
     upnp_os::socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s != upnp_os::kInvalidSocket) upnp_os::pin_to_interface(s, ifindex);
+    if (s != upnp_os::kInvalidSocket) {
+        upnp_os::disable_sigpipe(s);
+        upnp_os::pin_to_interface(s, ifindex);
+    }
     if (s == upnp_os::kInvalidSocket) {
         if (wsaInit) upnp_os::wsa_cleanup();
         return false;
@@ -809,6 +830,91 @@ struct HttpAccessLog {
     int64_t     bytesSent = 0;
 };
 
+// 边转码边播放（Progressive HTTP serving）的共享状态：
+// 生产者预先写入准确总长（44 字节 RIFF/data 头 + 预缓冲），之后持续追加块并 publish()；
+// HTTP worker 在当前文件尾等待新字节，或直接按 totalSize 响应 HEAD / Range。
+struct ProgressiveFileState {
+    std::string filePath;
+    int64_t     totalSize = 0;
+
+    std::mutex              mtx;
+    std::condition_variable cv;
+    int64_t     availableBytes = 0;
+    bool        finished = false;
+    bool        failed = false;
+    std::string error;
+
+    void publish(int64_t bytesAvailable, bool isFinished = false) {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (bytesAvailable > availableBytes) availableBytes = bytesAvailable;
+        if (isFinished) finished = true;
+        cv.notify_all();
+    }
+
+    void abort(const std::string& reason = std::string()) {
+        std::lock_guard<std::mutex> lk(mtx);
+        failed = true;
+        if (!reason.empty() && error.empty()) error = reason;
+        cv.notify_all();
+    }
+};
+
+namespace upnp_detail {
+template <class SendOnce, class SleepMs>
+inline int64_t pump_progressive_file(std::FILE* f, int64_t startOffset, int64_t toSend,
+                                     ProgressiveFileState& prog, size_t chunkBytes,
+                                     SendOnce&& sendOnce, SleepMs&& sleepMs,
+                                     const std::atomic<bool>* stop,
+                                     int stallBudgetMs = 5000) {
+    if (!f || toSend <= 0 || startOffset < 0) return 0;
+    if (chunkBytes == 0) chunkBytes = 65536;
+    std::vector<unsigned char> chunk(chunkBytes);
+    int64_t curPos = startOffset;
+    int64_t sent = 0;
+
+    while (toSend > 0) {
+        int64_t avail = 0;
+        bool done = false;
+        bool bad = false;
+        {
+            std::unique_lock<std::mutex> lk(prog.mtx);
+            while (prog.availableBytes <= curPos && !prog.finished && !prog.failed &&
+                   !(stop && stop->load())) {
+                prog.cv.wait_for(lk, std::chrono::milliseconds(50));
+            }
+            avail = prog.availableBytes;
+            done = prog.finished;
+            bad = prog.failed;
+        }
+        if (bad || (stop && stop->load())) break;
+
+        const int64_t readable = std::min<int64_t>(toSend, avail - curPos);
+        if (readable <= 0) {
+            if (done) break;
+            continue;
+        }
+
+        const size_t want = (size_t)std::min<int64_t>(readable, (int64_t)chunk.size());
+        std::clearerr(f);
+        if (upnp_os::file_seek(f, curPos) != 0) break;
+        const size_t got = std::fread(chunk.data(), 1, want, f);
+        if (got == 0) {
+            if (done) break;
+            sleepMs(2);
+            continue;
+        }
+
+        const size_t ok = send_block_all(sendOnce, (const char*)chunk.data(), got,
+                                         sleepMs, stop, stallBudgetMs);
+        curPos += (int64_t)ok;
+        sent += (int64_t)ok;
+        toSend -= (int64_t)ok;
+        if (ok < got) break;
+    }
+    return sent;
+}
+} // namespace upnp_detail
+
 class UpnpHttpServer {
 public:
     UpnpHttpServer() = default;
@@ -853,6 +959,14 @@ public:
             upnp_os::close_socket(listen_);
             listen_ = upnp_os::kInvalidSocket;
         }
+        {
+            std::lock_guard<std::mutex> lk(streamMutex_);
+            for (auto& kv : streams_) {
+                if (kv.second.progressive) {
+                    kv.second.progressive->cv.notify_all();
+                }
+            }
+        }
         if (acceptThread_.joinable()) {
             acceptThread_.join();
         }
@@ -873,6 +987,21 @@ public:
         entry.path = "/stream/" + entry.token + ".wav";
         entry.isFile = true;
         entry.filePath = filePath;
+        entry.mimeType = mimeType;
+        std::lock_guard<std::mutex> lk(streamMutex_);
+        streams_[entry.path] = entry;
+        return entry.path;
+    }
+
+    // 注册边写入边供源的渐进式本地文件，返回路径 "/stream/<token>.wav"
+    std::string register_progressive_file(std::shared_ptr<ProgressiveFileState> prog,
+                                          const std::string& mimeType = "audio/wav") {
+        StreamEntry entry;
+        entry.token = generate_random_token(16);
+        entry.path = "/stream/" + entry.token + ".wav";
+        entry.isFile = true;
+        entry.filePath = prog ? prog->filePath : std::string();
+        entry.progressive = std::move(prog);
         entry.mimeType = mimeType;
         std::lock_guard<std::mutex> lk(streamMutex_);
         streams_[entry.path] = entry;
@@ -916,6 +1045,7 @@ private:
         std::string path;
         bool isFile = false;
         std::string filePath;
+        std::shared_ptr<ProgressiveFileState> progressive;
         std::vector<uint8_t> buffer;
         std::string mimeType = "audio/wav";
     };
@@ -955,6 +1085,7 @@ private:
     }
 
     void handle_client(upnp_os::socket_t c, const std::string& clientIp, uint16_t clientPort) {
+        upnp_os::disable_sigpipe(c);
         upnp_os::set_timeout(c, SO_RCVTIMEO, 4000);
         upnp_os::set_timeout(c, SO_SNDTIMEO, 4000);
 
@@ -1032,7 +1163,18 @@ private:
 
         int64_t totalSize = 0;
         FILE* fileHandle = nullptr;
-        if (entry.isFile) {
+        if (entry.progressive) {
+            fileHandle = std::fopen(entry.progressive->filePath.c_str(), "rb");
+            if (!fileHandle) {
+                const char* notFoundResp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                sendAll(notFoundResp, std::strlen(notFoundResp));
+                record_log(clientIp, clientPort, method, path, rangeHeader, 404, 0);
+                upnp_os::close_socket(c);
+                return;
+            }
+            std::setvbuf(fileHandle, nullptr, _IONBF, 0);
+            totalSize = entry.progressive->totalSize;
+        } else if (entry.isFile) {
             fileHandle = std::fopen(entry.filePath.c_str(), "rb");
             if (!fileHandle) {
                 const char* notFoundResp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1055,7 +1197,11 @@ private:
         int64_t sent = 0;
         if (method == "GET" && (respHeaders.statusCode == 200 || respHeaders.statusCode == 206)) {
             const int64_t toSend = respHeaders.contentLength;
-            if (entry.isFile && fileHandle) {
+            if (entry.progressive && fileHandle) {
+                sent = upnp_detail::pump_progressive_file(
+                    fileHandle, respHeaders.rangeStart, toSend, *entry.progressive, 65536,
+                    sendOnce, sleepMs, &stop_);
+            } else if (entry.isFile && fileHandle) {
                 upnp_os::file_seek(fileHandle, respHeaders.rangeStart);
                 // ★ P0-B：读一块 → **整块发完** → 再读下一块。
                 // 旧实现每个块只 send 一次，部分发送时块尾字节被丢弃、下一轮读的是文件下一块

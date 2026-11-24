@@ -337,6 +337,7 @@
 }
 
 - (void)applyTheme {
+    if (!self.isViewLoaded) return;
     RLPTheme *t = [RLPTheme current];
     _root.layer.backgroundColor = t.bg.CGColor;
     _title.textColor = t.text;

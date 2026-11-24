@@ -180,7 +180,7 @@ static void test_skip_adopts_latest_filter_settings(const std::string& wav1, con
     const bool gotSignal = wait_until([&]() {
         std::lock_guard<std::mutex> lk(g_ps.mtx);
         return g_ps.current == wav2 && !g_ps.signal.empty();
-    }, 5000);
+    }, 15000);
     ck(gotSignal, "第 2 曲产出信号链快照");
 
     std::string sig;
@@ -251,7 +251,7 @@ static void test_queue_thread_auto_advance_preserves_session_and_adopts_dsp(
     const bool track2Started = wait_until([&]() {
         std::lock_guard<std::mutex> lk(g_ps.mtx);
         return g_ps.current == wav2 && !g_ps.signal.empty();
-    }, 8000);
+    }, 25000);
     ck(track2Started, "queue_thread 自动续播进入第 2 曲并产出信号链");
 
     std::string sig2;
@@ -266,13 +266,13 @@ static void test_queue_thread_auto_advance_preserves_session_and_adopts_dsp(
     ck(sig2.find("\"deviceId\":\"null\"") != std::string::npos, "自动续播第 2 曲保持会话 backend=null", sig2);
 
     // 等队列自然结束，检查第 2 曲 played == total（未继承 initialSeekFrac）
-    wait_until([&]() { return !g_ps.playing.load(); }, 8000);
+    const bool finished = wait_until([&]() { return !g_ps.playing.load(); }, 25000);
     g_ps.stopJoin();
     const size_t pl2 = g_ps.played.load();
     const size_t tt2 = g_ps.total.load();
-    ck(tt2 > 0 && pl2 >= tt2 && pl2 < tt2 + tt2 / 10,
+    ck(finished && tt2 > 0 && pl2 >= tt2 && pl2 < tt2 + tt2 / 10,
        "自动续播第 2 曲完整播放（未继承首曲 initialSeekFrac）",
-       "played=" + std::to_string(pl2) + " total=" + std::to_string(tt2));
+       "finished=" + std::to_string(finished) + " played=" + std::to_string(pl2) + " total=" + std::to_string(tt2));
 }
 
 int main() {

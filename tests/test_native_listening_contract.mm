@@ -28,6 +28,7 @@
 #include <atomic>
 #include <string>
 #include <thread>
+#include <vector>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -39,6 +40,12 @@ void set_upnp_caps_probe_override_for_test(bool active, bool ok,
                                             const std::string& friendlyName,
                                             const std::string& sink,
                                             const std::string& error);
+void set_coreaudio_caps_probe_override_for_test(bool active,
+                                                 const std::string& devId,
+                                                 const std::string& name,
+                                                 const std::vector<uint32_t>& rates,
+                                                 bool airplay = false,
+                                                 bool sharedOnly = false);
 void reset_preset_probe_counts_for_test();
 int  preset_coreaudio_probe_count_for_test();
 }
@@ -81,6 +88,8 @@ static NSView *FindById(NSView *root, NSString *ident) {
 @property (nonatomic, strong) NSTextField *capsDsdBadge;
 @property (nonatomic, strong) NSTextField *presetNotes;
 @property (nonatomic, copy, nullable) NSDictionary *presetCapsJSON;
++ (BOOL)isCapsJSON:(NSDictionary * _Nullable)json mismatchedWithSettings:(NSDictionary * _Nullable)kv;
+
 @property (nonatomic, copy, nullable) NSString *presetCapsKey;
 @property (nonatomic, assign) NSUInteger presetCapsSeq;
 @property (nonatomic, copy, nullable) NSString *presetCapsDevice;
@@ -1760,6 +1769,227 @@ int main(int argc, char **argv) {
                caProbesO == 0,
                "C3o 未选 upnpdev 返回能力未知与明确 probeNote，不回落 CoreAudio",
                unselCaps.description ?: @"nil");
+
+            // C3p 本地 PCM 升频（rate=48000）切到支持 192k/384k/96k 的 UPnP 渲染器时：
+            // /api/settings 自动将 rate 提升/跟随至 UPnP 渲染器能力，/api/rates?backend=upnp 返回渲染器采样率，
+            // 且原音直通（rate=src）与同渲染器下显式手动指定的 rate 不被覆盖。
+            {
+                // ① 本地 48kHz PCM 升频 -> 切到 192k UPnP 渲染器 -> rate 自动升到 192000
+                rlapp::set_upnp_caps_probe_override_for_test(
+                    true, true, "Mock UPnP 192",
+                    "http-get:*:audio/L16:rate=44100,http-get:*:audio/L16:rate=48000,"
+                    "http-get:*:audio/L24:rate=96000,http-get:*:audio/L24:rate=192000", "");
+                [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                body:@"backend=coreaudio&device=USB-LOCAL&upnpdev=&rate=48000&filter=poly-sinc-tight-lp&dsd=0&directsdm=0&volume=-120"];
+                NSDictionary *sw192 = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                      body:@"backend=upnp&upnpdev=http://127.0.0.1:2/upnp192"];
+                NSDictionary *get192 = [core jsonWithMethod:@"GET" path:@"/api/settings" body:nil];
+                CK([sw192[@"ok"] boolValue] &&
+                   [sw192[@"kv"][@"rate"] isEqualToString:@"192000"] &&
+                   [get192[@"kv"][@"rate"] isEqualToString:@"192000"],
+                   "C3p1 本地 rate=48000 切到 192k UPnP 渲染器后 rate 自动升到 192000",
+                   [NSString stringWithFormat:@"post=%@ get=%@", sw192[@"kv"][@"rate"] ?: @"nil", get192[@"kv"][@"rate"] ?: @"nil"]);
+
+                // ② 换到 384k 渲染器 -> rate 自动升到 384000
+                rlapp::set_upnp_caps_probe_override_for_test(
+                    true, true, "Mock UPnP 384",
+                    "http-get:*:audio/L16:rate=44100,http-get:*:audio/L24:rate=176400,http-get:*:audio/L24:rate=384000", "");
+                NSDictionary *sw384 = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                      body:@"upnpdev=http://127.0.0.1:3/upnp384"];
+                CK([sw384[@"ok"] boolValue] && [sw384[@"kv"][@"rate"] isEqualToString:@"384000"],
+                   "C3p2 换到 384k UPnP 渲染器后 rate 自动跟升到 384000",
+                   sw384[@"kv"][@"rate"] ?: @"nil");
+
+                // ③ Web 全量保存（提交旧 rate=384000 + 新 upnpdev=96k 渲染器）-> 自动适配 96000；且 /api/rates?backend=upnp 返回渲染器采样率
+                rlapp::set_upnp_caps_probe_override_for_test(
+                    true, true, "Mock UPnP 96",
+                    "http-get:*:audio/L16:rate=44100,http-get:*:audio/L16:rate=48000,http-get:*:audio/L24:rate=96000", "");
+                NSDictionary *sw96 = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                     body:@"backend=upnp&upnpdev=http://127.0.0.1:4/upnp96&rate=384000"];
+                NSDictionary *rates96 = [core jsonWithMethod:@"GET" path:@"/api/rates?backend=upnp&upnpdev=http://127.0.0.1:4/upnp96" body:nil];
+                CK([sw96[@"ok"] boolValue] && [sw96[@"kv"][@"rate"] isEqualToString:@"96000"] &&
+                   [rates96[@"ok"] boolValue] && [rates96[@"backend"] isEqualToString:@"upnp"] &&
+                   [rates96[@"rates"] isEqualToArray:@[@44100, @48000, @96000]],
+                   "C3p3 Web 全量提交旧 rate 换 96k 渲染器后 rate 自动随动且 /api/rates 返回 UPnP 能力",
+                   [NSString stringWithFormat:@"rate=%@ rates=%@", sw96[@"kv"][@"rate"] ?: @"nil", rates96.description ?: @"nil"]);
+
+                // ④ 同渲染器下用户显式修改 rate=48000 必须保留，不被覆盖
+                NSDictionary *manual48 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"rate=48000"];
+                CK([manual48[@"ok"] boolValue] && [manual48[@"kv"][@"rate"] isEqualToString:@"48000"],
+                   "C3p4 同 UPnP 渲染器下手动显式修改 rate=48000 保留用户指定值",
+                   manual48[@"kv"][@"rate"] ?: @"nil");
+
+                // ⑤ 原音直通（rate=src, filter=""）切到 192k UPnP 绝不自动改写 rate
+                rlapp::set_upnp_caps_probe_override_for_test(
+                    true, true, "Mock UPnP 192",
+                    "http-get:*:audio/L16:rate=44100,http-get:*:audio/L24:rate=192000", "");
+                [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                body:@"backend=coreaudio&upnpdev=&rate=src&filter=&dsd=0&directsdm=0"];
+                NSDictionary *bpUpnp = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                        body:@"backend=upnp&upnpdev=http://127.0.0.1:5/upnpbp"];
+                CK([bpUpnp[@"ok"] boolValue] && [bpUpnp[@"kv"][@"rate"] isEqualToString:@"src"],
+                   "C3p5 原音直通 rate=src 切到 UPnP 时绝不自动改为数值升频",
+                   bpUpnp[@"kv"][@"rate"] ?: @"nil");
+
+                // ⑥ QuickStart 卡片面对 numeric rate + castCeiling 的随动显示
+                RLPQuickStartViewController *qnum = [[RLPQuickStartViewController alloc] init];
+                qnum.view.frame = NSMakeRect(0, 0, 1100, 760);
+                qnum.filters = items;
+                qnum.settings = @{@"backend": @"upnp", @"upnpdev": @"http://127.0.0.1:2/upnp192",
+                                  @"rate": @"192000", @"filter": @"poly-sinc-tight-lp", @"dsd": @"0", @"directsdm": @"0"};
+                [qnum applyPresetCaps:@{@"ok": @YES, @"castCeiling": @96000,
+                                        @"device": @{@"name": @"DAC-192", @"backend": @"upnp",
+                                                     @"rates": @[@44100, @96000, @192000],
+                                                     @"maxRate": @192000, @"dop": @NO}}];
+                CK([qnum.playSub.stringValue containsString:@"96"] && ![qnum.playSub.stringValue containsString:@"192"],
+                   "C3p6 QuickStart 在 rate=192000 且 castCeiling=96000 时卡面目标与投放上限一致",
+                   qnum.playSub.stringValue ?: @"nil");
+                rlapp::set_upnp_caps_probe_override_for_test(false, true, "", "", "");
+            }
+
+            // C8 设备/后端切换自动识别能力：PCM 升频、DSD DoP bit 率、Shared/AirPlay 降级与自动恢复（无需重按播放方式）
+            {
+                rlapp::set_coreaudio_caps_probe_override_for_test(
+                    true, "ca-dsd256", "DAC 256",
+                    {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000});
+                rlapp::set_coreaudio_caps_probe_override_for_test(
+                    true, "ca-dsd128", "DAC 128",
+                    {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000});
+                rlapp::set_coreaudio_caps_probe_override_for_test(
+                    true, "ca-pcm96", "Built-in PCM96",
+                    {44100, 48000, 88200, 96000});
+                rlapp::set_coreaudio_caps_probe_override_for_test(
+                    true, "ca-airplay", "HomePod AirPlay",
+                    {44100}, true, true);
+
+                [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                body:@"backend=coreaudio&device=ca-dsd256&upnpdev=&volume=-120"];
+                NSDictionary *apDsd = [core jsonWithMethod:@"POST" path:@"/api/preset/apply?profile=pcm2dsd" body:nil];
+                NSDictionary *tonePick = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                           body:@"filter=poly-sinc-gauss-long&filterNx=&taps=0&mintapsperinput=0&atten=0&transition=0&phase="];
+                CK([apDsd[@"ok"] boolValue] &&
+                   [apDsd[@"applied"][@"dsd"] isEqualToString:@"256"] &&
+                   [tonePick[@"kv"][@"ui_profile"] isEqualToString:@"pcm2dsd"] &&
+                   [tonePick[@"kv"][@"filter"] isEqualToString:@"poly-sinc-gauss-long"],
+                   "C8a1 预设 pcm2dsd + 选听音风格后保留 ui_profile 与 filter",
+                   [NSString stringWithFormat:@"ap=%@ tone=%@", apDsd[@"applied"], tonePick[@"kv"][@"ui_profile"] ?: @"nil"]);
+
+                // Switch ca-dsd256 -> ca-dsd128: DSD rate adapts 256 -> 128, Tone Style kept
+                NSDictionary *sw128 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"device=ca-dsd128"];
+                CK([sw128[@"ok"] boolValue] &&
+                   [sw128[@"kv"][@"dsd"] isEqualToString:@"128"] &&
+                   [sw128[@"kv"][@"rate"] isEqualToString:@"src"] &&
+                   [sw128[@"kv"][@"filter"] isEqualToString:@"poly-sinc-gauss-long"] &&
+                   [sw128[@"kv"][@"ui_profile"] isEqualToString:@"pcm2dsd"],
+                   "C8a2 DAC 256 -> DAC 128 自动降档为 DSD128 且保留听音风格",
+                   [NSString stringWithFormat:@"dsd=%@ filt=%@", sw128[@"kv"][@"dsd"] ?: @"nil", sw128[@"kv"][@"filter"] ?: @"nil"]);
+
+                // Switch ca-dsd128 -> ca-pcm96 (no DoP): auto degrade to PCM 96k, effective mode = pcm
+                NSDictionary *swPcm96 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"device=ca-pcm96"];
+                NSString *effModePcm96 = RLPPlayModeFromSettings(swPcm96[@"kv"]);
+                CK([swPcm96[@"ok"] boolValue] &&
+                   [swPcm96[@"kv"][@"dsd"] isEqualToString:@"0"] &&
+                   [swPcm96[@"kv"][@"rate"] isEqualToString:@"96000"] &&
+                   [swPcm96[@"kv"][@"shaper"] isEqualToString:@"auto"] &&
+                   [effModePcm96 isEqualToString:@"pcm"],
+                   "C8b 无 DoP 设备 ca-pcm96 自动降级为 PCM 96k 且生效模式派生为 pcm",
+                   [NSString stringWithFormat:@"dsd=%@ rate=%@ mode=%@",
+                    swPcm96[@"kv"][@"dsd"] ?: @"nil", swPcm96[@"kv"][@"rate"] ?: @"nil", effModePcm96]);
+
+                // Switch ca-pcm96 -> ca-airplay: degrade to rate=src dsd=0; then back to ca-dsd256: auto-restore DSD256
+                NSDictionary *swAir = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"device=ca-airplay"];
+                NSDictionary *capsAir = [core jsonWithMethod:@"GET" path:@"/api/preset/caps" body:nil];
+                NSDictionary *swBack256 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"device=ca-dsd256"];
+                CK([swAir[@"kv"][@"dsd"] isEqualToString:@"0"] &&
+                   [swAir[@"kv"][@"rate"] isEqualToString:@"src"] &&
+                   [capsAir[@"device"][@"backend"] isEqualToString:@"airplay"] &&
+                   ![capsAir[@"device"][@"dop"] boolValue] &&
+                   [swBack256[@"kv"][@"dsd"] isEqualToString:@"256"] &&
+                   [swBack256[@"kv"][@"filter"] isEqualToString:@"poly-sinc-gauss-long"],
+                   "C8c 切到 CoreAudio AirPlay 降级为 src，切回 DAC 256 无需重按预设自动恢复 DSD256",
+                   [NSString stringWithFormat:@"air=%@/%@ capsBk=%@ backDsd=%@",
+                    swAir[@"kv"][@"dsd"] ?: @"nil", swAir[@"kv"][@"rate"] ?: @"nil",
+                    capsAir[@"device"][@"backend"] ?: @"nil", swBack256[@"kv"][@"dsd"] ?: @"nil"]);
+
+                // Switch CoreAudio Exclusive <-> Shared on same device
+                NSDictionary *swShared = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio-shared"];
+                NSDictionary *swExcl = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio"];
+                CK([swShared[@"kv"][@"dsd"] isEqualToString:@"0"] &&
+                   [swShared[@"kv"][@"rate"] isEqualToString:@"src"] &&
+                   [swExcl[@"kv"][@"dsd"] isEqualToString:@"256"],
+                   "C8d CoreAudio Shared 降级为 src，切回独占同设备自动恢复 DSD256",
+                   [NSString stringWithFormat:@"shared=%@/%@ excl=%@",
+                    swShared[@"kv"][@"dsd"] ?: @"nil", swShared[@"kv"][@"rate"] ?: @"nil",
+                    swExcl[@"kv"][@"dsd"] ?: @"nil"]);
+
+                // Switch CoreAudio -> UPnP (DoP64) -> CoreAudio (DSD256)
+                rlapp::set_upnp_caps_probe_override_for_test(
+                    true, true, "Mock UPnP DSD64",
+                    "http-get:*:audio/L16:rate=44100,http-get:*:audio/L24:rate=176400,http-get:*:audio/L24:rate=192000", "");
+                NSDictionary *swUpnpDsd = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                            body:@"backend=upnp&upnpdev=http://127.0.0.1:2/upnpdsd64"];
+                NSDictionary *swCaDsd = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                          body:@"backend=coreaudio&device=ca-dsd256"];
+                CK([swUpnpDsd[@"kv"][@"dsd"] isEqualToString:@"64"] &&
+                   [swCaDsd[@"kv"][@"dsd"] isEqualToString:@"256"],
+                   "C8e CoreAudio DSD256 <-> UPnP DoP64 来回切换自动匹配 DSD bit 率",
+                   [NSString stringWithFormat:@"upnpDsd=%@ caDsd=%@",
+                    swUpnpDsd[@"kv"][@"dsd"] ?: @"nil", swCaDsd[@"kv"][@"dsd"] ?: @"nil"]);
+                rlapp::set_upnp_caps_probe_override_for_test(false, true, "", "", "");
+
+                // Without ever clicking QuickStart preset button (manual DSD / manual PCM in Workbench or Settings)
+                [core jsonWithMethod:@"POST" path:@"/api/preset/apply?profile=bitperfect" body:nil];
+                NSDictionary *manDsd = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                         body:@"backend=coreaudio&device=ca-dsd256&dsd=256&dsdnative=0&rate=src&filter=sinc-M&modfamily=ec&modorder=7&modcut=0"];
+                NSDictionary *noBtn128 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"device=ca-dsd128"];
+                NSDictionary *noBtnShared = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio-shared"];
+                NSDictionary *noBtnBack256 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio&device=ca-dsd256"];
+                CK([manDsd[@"kv"][@"ui_profile"] isEqualToString:@""] &&
+                   [noBtn128[@"kv"][@"dsd"] isEqualToString:@"128"] &&
+                   [noBtnShared[@"kv"][@"dsd"] isEqualToString:@"0"] &&
+                   [noBtnShared[@"kv"][@"rate"] isEqualToString:@"src"] &&
+                   [noBtnBack256[@"kv"][@"dsd"] isEqualToString:@"256"],
+                   "C8f 未点过播放方式按钮（工作台/设置手调 DSD256），换设备/共享模式再切回仍自动切换与恢复 bit 率",
+                   [NSString stringWithFormat:@"manProf=%@ 128=%@ sh=%@ back=%@",
+                    manDsd[@"kv"][@"ui_profile"] ?: @"nil", noBtn128[@"kv"][@"dsd"] ?: @"nil",
+                    noBtnShared[@"kv"][@"dsd"] ?: @"nil", noBtnBack256[@"kv"][@"dsd"] ?: @"nil"]);
+
+                // Manual PCM without clicking preset button: 48k -> ca-dsd128 -> 384k -> shared src -> coreaudio 384k
+                NSDictionary *manPcm = [core jsonWithMethod:@"POST" path:@"/api/settings"
+                                                         body:@"backend=coreaudio&device=ca-pcm96&dsd=0&rate=48000&shaper=auto"];
+                NSDictionary *pcmTo384 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"device=ca-dsd128"];
+                NSDictionary *pcmShared = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio-shared"];
+                NSDictionary *pcmBack384 = [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=coreaudio"];
+                CK([manPcm[@"kv"][@"ui_profile"] isEqualToString:@""] &&
+                   [pcmTo384[@"kv"][@"rate"] isEqualToString:@"384000"] &&
+                   [pcmShared[@"kv"][@"rate"] isEqualToString:@"src"] &&
+                   [pcmBack384[@"kv"][@"rate"] isEqualToString:@"384000"],
+                   "C8g 未点过播放方式按钮（手调 PCM 48k），切高规格/共享再切回自动跟随 384k（封顶）",
+                   [NSString stringWithFormat:@"384=%@ sh=%@ back=%@",
+                    pcmTo384[@"kv"][@"rate"] ?: @"nil", pcmShared[@"kv"][@"rate"] ?: @"nil",
+                    pcmBack384[@"kv"][@"rate"] ?: @"nil"]);
+
+                // QuickStart DSD display & same-backend device probeKey mismatch check
+                RLPQuickStartViewController *qdsd = [[RLPQuickStartViewController alloc] init];
+                qdsd.view.frame = NSMakeRect(0, 0, 1100, 760);
+                qdsd.filters = items;
+                qdsd.settings = swBack256[@"kv"];
+                [qdsd applyPresetCaps:@{@"ok": @YES,
+                                        @"probeKey": @"coreaudio|ca-dsd256|",
+                                        @"device": @{@"name": @"DAC 256", @"backend": @"coreaudio",
+                                                     @"rates": @[@44100, @705600], @"maxRate": @705600,
+                                                     @"dop": @YES, @"dopMax": @"dsd256"}}];
+                const BOOL dsdCardOk = [qdsd.playValue.stringValue isEqualToString:RLPTr(@"DSD 升频")] &&
+                                       [qdsd.playSub.stringValue containsString:@"DSD256"];
+                const BOOL mismatchCatch = [RLPQuickStartViewController isCapsJSON:qdsd.presetCapsJSON
+                                                            mismatchedWithSettings:@{@"backend": @"coreaudio", @"device": @"ca-dsd128", @"upnpdev": @""}];
+                CK(dsdCardOk && mismatchCatch,
+                   "C8h QuickStart 正确显示 DSD256 且同后端换设备时检出旧 probeKey 失配",
+                   [NSString stringWithFormat:@"playVal=%@ playSub=%@ mismatch=%d",
+                    qdsd.playValue.stringValue ?: @"nil", qdsd.playSub.stringValue ?: @"nil", mismatchCatch]);
+
+                rlapp::set_coreaudio_caps_probe_override_for_test(false, "", "", {});
+            }
 
             [core jsonWithMethod:@"POST" path:@"/api/settings" body:@"backend=null&upnpdev=&volume=-120"];
         }

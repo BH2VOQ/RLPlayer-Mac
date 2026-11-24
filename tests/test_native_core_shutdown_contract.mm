@@ -431,6 +431,79 @@ int main() {
             [c5 shutdown];
         }
 
+        // ====================================================================
+        // S6: request_shutdown() 必须先于快队列排空触发（防止主线程干等超时任务）
+        // ====================================================================
+        {
+            ResetMock();
+            RLPCoreClient *c6 = [[RLPCoreClient alloc] init];
+            [c6 startEmbedded];
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_blockerPath = "/api/test/s6-io-blocker";
+            }
+            g_blockerGate.arm();
+            [c6 getJSON:@"/api/test/s6-io-blocker" completion:nil];
+            BOOL entered = g_blockerGate.waitEntered(2000);
+
+            std::atomic<bool> shutdownReturned{false};
+            std::thread shutdownThread([&] {
+                [c6 shutdown];
+                shutdownReturned.store(true);
+            });
+
+            // 若旧顺序（先 barrier_sync 再 request_shutdown），这里永远等不到 g_requestShutdownCalls > 0（必死锁）。
+            BOOL reqObservedBeforeRelease = NO;
+            for (int i = 0; i < 200; ++i) {
+                if (g_requestShutdownCalls.load() > 0) {
+                    reqObservedBeforeRelease = YES;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            BOOL stillWaitingDrain = !shutdownReturned.load();
+            g_blockerGate.release();
+            shutdownThread.join();
+
+            ck(entered && reqObservedBeforeRelease && stillWaitingDrain && !c6.started,
+               "S6 request_shutdown() triggers before _ioQueue finishes draining",
+               [NSString stringWithFormat:@"entered=%d req=%d stillWaiting=%d started=%d",
+                entered, reqObservedBeforeRelease, stillWaitingDrain, c6.started]);
+        }
+
+        // ====================================================================
+        // S7: shutdownWithTimeoutMs: 卡住时有界返回 NO，释放后可完成收尾返回 YES
+        // ====================================================================
+        {
+            ResetMock();
+            RLPCoreClient *c7 = [[RLPCoreClient alloc] init];
+            [c7 startEmbedded];
+            {
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_blockerPath = "/api/test/s7-timeout-blocker";
+            }
+            g_blockerGate.arm();
+            [c7 getJSON:@"/api/test/s7-timeout-blocker" completion:nil];
+            BOOL entered = g_blockerGate.waitEntered(2000);
+
+            const auto t0 = std::chrono::steady_clock::now();
+            BOOL drainedTimedOut = [c7 shutdownWithTimeoutMs:60];
+            const long long elapsedMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - t0).count();
+
+            ck(entered && !drainedTimedOut && elapsedMs < 400 && g_stopCalls.load() == 0 && c7.started,
+               "S7 shutdownWithTimeoutMs: returns NO promptly when worker is blocked",
+               [NSString stringWithFormat:@"entered=%d drained=%d elapsed=%lldms stopCalls=%d started=%d",
+                entered, drainedTimedOut, elapsedMs, g_stopCalls.load(), c7.started]);
+
+            g_blockerGate.release();
+            BOOL drainedAfterRelease = [c7 shutdownWithTimeoutMs:1500];
+            ck(drainedAfterRelease && g_stopCalls.load() == 1 && !c7.started,
+               "S7b shutdownWithTimeoutMs: completes cleanly after worker unblocks",
+               [NSString stringWithFormat:@"drained=%d stopCalls=%d started=%d",
+                drainedAfterRelease, g_stopCalls.load(), c7.started]);
+        }
+
         std::printf("\n%s（%d passed, %d failed）\n",
                     g_fail == 0 ? "RLPCoreClient 退出关闸与重启恢复契约 全部通过"
                                 : "RLPCoreClient 退出关闸与重启恢复契约 有失败",

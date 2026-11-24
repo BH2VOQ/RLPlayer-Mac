@@ -44,6 +44,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, copy) NSArray<NSDictionary *> *savedQueuesFixture;
 @property (nonatomic, copy, nullable) NSArray<NSDictionary *> *customDevicesFixture;
 @property (nonatomic, copy, nullable) NSDictionary *customStatusFixture;
+@property (nonatomic, assign) NSInteger prepareForShutdownCalls;
 @end
 
 @interface RLPWorkbenchViewController (FitContractAccess)
@@ -75,6 +76,7 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 }
 - (BOOL)started { return YES; }
 - (BOOL)startEmbedded { return NO; }
+- (void)prepareForShutdown { ++self.prepareForShutdownCalls; }
 - (void)shutdown {}
 - (id)jsonWithMethod:(NSString *)method path:(NSString *)path body:(NSString *)body {
     (void)body;
@@ -214,6 +216,37 @@ static void ResizeWindow(RLPMainWindowController *wc, CGFloat w, CGFloat h) {
     f.size = NSMakeSize(w, h);
     [wc.window setFrame:f display:wc.window.isVisible];
     [wc.window.contentView layoutSubtreeIfNeeded];
+}
+
+static NSScrollView *CheckStationTopVisible(RLPMainWindowController *wc, const char *stage) {
+    [wc.window.contentView layoutSubtreeIfNeeded];
+    RLPQuickStartViewController *qs = [wc.currentContent isKindOfClass:RLPQuickStartViewController.class]
+        ? (RLPQuickStartViewController *)wc.currentContent : nil;
+    NSScrollView *sv = nil;
+    for (NSView *v in qs.contentView.subviews) {
+        if ([v isKindOfClass:NSScrollView.class]) { sv = (NSScrollView *)v; break; }
+    }
+    NSView *doc = sv.documentView;
+    NSClipView *clip = sv.contentView;
+    NSView *hdr = qs ? (NSView *)[qs valueForKey:@"headerRow"] : nil;
+    const NSRect clipB = clip ? clip.bounds : NSZeroRect;
+    const NSRect docF = doc ? doc.frame : NSZeroRect;
+    const NSRect hdrInClip = (hdr && clip) ? [hdr convertRect:hdr.bounds toView:clip] : NSZeroRect;
+    const NSRect hdrVis = (hdr && clip) ? NSIntersectionRect(hdrInClip, clipB) : NSZeroRect;
+    const CGFloat expectedTopY = doc ? -sv.contentInsets.top : 0.0;
+    const BOOL ok = (qs != nil && sv != nil && doc != nil && clip != nil && hdr != nil &&
+                     doc.isFlipped &&
+                     docF.origin.y >= -0.5 &&
+                     fabs(clipB.origin.y - expectedTopY) <= 0.5 &&
+                     NSContainsRect(NSInsetRect(clipB, -0.5, -0.5), hdrInClip) &&
+                     hdrInClip.origin.y <= 32.0 &&
+                     hdrVis.size.width > 100.0 && hdrVis.size.height > 20.0);
+    Ck(ok,
+       [[NSString stringWithFormat:@"S-%s 聆听室切换后文档顶对齐且页头位于可视区顶部无空白", stage] UTF8String],
+       [NSString stringWithFormat:@"flipped=%d docF=%@ clipB=%@ hdrInClip=%@ topInset=%.1f",
+        doc ? (int)doc.isFlipped : -1, NSStringFromRect(docF), NSStringFromRect(clipB),
+        NSStringFromRect(hdrInClip), sv ? sv.contentInsets.top : -1.0]);
+    return sv;
 }
 
 static void CheckTopbarGeometry(RLPMainWindowController *wc, const char *stage) {
@@ -877,8 +910,14 @@ int main() {
            "R1b 切 albums 并 pump 后仍为 1180x760 ±1", FrameSummary(wc.window));
 
         [wc.sidebar selectKey:@"station"];
+        NSScrollView *stationScroll = CheckStationTopVisible(wc, "R1c-0ms");
         Pump(0.3);
         [wc.window.contentView layoutSubtreeIfNeeded];
+        CheckStationTopVisible(wc, "R1c-300ms");
+        if (stationScroll && stationScroll.contentView) {
+            [stationScroll.contentView scrollToPoint:NSMakePoint(0, 260)];
+            [stationScroll reflectScrolledClipView:stationScroll.contentView];
+        }
         std::printf("  [R1 station] %s\n", FrameSummary(wc.window).UTF8String);
         Ck([wc.currentContent isKindOfClass:RLPQuickStartViewController.class] &&
            SizeMatches(wc.window.frame.size, 1180, 760),
@@ -906,8 +945,10 @@ int main() {
         }
 
         [wc.sidebar selectKey:@"station"];
+        CheckStationTopVisible(wc, "R1f-reenter-0ms");
         Pump(0.25);
         [wc.window.contentView layoutSubtreeIfNeeded];
+        CheckStationTopVisible(wc, "R1f-reenter-250ms");
         std::printf("  [R1 back-station] %s\n", FrameSummary(wc.window).UTF8String);
         Ck(SizeMatches(wc.window.frame.size, 1180, 760),
            "R1f 切回 station 并 pump 后仍为 1180x760 ±1", FrameSummary(wc.window));
@@ -950,8 +991,10 @@ int main() {
         }
 
         [wc.sidebar selectKey:@"station"];
+        CheckStationTopVisible(wc, "R3c-900-0ms");
         Pump(0.25);
         [wc.window.contentView layoutSubtreeIfNeeded];
+        CheckStationTopVisible(wc, "R3c-900-250ms");
         std::printf("  [R3 station@900] %s\n", FrameSummary(wc.window).UTF8String);
         Ck(SizeMatches(wc.window.frame.size, 900, 600),
            "R3c 900x600 下从 meta 切回 station 后 frame 仍为 900x600",
@@ -1522,6 +1565,25 @@ int main() {
             [RLPTheme setThemeName:@"light"];
             [[NSNotificationCenter defaultCenter] postNotificationName:RLPThemeDidChangeNotification object:nil];
             Pump(0.1);
+        }
+
+        // ---- R8: 播放期间点关闭（windowShouldClose:）必须立即隐藏窗口、停表、并发出非阻塞 prepareForShutdown ----
+        {
+            [wc.playbackBar startPolling];
+            [wc.sidebar selectKey:@"albums"];
+            Pump(0.1);
+            g_spy.prepareForShutdownCalls = 0;
+            wc.window.alphaValue = 1.0;
+            BOOL delegateOk = (wc.window.delegate == (id)wc);
+            BOOL shouldClose = [wc windowShouldClose:wc.window];
+            BOOL hiddenNow = (wc.window.alphaValue == 0.0);
+            BOOL barStopped = !wc.playbackBar.polling;
+            BOOL prepared = (g_spy.prepareForShutdownCalls == 1);
+            Ck(delegateOk && shouldClose && hiddenNow && barStopped && prepared,
+               "R8 windowShouldClose 立即隐藏窗口、停表并触发 prepareForShutdown",
+               [NSString stringWithFormat:@"del=%d should=%d alpha=%.2f barPoll=%d prep=%ld",
+                delegateOk, shouldClose, wc.window.alphaValue, wc.playbackBar.polling,
+                (long)g_spy.prepareForShutdownCalls]);
         }
 
         [wc.window orderOut:nil];

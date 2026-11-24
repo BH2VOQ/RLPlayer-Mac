@@ -172,6 +172,57 @@ static NSInteger InkPixelsAgainst(NSView *host, NSView *target, NSColor *refColo
     return hit;
 }
 
+/// 量控件内部「内容墨迹（跳过 2pt 边框）」左右留白是否对称（防左挤右空）。
+static BOOL InkMarginsBalanced(NSView *host, NSView *target, NSColor *refOrBg, BOOL againstRef,
+                               CGFloat *outLeftPt, CGFloat *outRightPt) {
+    if (!host || !target) return NO;
+    const NSRect hostBounds = host.bounds;
+    if (hostBounds.size.width < 8 || hostBounds.size.height < 8) return NO;
+    NSBitmapImageRep *rep = [host bitmapImageRepForCachingDisplayInRect:hostBounds];
+    if (!rep) return NO;
+    [host cacheDisplayInRect:hostBounds toBitmapImageRep:rep];
+    NSRect r = [target convertRect:target.bounds toView:host];
+    const BOOL hostFlipped = host.isFlipped;
+    const CGFloat sx = rep.pixelsWide / MAX(1.0, hostBounds.size.width);
+    const CGFloat sy = rep.pixelsHigh / MAX(1.0, hostBounds.size.height);
+    CGFloat top = hostFlipped ? NSMinY(r) : (hostBounds.size.height - NSMaxY(r));
+    NSInteger x0 = MAX(0, (NSInteger)lround((NSMinX(r) + 2.0) * sx));
+    NSInteger y0 = MAX(0, (NSInteger)lround((top + 3.0) * sy));
+    NSInteger x1 = MIN(rep.pixelsWide, (NSInteger)lround((NSMaxX(r) - 2.0) * sx));
+    NSInteger y1 = MIN(rep.pixelsHigh, (NSInteger)lround((top + r.size.height - 3.0) * sy));
+    if (x1 - x0 < 6 || y1 - y0 < 4) return NO;
+
+    NSColor *ref = [(refOrBg ?: [NSColor whiteColor]) colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    const double refLum = 0.299 * ref.redComponent + 0.587 * ref.greenComponent + 0.114 * ref.blueComponent;
+    NSInteger minX = NSIntegerMax, maxX = -1;
+    for (NSInteger y = y0; y < y1; ++y) {
+        for (NSInteger x = x0; x < x1; ++x) {
+            NSColor *c = [[rep colorAtX:x y:y] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+            if (!c) continue;
+            BOOL isInk = NO;
+            if (againstRef) {
+                const double d = fabs(c.redComponent - ref.redComponent) +
+                                 fabs(c.greenComponent - ref.greenComponent) +
+                                 fabs(c.blueComponent - ref.blueComponent);
+                isInk = (d < 0.28);
+            } else {
+                const double lum = 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent;
+                isInk = (fabs(lum - refLum) > 0.15);
+            }
+            if (isInk) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+            }
+        }
+    }
+    if (maxX < minX) return NO;
+    const CGFloat leftPt = ((CGFloat)minX / sx) - NSMinX(r);
+    const CGFloat rightPt = NSMaxX(r) - ((CGFloat)(maxX + 1) / sx);
+    if (outLeftPt) *outLeftPt = leftPt;
+    if (outRightPt) *outRightPt = rightPt;
+    return fabs(leftPt - rightPt) <= 5.5;
+}
+
 /// 某标签文字是否出现在视图树里（用于「空值标签不该出现」）。
 static BOOL HasText(NSView *root, NSString *text) {
     NSMutableArray<NSView *> *all = [NSMutableArray array];
@@ -187,6 +238,8 @@ static BOOL HasText(NSView *root, NSString *text) {
 
 static NSArray<NSDictionary *> *g_materials = nil;
 static NSDictionary *g_summaryFields = nil;
+static NSArray<NSDictionary *> *g_summaryCitations = nil;
+static NSArray<NSDictionary *> *g_summarySections = nil;
 static BOOL g_summaryOk = YES;
 static BOOL g_pendingOnce = NO;
 static NSArray<NSDictionary *> *g_albums = nil;
@@ -217,7 +270,8 @@ static NSArray<NSDictionary *> *g_albums = nil;
         } else {
             reply = @{ @"ok": @YES, @"kind": @"person",
                        @"fields": g_summaryFields ?: @{},
-                       @"sections": @[], @"citations": @[] };
+                       @"sections": g_summarySections ?: @[],
+                       @"citations": g_summaryCitations ?: @[] };
         }
     } else if ([path hasPrefix:@"/api/playmode"]) {
         reply = @{ @"ok": @YES, @"mode": @0 };
@@ -330,7 +384,12 @@ int main() {
                s ?: @"nil");
             Ck(![s containsString:@"资料暂缺"] && ![s containsString:@"权威"],
                @"A1e 副标题不出现「资料暂缺 / 权威」字样（用户明确要求删掉的说法）", s ?: @"nil");
+            Ck(![s containsString:@"· ·"],
+               @"A1f 副标题「缓存 · 日期 取回」不能出现双中点（缓存 · · 日期）", s ?: @"nil");
         }
+        Ck(vc.subtitleLabel.hidden,
+           @"A1g 艺术家详情页隐藏 RLPPageViewController 浮动副标题（避免遮挡顶栏返回行）",
+           vc.subtitleLabel.stringValue ?: @"nil");
 
         // ---- A2 三张卡片：存在、等宽、纵向不重叠 ----
         NSView *cardSummary = FindId(v, @"artist.card.summary");
@@ -385,6 +444,25 @@ int main() {
             }
             Ck(phantom.count == 0, @"A3d 后端没给的标签不占位（不许用空值/未知标签冒充有数据）",
                [phantom componentsJoinedByString:@","]);
+
+            v.frame = NSMakeRect(0, 0, 1600, 700);
+            [v layoutSubtreeIfNeeded];
+            Pump(0.15);
+            [v layoutSubtreeIfNeeded];
+            NSView *fStyle = FindId(grid, @"artist.summary.field.风格");
+            NSView *fWorks = FindId(grid, @"artist.summary.field.代表作品");
+            if (Visible(fStyle) && Visible(fWorks)) {
+                const NSRect rStyle = RectIn(fStyle, grid);
+                const NSRect rWorks = RectIn(fWorks, grid);
+                Ck(NSMinX(rStyle) <= 340.0 && NSMinX(rWorks) <= 680.0,
+                   @"A3e 宽屏 1600pt 下少字段网格紧凑排布不裂出大空白（col2≤340pt, col3≤680pt）",
+                   [NSString stringWithFormat:@"styleX=%.1f worksX=%.1f gridW=%.1f",
+                    NSMinX(rStyle), NSMinX(rWorks), NSWidth(grid.bounds)]);
+            }
+            v.frame = NSMakeRect(0, 0, 954, 700);
+            [v layoutSubtreeIfNeeded];
+            Pump(0.15);
+            [v layoutSubtreeIfNeeded];
         }
 
         // ---- A4 宽字段独占整行 ----
@@ -419,6 +497,27 @@ int main() {
         NSArray<NSView *> *copyChips = AllWithPrefix(v, @"artist.sources.copy.");
         Ck(copyChips.count >= 1, @"A5d 每条来源带「复制」芯片（复制的是来源 URL）",
            [NSString stringWithFormat:@"chips=%lu", (unsigned long)copyChips.count]);
+        NSView *row1 = FindId(v, @"artist.sources.row.1");
+        NSView *date1 = row1 ? FindId(row1, @"artist.sources.date") : nil;
+        NSView *copy1 = row1 ? FindId(row1, @"artist.sources.copy.1") : nil;
+        NSView *open1 = row1 ? FindId(row1, @"artist.sources.open.1") : nil;
+        if (Visible(row1) && Visible(date1) && Visible(copy1)) {
+            const NSRect dr = RectIn(date1, row1);
+            const NSRect cr = RectIn(copy1, row1);
+            const CGFloat gapDC = NSMinX(cr) - NSMaxX(dr);
+            Ck(!Visible(open1) && gapDC >= 10.0,
+               @"A5e 来源行仅保留单个复制链接按钮且日期与按钮间距 ≥10pt",
+               [NSString stringWithFormat:@"openVis=%d gap=%.1f", Visible(open1), gapDC]);
+            if ([date1 isKindOfClass:[NSTextField class]]) {
+                NSTextField *dtf = (NSTextField *)date1;
+                const CGFloat needW = ceil([dtf.stringValue sizeWithAttributes:@{
+                    NSFontAttributeName: dtf.font ?: [NSFont systemFontOfSize:11.5]
+                }].width);
+                Ck(NSWidth(dr) >= needW + 6.0,
+                   @"A5f 来源日期字段宽裕度足以完整展示日期（不截断尾位数字）",
+                   [NSString stringWithFormat:@"dateW=%.1f needW=%.1f str=%@", NSWidth(dr), needW, dtf.stringValue]);
+            }
+        }
 
         // ---- A6 窄宿主响应式：不横向溢出 ----
         {
@@ -541,6 +640,508 @@ int main() {
                badBadges.count ? [badBadges componentsJoinedByString:@", "]
                                : [NSString stringWithFormat:@"只验到 %ld 个徽章（夹具未渲染来源行）",
                                                             (long)checkedBadges]);
+
+            NSMutableArray<NSString *> *offCenter = [NSMutableArray array];
+            NSArray<NSString *> *centerIds = @[ @"artist.back.top", @"artist.hero.btn.albums",
+                                                @"artist.hero.btn.refresh", @"artist.hero.btn.back",
+                                                @"artist.sources.copy.1" ];
+            for (NSString *ident in centerIds) {
+                NSView *chip = FindId(v, ident);
+                if (!Visible(chip)) {
+                    [offCenter addObject:[NSString stringWithFormat:@"%@(missing)", ident]];
+                    continue;
+                }
+                CGFloat lp = -1, rp = -1;
+                if (!InkMarginsBalanced(v, chip, t.bg, NO, &lp, &rp)) {
+                    [offCenter addObject:[NSString stringWithFormat:@"%@(L=%.1f R=%.1f)", ident, lp, rp]];
+                }
+            }
+            Ck(offCenter.count == 0,
+               @"A8c 全部芯片/按钮文字与图标左右居中对称（不左挤右空）",
+               [offCenter componentsJoinedByString:@", "]);
+        }
+
+        // ---- A9 唱片作品头部、播放全部与响应式专辑网格（含 year==0 无占位） ----
+        {
+            g_albums = @[
+                @{ @"k": @"alb-no-year", @"name": @"未标年份专辑", @"artist": @"结束バンド",
+                   @"year": @0, @"n": @10, @"dur": @2400.0,
+                   @"sr": @96000, @"bits": @24, @"cv": @NO },
+                @{ @"k": @"alb-with-year", @"name": @"結束バンド", @"artist": @"结束バンド",
+                   @"year": @2022, @"n": @14, @"dur": @3240.0,
+                   @"sr": @48000, @"bits": @24, @"cv": @NO },
+                @{ @"k": @"alb-third", @"name": @"Re:結束バンド", @"artist": @"结束バンド",
+                   @"year": @2024, @"n": @6, @"dur": @1500.0,
+                   @"sr": @44100, @"bits": @16, @"cv": @NO },
+            ];
+            RLPArtistDetailViewController *vc9 =
+                [[RLPArtistDetailViewController alloc] initWithArtistName:@"结束バンド"];
+            NSView *v9 = vc9.view;
+            win.contentView = v9;
+            v9.frame = NSMakeRect(0, 0, 954, 700);
+            [v9 layoutSubtreeIfNeeded];
+            [vc9 activate];
+            Pump(0.6);
+            [v9 layoutSubtreeIfNeeded];
+
+            NSView *albTitle = FindId(v9, @"artist.albums.title");
+            NSView *playAll = FindId(v9, @"artist.albums.playall");
+            NSView *col = FindId(v9, @"artist.albums");
+            Ck(Visible(albTitle) && Visible(playAll) && Visible(col),
+               @"A9a 艺术家页面显示唱片作品小节头、播放全部按钮与专辑网格",
+               [NSString stringWithFormat:@"title=%d playAll=%d col=%d",
+                Visible(albTitle), Visible(playAll), Visible(col)]);
+            if (Visible(playAll)) {
+                [vc9 performSelector:@selector(onScrollToAlbums:) withObject:nil];
+                [v9 layoutSubtreeIfNeeded];
+                const NSInteger whiteInk = InkPixelsAgainst(v9, playAll, [NSColor whiteColor]);
+                Ck(whiteInk >= 12,
+                   @"A9e 播放全部实心红按钮渲染清晰白色文字（非红底红字）",
+                   [NSString stringWithFormat:@"whiteInk=%ld frameInV9=%@",
+                    (long)whiteInk, NSStringFromRect(RectIn(playAll, v9))]);
+                CGFloat lp = -1, rp = -1;
+                const BOOL centered = InkMarginsBalanced(v9, playAll, [NSColor whiteColor], YES, &lp, &rp);
+                Ck(centered,
+                   @"A9f 播放全部按钮三角形与文字水平居中对称（不左挤右空）",
+                   [NSString stringWithFormat:@"L=%.1f R=%.1f frame=%@", lp, rp, NSStringFromRect(playAll.frame)]);
+            }
+            Ck(!HasText(v9, @"未知") && !HasText(v9, @"—"),
+               @"A9b 年份为空时专辑卡片不显示「未知 / —」占位符", @"发现占位符");
+            if (Visible(col)) {
+                const NSRect rc954 = RectIn(col, v9);
+                Ck(NSMaxX(rc954) <= NSWidth(v9.bounds) + 1.0 && NSHeight(rc954) > 100.0,
+                   @"A9c 专辑网格在 954pt 宽度下无溢出且高度有效",
+                   [NSString stringWithFormat:@"frame=%@", NSStringFromRect(rc954)]);
+            }
+            v9.frame = NSMakeRect(0, 0, 674, 700);
+            [v9 layoutSubtreeIfNeeded];
+            Pump(0.2);
+            if (Visible(col) && Visible(playAll)) {
+                const NSRect rc674 = RectIn(col, v9);
+                const NSRect rp674 = RectIn(playAll, v9);
+                Ck(NSMaxX(rc674) <= NSWidth(v9.bounds) + 1.0 && NSMaxX(rp674) <= NSWidth(v9.bounds) + 1.0,
+                   @"A9d 窄宿主 674pt 下唱片作品头部与专辑网格均不横向溢出",
+                   [NSString stringWithFormat:@"colMaxX=%.1f playMaxX=%.1f w=%.1f",
+                    NSMaxX(rc674), NSMaxX(rp674), NSWidth(v9.bounds)]);
+            }
+        }
+
+        // ---- A10 风格徽章文字渲染 / 长简介不与展开按钮重叠 / 无 URL 来源行不留白 / 引用与底边距 ----
+        {
+            NSMutableString *longBio = [NSMutableString stringWithString:
+                @"结束乐队（日文：結束バンド，英文：Kessoku Band）是《孤独摇滚！》及其衍生作品中登场的架空摇滚乐队。"];
+            for (int i = 0; i < 8; ++i) {
+                [longBio appendString:@"第一行补充说明演奏编曲细节、现场 Live 演出历程、主唱与吉他手合作记录以及专辑制作背景，确保文本远超四行折叠高度。"];
+            }
+            g_materials = @[
+                @{ @"source": @"moegirl", @"kind": @"biography", @"title": @"结束乐队长简介",
+                   @"text": longBio,
+                   @"url": @"https://zh.moegirl.org.cn/结束乐队", @"fetched_at": @1762732800, @"lang": @"zh" },
+                @{ @"source": @"wikipedia", @"kind": @"genre", @"title": @"J-Rock",
+                   @"text": @"摇滚 · 流行摇滚", @"url": @"", @"lang": @"zh" },
+            ];
+            g_summaryFields = @{};
+            g_summarySections = @[
+                @{ @"heading": @"曲风定位",
+                   @"paragraphs": @[ @{ @"text": @"吉他驱动流行摇滚" } ] },
+            ];
+            g_summaryCitations = @[
+                @{ @"title": @"萌娘百科", @"source": @"moegirl",
+                   @"url": @"https://zh.moegirl.org.cn/结束乐队" },
+            ];
+            g_summaryOk = YES;
+
+            RLPArtistDetailViewController *vc10 =
+                [[RLPArtistDetailViewController alloc] initWithArtistName:@"结束バンド"];
+            NSView *v10 = vc10.view;
+            win.contentView = v10;
+            v10.frame = NSMakeRect(0, 0, 954, 700);
+            [v10 layoutSubtreeIfNeeded];
+            [vc10 activate];
+            Pump(1.0);
+            [v10 layoutSubtreeIfNeeded];
+
+            RLPTheme *t10 = [RLPTheme current];
+            NSView *badge10 = FindId(v10, @"artist.style.badge");
+            const NSInteger badgeInk10 = Visible(badge10) ? InkPixelsAgainst(v10, badge10, t10.accentText) : 0;
+            Ck(Visible(badge10) && NSWidth(badge10.frame) >= 32.0 && NSHeight(badge10.frame) >= 20.0 && badgeInk10 >= 8,
+               @"A10a 风格与相似徽章尺寸正常且文字真实绘制（不被 layer 背景遮挡）",
+               [NSString stringWithFormat:@"vis=%d frame=%@ ink=%ld",
+                Visible(badge10), NSStringFromRect(badge10 ? badge10.frame : NSZeroRect), (long)badgeInk10]);
+
+            NSView *bioText10 = FindId(v10, @"artist.bio.text");
+            NSView *bioClip10 = bioText10 ? bioText10.superview : nil;
+            NSView *bioToggle10 = FindId(v10, @"artist.bio.toggle");
+            NSView *cardBio10 = FindId(v10, @"artist.card.bio");
+            if (Visible(bioClip10) && Visible(bioToggle10) && Visible(cardBio10)) {
+                const NSRect clipR = RectIn(bioClip10, cardBio10);
+                const NSRect toggleR = RectIn(bioToggle10, cardBio10);
+                Ck(!NSIntersectsRect(clipR, toggleR) && NSMaxY(clipR) <= NSMinY(toggleR) + 0.5,
+                   @"A10b 长简介折叠裁剪区与展开按钮不重叠",
+                   [NSString stringWithFormat:@"clip=%@ toggle=%@",
+                    NSStringFromRect(clipR), NSStringFromRect(toggleR)]);
+            } else {
+                Ck(NO, @"A10b 长简介折叠裁剪区与展开按钮不重叠",
+                   [NSString stringWithFormat:@"clip=%d toggle=%d cardBio=%d",
+                    Visible(bioClip10), Visible(bioToggle10), Visible(cardBio10)]);
+            }
+
+            NSView *row2 = FindId(v10, @"artist.sources.row.2");
+            NSView *open2 = FindId(v10, @"artist.sources.open.2");
+            NSView *copy2 = FindId(v10, @"artist.sources.copy.2");
+            NSView *title2 = row2 ? FindId(row2, @"artist.sources.title") : nil;
+            if (Visible(row2) && Visible(title2)) {
+                const NSRect titleR = RectIn(title2, row2);
+                const BOOL chipsHidden = (!Visible(open2) && !Visible(copy2));
+                const BOOL fullUse = NSMaxX(titleR) >= NSWidth(row2.bounds) - 20.0;
+                Ck(chipsHidden && fullUse,
+                   @"A10c 无 URL 来源行隐藏操作芯片并将宽度完整让给标题",
+                   [NSString stringWithFormat:@"chipsHidden=%d titleMaxX=%.1f rowW=%.1f",
+                    chipsHidden, NSMaxX(titleR), NSWidth(row2.bounds)]);
+            } else {
+                Ck(NO, @"A10c 无 URL 来源行隐藏操作芯片并将宽度完整让给标题",
+                   [NSString stringWithFormat:@"row2=%d title2=%d", Visible(row2), Visible(title2)]);
+            }
+
+            NSView *secField = FindId(v10, @"artist.summary.field.曲风定位");
+            NSView *cite1 = FindId(v10, @"artist.summary.cite.1");
+            NSView *cardSum10 = FindId(v10, @"artist.card.summary");
+            NSView *foot10 = FindId(v10, @"artist.summary.foot");
+            const NSInteger citeInk10 = Visible(cite1) ? InkPixels(v10, cite1, t10.bg2) : 0;
+            CGFloat bottomPad = -1.0;
+            if (Visible(cardSum10) && Visible(foot10)) {
+                bottomPad = NSHeight(cardSum10.bounds) - NSMaxY(RectIn(foot10, cardSum10));
+            }
+            Ck(Visible(secField) && Visible(cite1) && citeInk10 >= 12 &&
+               bottomPad >= 12.0 && bottomPad <= 17.0,
+               @"A10d summarySections 兜底、引用芯片绘制与摘要卡片底边距对称",
+               [NSString stringWithFormat:@"secField=%d cite=%d ink=%ld bottomPad=%.1f",
+                Visible(secField), Visible(cite1), (long)citeInk10, bottomPad]);
+
+            g_summarySections = @[];
+            g_summaryCitations = @[];
+        }
+
+        // ---- A11 点击文字不改变字体/字号，非内容标签禁用 selectable ----
+        {
+            g_materials = FixtureMaterials();
+            g_summaryFields = FixtureSummaryFields();
+            g_summaryOk = YES;
+            RLPArtistDetailViewController *vc11 =
+                [[RLPArtistDetailViewController alloc] initWithArtistName:@"Aimer"];
+            NSView *v11 = vc11.view;
+            NSWindow *kw = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1180, 720)
+                                                       styleMask:NSWindowStyleMaskTitled
+                                                         backing:NSBackingStoreBuffered
+                                                           defer:NO];
+            kw.releasedWhenClosed = NO;
+            kw.contentView = v11;
+            v11.frame = NSMakeRect(0, 0, 1180, 720);
+            [v11 layoutSubtreeIfNeeded];
+            [vc11 activate];
+            Pump(0.6);
+            [v11 layoutSubtreeIfNeeded];
+
+            NSMutableArray<NSView *> *all11 = [NSMutableArray array];
+            Collect(v11, all11);
+            NSMutableArray<NSString *> *badChromeSel = [NSMutableArray array];
+            NSSet<NSString *> *chromeIds = [NSSet setWithArray:@[
+                @"artist.hero.eyebrow", @"artist.hero.sub", @"artist.card.title",
+                @"artist.albums.title", @"artist.summary.status", @"artist.summary.foot",
+                @"efrow.label", @"artist.sources.date"
+            ]];
+            for (NSView *item in all11) {
+                if (![item isKindOfClass:[NSTextField class]]) continue;
+                NSTextField *tf = (NSTextField *)item;
+                NSString *ident = tf.identifier ?: @"";
+                if ([chromeIds containsObject:ident] || [ident hasPrefix:@"artist.sources.badge"]) {
+                    if (tf.selectable) [badChromeSel addObject:ident];
+                }
+            }
+            Ck(badChromeSel.count == 0,
+               @"A11a 非正文装饰标签（eyebrow/副标题/卡片标题/字段名/来源日期等）禁用 selectable",
+               [badChromeSel componentsJoinedByString:@", "]);
+
+            NSView *nameV = FindId(v11, @"artist.hero.name");
+            NSView *bioV = FindId(v11, @"artist.bio.text");
+            NSView *srcTitleV = FindId(v11, @"artist.sources.title");
+            NSView *efValV = FindId(v11, @"efrow.value");
+            NSMutableArray<NSString *> *badEditAttr = [NSMutableArray array];
+            for (NSView *item in @[ nameV ?: (id)[NSNull null], bioV ?: (id)[NSNull null],
+                                    srcTitleV ?: (id)[NSNull null], efValV ?: (id)[NSNull null] ]) {
+                if (![item isKindOfClass:[NSTextField class]]) {
+                    [badEditAttr addObject:@"missing"];
+                    continue;
+                }
+                NSTextField *tf = (NSTextField *)item;
+                if (!tf.selectable || !tf.allowsEditingTextAttributes) {
+                    [badEditAttr addObject:tf.identifier ?: @"tf"];
+                }
+            }
+            Ck(badEditAttr.count == 0,
+               @"A11b 可复制正文（艺人名/字段值/简介/来源标题）启用 selectable + allowsEditingTextAttributes",
+               [badEditAttr componentsJoinedByString:@", "]);
+
+            auto checkClickPreservesFont = [&](NSTextField *tf, CGFloat wantPt, BOOL wantBold,
+                                               CGFloat wantKern, CGFloat wantLineSpacing, NSString *tag) -> NSString * {
+                if (!tf) return [NSString stringWithFormat:@"%@(nil)", tag];
+                if (fabs(tf.font.pointSize - wantPt) > 0.25) {
+                    return [NSString stringWithFormat:@"%@(baseFont=%.1f want=%.1f)", tag, tf.font.pointSize, wantPt];
+                }
+                [kw makeFirstResponder:tf];
+                [tf selectText:nil];
+                Pump(0.05);
+                NSResponder *fr = kw.firstResponder;
+                if (![fr isKindOfClass:[NSTextView class]]) {
+                    return [NSString stringWithFormat:@"%@(firstResponder=%@)", tag, NSStringFromClass([fr class])];
+                }
+                NSTextView *fe = (NSTextView *)fr;
+                NSFont *feFont = fe.font;
+                if (!feFont && fe.textStorage.length > 0) {
+                    feFont = [fe.textStorage attribute:NSFontAttributeName atIndex:0 effectiveRange:nil];
+                }
+                NSFont *runFont = (fe.textStorage.length > 0)
+                    ? [fe.textStorage attribute:NSFontAttributeName atIndex:0 effectiveRange:nil]
+                    : feFont;
+                NSNumber *runKern = (fe.textStorage.length > 0)
+                    ? [fe.textStorage attribute:NSKernAttributeName atIndex:0 effectiveRange:nil]
+                    : nil;
+                NSParagraphStyle *runPs = (fe.textStorage.length > 0)
+                    ? [fe.textStorage attribute:NSParagraphStyleAttributeName atIndex:0 effectiveRange:nil]
+                    : nil;
+                const BOOL isBold = runFont && ((runFont.fontDescriptor.symbolicTraits & NSFontDescriptorTraitBold) != 0);
+                if (!feFont || fabs(feFont.pointSize - wantPt) > 0.25 ||
+                    !runFont || fabs(runFont.pointSize - wantPt) > 0.25 ||
+                    (wantBold && !isBold) ||
+                    (fabs(wantKern) > 0.01 && (!runKern || fabs(runKern.doubleValue - wantKern) > 0.05)) ||
+                    (wantLineSpacing > 0.1 && (!runPs || fabs(runPs.lineSpacing - wantLineSpacing) > 0.2))) {
+                    return [NSString stringWithFormat:@"%@(fe=%.1f run=%.1f bold=%d kern=%.2f ls=%.1f)",
+                            tag, feFont ? feFont.pointSize : -1.0, runFont ? runFont.pointSize : -1.0,
+                            isBold, runKern ? runKern.doubleValue : 0.0, runPs ? runPs.lineSpacing : 0.0];
+                }
+                [kw makeFirstResponder:nil];
+                return nil;
+            };
+
+            NSMutableArray<NSString *> *fontDrift = [NSMutableArray array];
+            for (NSString *err in @[
+                checkClickPreservesFont((NSTextField *)nameV, 28.0, YES, -0.5, 0.0, @"name") ?: @"",
+                checkClickPreservesFont((NSTextField *)efValV, 12.5, NO, 0.0, 6.0, @"efrow.value") ?: @"",
+                checkClickPreservesFont((NSTextField *)bioV, 12.5, NO, 0.0, 8.0, @"bio") ?: @"",
+                checkClickPreservesFont((NSTextField *)srcTitleV, 12.5, YES, 0.0, 0.0, @"source.title") ?: @"",
+            ]) {
+                if (err.length) [fontDrift addObject:err];
+            }
+            Ck(fontDrift.count == 0,
+               @"A11c 点击选中艺人名与卡片文字后 field editor 保持原字号/字重/字距/行距（不变小、不变字体）",
+               [fontDrift componentsJoinedByString:@", "]);
+
+            // ---- A12 Hero 艺人名排版与对齐 ----
+            NSView *eyebrow12 = FindId(v11, @"artist.hero.eyebrow");
+            NSView *sub12 = FindId(v11, @"artist.hero.sub");
+            NSView *avatar12 = FindId(v11, @"artist.hero.avatar");
+            NSView *btnAlb12 = FindId(v11, @"artist.hero.btn.albums");
+            NSTextField *nameTF = (NSTextField *)nameV;
+            const NSRect rE12 = RectIn(eyebrow12, v11);
+            const NSRect rN12 = RectIn(nameV, v11);
+            const NSRect rS12 = RectIn(sub12, v11);
+            const NSRect rA12 = RectIn(avatar12, v11);
+            const NSRect rB12 = RectIn(btnAlb12, v11);
+            const CGFloat gapAbove = NSMinY(rE12) - NSMaxY(rN12);
+            const CGFloat gapBelow = NSMinY(rN12) - NSMaxY(rS12);
+            const BOOL heroAligned = Visible(nameV) && Visible(sub12) &&
+                                     !nameTF.usesSingleLineMode && nameTF.maximumNumberOfLines == 1 &&
+                                     NSHeight(rN12) >= 32.0 && NSHeight(rN12) <= 36.0 &&
+                                     fabs(NSMinX(rE12) - NSMinX(rN12)) < 0.5 &&
+                                     fabs(NSMinX(rS12) - NSMinX(rN12)) < 0.5 &&
+                                     fabs(gapAbove - gapBelow) <= 1.5 &&
+                                     NSMinY(rB12) >= NSMinY(rA12) - 1.0;
+            Ck(heroAligned,
+               @"A12 Hero 艺人名不使用 singleLineMode 偏心框，且与 eyebrow/副标题左对齐、上下间距对称",
+               [NSString stringWithFormat:@"single=%d h=%.1f x=%.1f/%.1f/%.1f gap=%.1f/%.1f btnMinY=%.1f avMinY=%.1f",
+                nameTF.usesSingleLineMode, NSHeight(rN12), NSMinX(rE12), NSMinX(rN12), NSMinX(rS12),
+                gapAbove, gapBelow, NSMinY(rB12), NSMinY(rA12)]);
+            kw.contentView = nil;
+        }
+
+        // ---- A13 多专辑（43 张专辑）Across 宽/窄/168边界/传统滚动条宽度全量显示且不裁切 ----
+        {
+            NSMutableArray<NSDictionary *> *many = [NSMutableArray arrayWithCapacity:43];
+            for (NSInteger i = 0; i < 43; ++i) {
+                [many addObject:@{
+                    @"k": [NSString stringWithFormat:@"aimer-%ld", (long)i],
+                    @"name": [NSString stringWithFormat:@"Album %02ld", (long)(i + 1)],
+                    @"artist": @"Aimer",
+                    @"year": @(2011 + (i % 15)),
+                    @"n": @(8 + (i % 6)),
+                    @"dur": @(2100.0 + i * 30.0),
+                    @"sr": @96000, @"bits": @24, @"cv": @NO
+                }];
+            }
+            g_albums = many;
+            g_materials = FixtureMaterials();
+            g_summaryFields = FixtureSummaryFields();
+            g_summaryOk = YES;
+
+            RLPArtistDetailViewController *vc13 =
+                [[RLPArtistDetailViewController alloc] initWithArtistName:@"Aimer"];
+            NSView *v13 = vc13.view;
+            win.contentView = v13;
+            v13.frame = NSMakeRect(0, 0, 1710, 714);
+            [v13 layoutSubtreeIfNeeded];
+            [vc13 activate];
+            Pump(0.5);
+            [v13 layoutSubtreeIfNeeded];
+
+            NSCollectionView *col13 = (NSCollectionView *)FindId(v13, @"artist.albums");
+            NSView *playAll13 = FindId(v13, @"artist.albums.playall");
+            NSScrollView *sv13 = col13.enclosingScrollView;
+            NSView *doc13 = sv13.documentView;
+
+            NSMutableArray<NSString *> *gridFailures = [NSMutableArray array];
+            const CGFloat widths13[] = { 1710.0, 1518.0, 1366.0, 674.0 };
+            for (size_t wi = 0; wi < sizeof(widths13) / sizeof(widths13[0]); ++wi) {
+                const CGFloat tw = widths13[wi];
+                const CGFloat th = (wi == 2) ? 900.0 : 714.0;
+                v13.frame = NSMakeRect(0, 0, tw, th);
+                [v13 layoutSubtreeIfNeeded];
+                Pump(0.15);
+                [v13 layoutSubtreeIfNeeded];
+
+                const CGFloat clipW = sv13.contentView.bounds.size.width;
+                const CGFloat contentW = MAX(80.0, clipW - 44.0);
+                const CGFloat gapX = 16.0, minItemW = 148.0;
+                const NSInteger cols = MAX(1, (NSInteger)floor((contentW + gapX) / (minItemW + gapX)));
+                const CGFloat wantItemW = MAX(80.0, floor((contentW - gapX * (CGFloat)(cols - 1)) / (CGFloat)cols));
+                const CGFloat wantItemH = wantItemW + 46.0;
+
+                if (fabs(NSWidth(doc13.frame) - clipW) > 1.0) {
+                    [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f docW=%.1f!=clipW=%.1f",
+                                             tw, NSWidth(doc13.frame), clipW]];
+                }
+                if (NSMaxX(col13.frame) > clipW - 22.0 + 1.0) {
+                    [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f colMaxX=%.1f>right=%.1f",
+                                             tw, NSMaxX(col13.frame), clipW - 22.0]];
+                }
+                if (Visible(playAll13) && NSMaxX(col13.frame) > NSMaxX(playAll13.frame) + 1.0) {
+                    [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f colMaxX=%.1f>playAllMaxX=%.1f",
+                                             tw, NSMaxX(col13.frame), NSMaxX(playAll13.frame)]];
+                }
+                if (NSHeight(doc13.frame) < NSMaxY(col13.frame) + 90.0) {
+                    [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f docH=%.1f<colBottom+90=%.1f",
+                                             tw, NSHeight(doc13.frame), NSMaxY(col13.frame) + 90.0]];
+                }
+                NSCollectionViewFlowLayout *fl = (NSCollectionViewFlowLayout *)col13.collectionViewLayout;
+                if (!fl || fabs(fl.itemSize.width - wantItemW) > 0.5 || fabs(fl.itemSize.height - wantItemH) > 0.5) {
+                    [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f item=%.1fx%.1f want=%.1fx%.1f",
+                                             tw, fl ? fl.itemSize.width : -1.0, fl ? fl.itemSize.height : -1.0,
+                                             wantItemW, wantItemH]];
+                }
+                for (NSInteger idx = 0; idx < 43; ++idx) {
+                    NSIndexPath *ip = [NSIndexPath indexPathForItem:idx inSection:0];
+                    NSCollectionViewLayoutAttributes *attr = [fl layoutAttributesForItemAtIndexPath:ip];
+                    if (!attr) {
+                        [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f attrNil#%ld", tw, (long)idx]];
+                        break;
+                    }
+                    if (fabs(attr.frame.size.width - wantItemW) > 0.5 ||
+                        fabs(attr.frame.size.height - wantItemH) > 0.5 ||
+                        NSMaxX(attr.frame) > col13.bounds.size.width + 0.5 ||
+                        NSMaxY(attr.frame) > col13.bounds.size.height + 0.5) {
+                        [gridFailures addObject:[NSString stringWithFormat:@"w=%.0f item#%ld frame=%@ col=%@",
+                                                 tw, (long)idx, NSStringFromRect(attr.frame),
+                                                 NSStringFromSize(col13.bounds.size)]];
+                        break;
+                    }
+                }
+            }
+
+            // 回到 1710 滚到底部，核实第 43 张专辑真实实例化且没有被裁出边界
+            v13.frame = NSMakeRect(0, 0, 1710, 714);
+            [v13 layoutSubtreeIfNeeded];
+            const CGFloat maxScrollY = MAX(0.0, NSHeight(doc13.frame) - NSHeight(sv13.contentView.bounds));
+            [sv13.contentView scrollToPoint:NSMakePoint(0, maxScrollY)];
+            [sv13 reflectScrolledClipView:sv13.contentView];
+            Pump(0.15);
+            [v13 layoutSubtreeIfNeeded];
+            NSCollectionViewItem *lastItem = [col13 itemAtIndexPath:[NSIndexPath indexPathForItem:42 inSection:0]];
+            if (!lastItem || NSMaxY(lastItem.view.frame) > col13.bounds.size.height + 0.5 ||
+                NSMaxX(lastItem.view.frame) > col13.bounds.size.width + 0.5) {
+                [gridFailures addObject:[NSString stringWithFormat:@"bottomItem42=%@ col=%@",
+                                         lastItem ? NSStringFromRect(lastItem.view.frame) : @"nil",
+                                         NSStringFromSize(col13.bounds.size)]];
+            }
+            Ck(gridFailures.count == 0,
+               @"A13 43张专辑在 1710/1518/1366/674 宽及滚动到底部时均完整排布，不溢出、不吞尾项",
+               [gridFailures componentsJoinedByString:@" | "]);
+
+            // ---- A14 回归：向下渐进滚动时，_collection 最右列与 contentSize 绝不能被 enclosingScrollView 宽度拉宽溢出 ----
+            NSMutableArray<NSString *> *scrollFailures = [NSMutableArray array];
+            const CGFloat scrollWidths[] = { 1710.0, 1518.0, 1366.0, 674.0 };
+            for (size_t wi = 0; wi < sizeof(scrollWidths) / sizeof(scrollWidths[0]); ++wi) {
+                const CGFloat tw = scrollWidths[wi];
+                const CGFloat th = (wi == 2) ? 900.0 : 714.0;
+                v13.frame = NSMakeRect(0, 0, tw, th);
+                [sv13.contentView scrollToPoint:NSZeroPoint];
+                [sv13 reflectScrolledClipView:sv13.contentView];
+                [v13 layoutSubtreeIfNeeded];
+                Pump(0.1);
+                [v13 layoutSubtreeIfNeeded];
+
+                const CGFloat maxSY = MAX(0.0, NSHeight(doc13.frame) - NSHeight(sv13.contentView.bounds));
+                const CGFloat offsets[] = {
+                    60.0, 140.0, 260.0, 420.0, 620.0, maxSY
+                };
+                for (size_t oi = 0; oi < sizeof(offsets) / sizeof(offsets[0]); ++oi) {
+                    const CGFloat sy = MIN(maxSY, offsets[oi]);
+                    [sv13.contentView scrollToPoint:NSMakePoint(0, sy)];
+                    [sv13 reflectScrolledClipView:sv13.contentView];
+                    Pump(0.08);
+                    [v13 layoutSubtreeIfNeeded];
+
+                    NSCollectionViewFlowLayout *fl = (NSCollectionViewFlowLayout *)col13.collectionViewLayout;
+                    if (!fl || fl.collectionViewContentSize.width > NSWidth(col13.bounds) + 0.5) {
+                        [scrollFailures addObject:[NSString stringWithFormat:@"w=%.0f sy=%.0f contentW=%.1f>colW=%.1f",
+                                                   tw, sy, fl ? fl.collectionViewContentSize.width : -1.0,
+                                                   NSWidth(col13.bounds)]];
+                        break;
+                    }
+                    NSArray<NSCollectionViewItem *> *visItems = col13.visibleItems ?: @[];
+                    if (visItems.count == 0) {
+                        for (NSInteger idx = 0; idx < 43; ++idx) {
+                            NSCollectionViewItem *it = [col13 itemAtIndexPath:[NSIndexPath indexPathForItem:idx inSection:0]];
+                            if (it) visItems = [visItems arrayByAddingObject:it];
+                        }
+                    }
+                    for (NSCollectionViewItem *it in visItems) {
+                        const NSRect inDoc = [it.view convertRect:it.view.bounds toView:doc13];
+                        if (NSMaxX(it.view.frame) > NSWidth(col13.bounds) + 0.5 ||
+                            (Visible(playAll13) && NSMaxX(inDoc) > NSMaxX(playAll13.frame) + 0.5)) {
+                            [scrollFailures addObject:[NSString stringWithFormat:@"w=%.0f sy=%.0f item=%@ inDoc=%@ colW=%.1f playMax=%.1f",
+                                                       tw, sy, NSStringFromRect(it.view.frame),
+                                                       NSStringFromRect(inDoc), NSWidth(col13.bounds),
+                                                       NSMaxX(playAll13.frame)]];
+                            break;
+                        }
+                    }
+                    for (NSInteger idx = 0; idx < 43; ++idx) {
+                        NSCollectionViewLayoutAttributes *attr =
+                            [fl layoutAttributesForItemAtIndexPath:[NSIndexPath indexPathForItem:idx inSection:0]];
+                        if (!attr || NSMaxX(attr.frame) > NSWidth(col13.bounds) + 0.5) {
+                            [scrollFailures addObject:[NSString stringWithFormat:@"w=%.0f sy=%.0f attr#%ld=%@ colW=%.1f",
+                                                       tw, sy, (long)idx,
+                                                       attr ? NSStringFromRect(attr.frame) : @"nil",
+                                                       NSWidth(col13.bounds)]];
+                            break;
+                        }
+                    }
+                    if (scrollFailures.count > 0) break;
+                }
+            }
+            Ck(scrollFailures.count == 0,
+               @"A14 向下滚动后所有专辑卡片右缘仍严丝合缝对齐内容区（不因滚动拉宽间隙并溢出滚动条）",
+               [scrollFailures componentsJoinedByString:@" | "]);
+            g_albums = nil;
         }
 
         std::printf("结果：%d passed, %d failed\n", gPass, gFail);

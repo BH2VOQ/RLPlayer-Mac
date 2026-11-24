@@ -39,10 +39,27 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, strong) NSScrollView *scroll;
 @property (nonatomic, strong) NSStackView *stack;
 @property (nonatomic, strong) NSStackView *topDeviceBar;
+@property (nonatomic, strong) NSTextField *topBackendLabel;
+@property (nonatomic, strong) NSSegmentedControl *topBackendSeg;
+@property (nonatomic, strong) NSButton *topHogCheck;
 @property (nonatomic, strong) NSTextField *topDeviceLabel;
 @property (nonatomic, strong) NSPopUpButton *topDevicePopup;
 @property (nonatomic, strong) NSButton *topDeviceRefreshBtn;
 @property (nonatomic, strong) NSPopUpButton *devicePopup;
+@property (nonatomic, strong) NSStackView *upnpWrap;
+@property (nonatomic, strong) NSTextField *upnpLabel;
+@property (nonatomic, strong) NSPopUpButton *upnpDevicePopup;
+@property (nonatomic, strong) NSButton *upnpScanBtn;
+@property (nonatomic, strong) NSTextField *upnpStatusLabel;
+@property (nonatomic, strong) NSPopUpButton *backendPopup;
+@property (nonatomic, strong) NSSegmentedControl *dsdSeg;
+@property (nonatomic, strong) NSPopUpButton *shaperPopup;
+@property (nonatomic, strong) NSPopUpButton *modFamilyPopup;
+@property (nonatomic, strong) NSPopUpButton *modOrderPopup;
+@property (nonatomic, strong) NSPopUpButton *modCutPopup;
+@property (nonatomic, strong) NSPopUpButton *ratePopup;
+@property (nonatomic, strong) NSButton *hogCheck;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSTextField *> *chainValues;
 @property (nonatomic, strong) NSTextField *sigOut;
 @property (nonatomic, strong) NSTextField *statusMessage;
 @property (nonatomic, strong) NSTextField *heroSpecLabel;
@@ -58,11 +75,15 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, assign) BOOL abCompact;
 @property (nonatomic, strong) NSMutableArray<NSView *> *abSlotCards;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *abSlots;
+- (void)onTopBackendChanged:(NSSegmentedControl *)sender;
+- (void)onHogChanged:(NSButton *)sender;
 @property (nonatomic, strong) NSMutableArray<NSButton *> *abButtons;
 @property (nonatomic, strong) NSMutableArray<NSTextField *> *abSummaries;
 @property (nonatomic, assign) NSInteger abActive;
 @property (nonatomic, copy) NSArray<NSDictionary *> *devices;
 @property (nonatomic, assign) NSUInteger devicesSeq;
+@property (nonatomic, copy) NSArray<NSDictionary<NSString *, NSString *> *> *upnpDevices;
+@property (nonatomic, assign) NSUInteger upnpDevicesSeq;
 @property (nonatomic, assign) BOOL peqBypassed;
 @property (nonatomic, copy) NSArray<NSString *> *eqPresetNames;
 @property (nonatomic, strong) NSPopUpButton *eqPresetPopup;
@@ -107,6 +128,12 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)reloadDevices;
 - (void)reloadSettings;
 - (void)onDeviceChanged:(NSPopUpButton *)sender;
+- (void)onBackendChanged:(NSPopUpButton *)sender;
+- (void)selectUpnpDeviceFromPopup:(NSPopUpButton *)sender;
+- (void)reloadRates;
+- (void)onRefreshDevicesClicked:(id)sender;
+- (void)onRefreshUpnpDevicesClicked:(id)sender;
+- (void)reloadUpnpDevicesForce:(BOOL)force;
 - (void)applyDevicesPayload:(nullable NSDictionary *)json forSeq:(NSUInteger)seq;
 - (void)applyLanguage;
 - (void)maybeAutoAnalyzeFromStatus;
@@ -148,9 +175,18 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 @property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *heldDevicesGets;
 @property (nonatomic, assign) BOOL returnNilForDevicesGet;
 
+@property (nonatomic, copy) NSArray<NSDictionary *> *castDevicesGetList;
+@property (nonatomic, assign) BOOL holdCastDevicesGet;
+@property (nonatomic, strong) NSMutableArray<RLPJSONCompletion> *heldCastDevicesGets;
+@property (nonatomic, assign) BOOL returnNilForCastDevicesGet;
+@property (nonatomic, assign) BOOL failCastDevicesGet;
+@property (nonatomic, copy, nullable) NSString *castDevicesHint;
+@property (nonatomic, strong) NSMutableArray<NSString *> *getLog;
+
 @property (nonatomic, assign) BOOL failSettingsPost;
 @property (nonatomic, assign) BOOL returnNilForSettingsPost;
 @property (nonatomic, copy, nullable) NSString *settingsPostError;
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, NSString *> *customPostSettingsResponseKV;
 
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *settingsKV;
 @property (nonatomic, assign) NSInteger cancelCount;
@@ -173,6 +209,9 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
         _heldProfilesGets = [NSMutableArray array];
         _devicesGetList = @[];
         _heldDevicesGets = [NSMutableArray array];
+        _castDevicesGetList = @[];
+        _heldCastDevicesGets = [NSMutableArray array];
+        _getLog = [NSMutableArray array];
         _settingsKV = [NSMutableDictionary dictionary];
         _postLog = [NSMutableArray array];
         _heldGetDatas = [NSMutableArray array];
@@ -214,6 +253,29 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
 - (void)getJSON:(NSString *)path completion:(nullable RLPJSONCompletion)done {
     if (!done) return;
     NSString *p = path ?: @"";
+    [self.getLog addObject:p];
+    if ([p hasPrefix:@"/api/cast/devices"]) {
+        if (self.holdCastDevicesGet) {
+            [self.heldCastDevicesGets addObject:[done copy]];
+            return;
+        }
+        NSDictionary *resp = nil;
+        if (!self.returnNilForCastDevicesGet) {
+            if (self.failCastDevicesGet) {
+                resp = @{@"ok": @NO, @"error": @"scan_timeout"};
+            } else {
+                NSMutableDictionary *d = [@{
+                    @"ok": @YES,
+                    @"n": @(self.castDevicesGetList.count),
+                    @"devices": self.castDevicesGetList ?: @[],
+                } mutableCopy];
+                if (self.castDevicesHint.length) d[@"hint"] = self.castDevicesHint;
+                resp = d;
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ done(resp); });
+        return;
+    }
     if ([p isEqualToString:@"/api/peq"]) {
         if (self.holdPeqGet) {
             [self.heldPeqGets addObject:[done copy]];
@@ -343,7 +405,12 @@ static void Ck(BOOL ok, const char *what, NSString *detail) {
             NSString *v = [[pair substringFromIndex:eq.location + 1] stringByRemovingPercentEncoding] ?: @"";
             if (k.length) self.settingsKV[k] = v;
         }
-        if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(@{@"ok": @YES}); });
+        NSDictionary *resp = @{@"ok": @YES};
+        if (self.customPostSettingsResponseKV) {
+            [self.settingsKV addEntriesFromDictionary:self.customPostSettingsResponseKV];
+            resp = @{@"ok": @YES, @"kv": [self.settingsKV copy]};
+        }
+        if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(resp); });
         return;
     }
     if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(@{@"ok": @YES}); });
@@ -1755,6 +1822,476 @@ int main() {
 
             if (savedABSlotsPref) [ud setObject:savedABSlotsPref forKey:@"RLPWorkbenchABSlots"];
             else [ud removeObjectForKey:@"RLPWorkbenchABSlots"];
+        }
+
+        // -----------------------------------------------------------------
+        // 14. UPnP 渲染器选择契约：后端切换联动、双下拉同步、/api/cast/devices、
+        //     乱序丢弃、离线保存值/空态、失败回滚、英文文案、窄/宽布局不溢出
+        // -----------------------------------------------------------------
+        {
+            RLPSetLanguage(@"zh");
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.holdDevicesGet = NO;
+            g_spy.returnNilForDevicesGet = NO;
+            g_spy.holdCastDevicesGet = NO;
+            g_spy.returnNilForCastDevicesGet = NO;
+            g_spy.failCastDevicesGet = NO;
+            g_spy.castDevicesHint = nil;
+            g_spy.devicesGetList = @[
+                @{@"id": @"dac1", @"name": @"Local USB DAC", @"default": @YES},
+            ];
+            g_spy.castDevicesGetList = @[
+                @{
+                    @"name": @"Living Room Streamer",
+                    @"friendlyName": @"Living Room Streamer",
+                    @"model": @"WiiM Pro",
+                    @"host": @"192.168.1.50",
+                    @"port": @49152,
+                    @"location": @"http://192.168.1.50:49152/desc.xml",
+                    @"kind": @"upnp",
+                    @"hasAVTransport": @YES,
+                },
+                @{
+                    @"name": @"Study HomePod",
+                    @"friendlyName": @"Study HomePod",
+                    @"model": @"AirPlay · HomePod · 44100 Hz/16 bit",
+                    @"host": @"192.168.1.80",
+                    @"port": @7000,
+                    @"location": @"airplay://192.168.1.80:7000",
+                    @"kind": @"airplay",
+                    @"hasAVTransport": @YES,
+                },
+            ];
+            g_spy.settingsKV = [@{
+                @"backend": @"upnp",
+                @"device": @"dac1",
+                @"upnpdev": @"http://192.168.1.50:49152/desc.xml",
+                @"hogexcl": @"1",
+            } mutableCopy];
+            [g_spy.postLog removeAllObjects];
+            [g_spy.getLog removeAllObjects];
+
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            [vc reloadDevices];
+            [vc reloadSettings];
+            Pump(0.08);
+
+            BOOL queriedRatesUpnp = NO;
+            for (NSString *g in g_spy.getLog) {
+                if ([g containsString:@"/api/rates?backend=upnp&upnpdev=http%3A%2F%2F192.168.1.50%3A49152%2Fdesc.xml"]) {
+                    queriedRatesUpnp = YES;
+                }
+            }
+            Ck(!vc.upnpWrap.hidden && vc.devicePopup.hidden && !vc.hogCheck.enabled &&
+               [vc.topDeviceLabel.stringValue isEqualToString:@"目标渲染器"] &&
+               vc.upnpDevices.count == 2 &&
+               [vc.topDevicePopup.titleOfSelectedItem containsString:@"Living Room Streamer"] &&
+               [vc.upnpDevicePopup.titleOfSelectedItem isEqualToString:vc.topDevicePopup.titleOfSelectedItem] &&
+               [vc.sigOut.stringValue containsString:@"Living Room Streamer"] &&
+               [vc.sigOut.stringValue containsString:@"upnp"] &&
+               [vc.upnpStatusLabel.stringValue containsString:@"2"] &&
+               queriedRatesUpnp,
+               "14a: backend=upnp reveals wb.upnp.wrap, hides wb.device, syncs top+rack UPnP popups, disables hog, and loads /api/rates",
+               [NSString stringWithFormat:@"upnpHidden=%d devHidden=%d hogEn=%d topLab=%@ top=%@ rack=%@ sigOut=%@ msg=%@ rates=%d",
+                vc.upnpWrap.hidden, vc.devicePopup.hidden, vc.hogCheck.enabled,
+                vc.topDeviceLabel.stringValue, vc.topDevicePopup.titleOfSelectedItem,
+                vc.upnpDevicePopup.titleOfSelectedItem, vc.sigOut.stringValue,
+                vc.upnpStatusLabel.stringValue, queriedRatesUpnp]);
+
+            // 14b: 从 topDevicePopup 与 upnpDevicePopup 切选 UPnP 设备，写 upnpdev=...；失败回滚
+            [g_spy.postLog removeAllObjects];
+            [g_spy.getLog removeAllObjects];
+            NSInteger apIdx = -1;
+            for (NSInteger i = 0; i < (NSInteger)vc.topDevicePopup.numberOfItems; ++i) {
+                if ([[vc.topDevicePopup itemAtIndex:i].title containsString:@"Study HomePod"]) { apIdx = i; break; }
+            }
+            if (apIdx >= 0) {
+                [vc.topDevicePopup selectItemAtIndex:apIdx];
+                [vc onDeviceChanged:vc.topDevicePopup];
+                Pump(0.06);
+            }
+            BOOL postedAirPlay = NO;
+            for (NSDictionary *p in g_spy.postLog) {
+                if ([p[@"path"] isEqualToString:@"/api/settings"] &&
+                    [p[@"body"] isEqualToString:@"upnpdev=airplay%3A%2F%2F192.168.1.80%3A7000"]) {
+                    postedAirPlay = YES;
+                }
+            }
+            Ck(apIdx >= 0 && postedAirPlay &&
+               [vc.settings[@"upnpdev"] isEqualToString:@"airplay://192.168.1.80:7000"] &&
+               [vc.upnpDevicePopup.titleOfSelectedItem containsString:@"Study HomePod"] &&
+               [vc.topDevicePopup.titleOfSelectedItem containsString:@"Study HomePod"] &&
+               [vc.sigOut.stringValue containsString:@"Study HomePod"] &&
+               [vc.chainValues[@"out"].stringValue containsString:@"Study HomePod"],
+               "14b-1: picking AirPlay entry from topDevicePopup posts upnpdev and syncs rack/sigOut/chain",
+               [NSString stringWithFormat:@"posted=%d set=%@ rack=%@ sigOut=%@ chain=%@",
+                postedAirPlay, vc.settings[@"upnpdev"], vc.upnpDevicePopup.titleOfSelectedItem,
+                vc.sigOut.stringValue, vc.chainValues[@"out"].stringValue]);
+
+            // 失败（ok:NO 与 nil）均回滚到 Study HomePod
+            g_spy.failSettingsPost = YES;
+            NSInteger lrIdx = -1;
+            for (NSInteger i = 0; i < (NSInteger)vc.upnpDevicePopup.numberOfItems; ++i) {
+                if ([[vc.upnpDevicePopup itemAtIndex:i].title containsString:@"Living Room Streamer"]) { lrIdx = i; break; }
+            }
+            if (lrIdx >= 0) {
+                [vc.upnpDevicePopup selectItemAtIndex:lrIdx];
+                [vc onDeviceChanged:vc.upnpDevicePopup];
+                Pump(0.06);
+            }
+            g_spy.failSettingsPost = NO;
+            const BOOL rollbackOkNo =
+                [vc.settings[@"upnpdev"] isEqualToString:@"airplay://192.168.1.80:7000"] &&
+                [vc.topDevicePopup.titleOfSelectedItem containsString:@"Study HomePod"] &&
+                [vc.upnpDevicePopup.titleOfSelectedItem containsString:@"Study HomePod"] &&
+                [vc.statusMessage.stringValue isEqualToString:RLPTr(@"保存失败，已保留原值")];
+
+            g_spy.returnNilForSettingsPost = YES;
+            if (lrIdx >= 0) {
+                [vc.upnpDevicePopup selectItemAtIndex:lrIdx];
+                [vc onDeviceChanged:vc.upnpDevicePopup];
+                Pump(0.06);
+            }
+            g_spy.returnNilForSettingsPost = NO;
+            const BOOL rollbackNil =
+                [vc.settings[@"upnpdev"] isEqualToString:@"airplay://192.168.1.80:7000"] &&
+                [vc.topDevicePopup.titleOfSelectedItem containsString:@"Study HomePod"] &&
+                [vc.upnpDevicePopup.titleOfSelectedItem containsString:@"Study HomePod"];
+            Ck(rollbackOkNo && rollbackNil,
+               "14b-2: failed UPnP device POST (ok:NO and nil) rolls back popups and settings",
+               [NSString stringWithFormat:@"okNo=%d nil=%d top=%@ rack=%@",
+                rollbackOkNo, rollbackNil, vc.topDevicePopup.titleOfSelectedItem, vc.upnpDevicePopup.titleOfSelectedItem]);
+
+            // 14c: 切回 coreaudio 隐藏 upnpWrap 恢复 CoreAudio 设备栏；再切到 upnp 触发 ?scan=1
+            [vc.backendPopup selectItemAtIndex:0]; // coreaudio
+            [vc onBackendChanged:vc.backendPopup];
+            Pump(0.06);
+            const BOOL backToCoreAudio =
+                vc.upnpWrap.hidden && !vc.devicePopup.hidden && vc.hogCheck.enabled &&
+                [vc.topDeviceLabel.stringValue isEqualToString:@"输出设备"] &&
+                [vc.topDevicePopup.titleOfSelectedItem isEqualToString:@"Local USB DAC"];
+
+            // 重置 loaded 标志验证再次切到 upnp 会扫描，且失败切换回滚
+            g_spy.failSettingsPost = YES;
+            [vc.backendPopup selectItemAtIndex:2]; // upnp (POST fails)
+            [vc onBackendChanged:vc.backendPopup];
+            Pump(0.06);
+            g_spy.failSettingsPost = NO;
+            const BOOL failSwitchRollback =
+                vc.upnpWrap.hidden && !vc.devicePopup.hidden &&
+                [[vc.backendPopup selectedItem].title isEqualToString:RLPTr(@"硬件直通（独占）")];
+
+            [g_spy.getLog removeAllObjects];
+            [vc onRefreshDevicesClicked:vc.topDeviceRefreshBtn]; // 在 coreaudio 下调 /api/devices
+            Pump(0.05);
+            [vc.backendPopup selectItemAtIndex:2]; // upnp
+            [vc onBackendChanged:vc.backendPopup];
+            Pump(0.06);
+            [vc onRefreshUpnpDevicesClicked:vc.upnpScanBtn];
+            Pump(0.06);
+            BOOL sawScan1 = NO;
+            for (NSString *g in g_spy.getLog) {
+                if ([g isEqualToString:@"/api/cast/devices?scan=1"]) sawScan1 = YES;
+            }
+            Ck(backToCoreAudio && failSwitchRollback && !vc.upnpWrap.hidden && sawScan1,
+               "14c: backend coreaudio<->upnp toggles rack/topBar, rolls back failed switch, and ?scan=1 runs on rediscover",
+               [NSString stringWithFormat:@"back=%d failRb=%d upnpHid=%d scan1=%d",
+                backToCoreAudio, failSwitchRollback, vc.upnpWrap.hidden, sawScan1]);
+
+            // 14d: /api/cast/devices 异步乱序丢弃旧回包
+            g_spy.holdCastDevicesGet = YES;
+            [g_spy.heldCastDevicesGets removeAllObjects];
+            [vc reloadUpnpDevicesForce:YES]; // req1 (older)
+            RLPJSONCompletion staleCastGet = g_spy.heldCastDevicesGets.firstObject;
+            [g_spy.heldCastDevicesGets removeAllObjects];
+            g_spy.holdCastDevicesGet = NO;
+
+            g_spy.castDevicesGetList = @[
+                @{@"friendlyName": @"FreshUPnP", @"location": @"http://192.168.1.66:49152/desc.xml", @"kind": @"upnp"},
+            ];
+            [vc reloadUpnpDevicesForce:YES]; // req2 (newer)
+            Pump(0.06);
+            if (staleCastGet) {
+                staleCastGet(@{
+                    @"ok": @YES,
+                    @"devices": @[@{@"friendlyName": @"StaleUPnP", @"location": @"http://stale/desc.xml", @"kind": @"upnp"}],
+                });
+            }
+            Pump(0.05);
+            BOOL hasFresh = NO, hasStale = NO;
+            for (NSInteger i = 0; i < (NSInteger)vc.upnpDevicePopup.numberOfItems; ++i) {
+                NSString *t = [vc.upnpDevicePopup itemAtIndex:i].title ?: @"";
+                if ([t containsString:@"FreshUPnP"]) hasFresh = YES;
+                if ([t containsString:@"StaleUPnP"]) hasStale = YES;
+            }
+            Ck(hasFresh && !hasStale,
+               "14d: stale /api/cast/devices response is discarded by upnpDevicesSeq",
+               [NSString stringWithFormat:@"hasFresh=%d hasStale=%d", hasFresh, hasStale]);
+
+            // 14e: 离线保存值回显 + 空列表 + 失败提示 + 英文全译无残留中文
+            g_spy.castDevicesGetList = @[];
+            [vc reloadUpnpDevicesForce:NO];
+            Pump(0.06);
+            const BOOL zhOfflineSaved =
+                [vc.upnpDevicePopup.titleOfSelectedItem containsString:@"（上次选择 · 离线/需刷新）"] &&
+                [vc.upnpDevicePopup.titleOfSelectedItem containsString:@"airplay://192.168.1.80:7000"] &&
+                [vc.topDevicePopup.titleOfSelectedItem isEqualToString:vc.upnpDevicePopup.titleOfSelectedItem];
+
+            g_spy.failCastDevicesGet = YES;
+            [vc reloadUpnpDevicesForce:YES];
+            Pump(0.05);
+            g_spy.failCastDevicesGet = NO;
+            const BOOL failPreservesOffline =
+                [vc.upnpDevicePopup.titleOfSelectedItem containsString:@"airplay://192.168.1.80:7000"] &&
+                vc.upnpStatusLabel.stringValue.length > 0;
+
+            g_spy.settingsKV[@"upnpdev"] = @"";
+            [vc reloadSettings];
+            [vc reloadUpnpDevicesForce:NO];
+            Pump(0.06);
+            RLPSetLanguage(@"en");
+            [vc applyLanguage];
+            const BOOL enEmptyOk =
+                !HasCJKChars(vc.topDeviceLabel.stringValue) &&
+                !HasCJKChars(vc.upnpLabel.stringValue) &&
+                !HasCJKChars(vc.upnpDevicePopup.titleOfSelectedItem) &&
+                !HasCJKChars(vc.upnpStatusLabel.stringValue) &&
+                !HasCJKChars(vc.sigOut.stringValue);
+
+            g_spy.castDevicesGetList = @[
+                @{@"friendlyName": @"RoonReady Very Long Network Renderer Title In Listening Room Audio Stack",
+                  @"location": @"http://192.168.1.99:49152/desc.xml",
+                  @"kind": @"upnp"},
+            ];
+            g_spy.settingsKV[@"upnpdev"] = @"http://192.168.1.99:49152/desc.xml";
+            [vc reloadUpnpDevicesForce:NO];
+            [vc reloadSettings];
+            Pump(0.06);
+            const BOOL enDevOk =
+                !HasCJKChars(vc.topDeviceLabel.stringValue) &&
+                !HasCJKChars(vc.upnpLabel.stringValue) &&
+                !HasCJKChars(vc.upnpStatusLabel.stringValue) &&
+                !HasCJKChars(vc.sigOut.stringValue);
+            Ck(zhOfflineSaved && failPreservesOffline && enEmptyOk && enDevOk,
+               "14e: offline saved fallback, empty/error state, and full English copy without CJK",
+               [NSString stringWithFormat:@"off=%d fail=%d enE=%d enD=%d topL=%@ pop=%@ msg=%@ sig=%@",
+                zhOfflineSaved, failPreservesOffline, enEmptyOk, enDevOk,
+                vc.topDeviceLabel.stringValue, vc.upnpDevicePopup.titleOfSelectedItem,
+                vc.upnpStatusLabel.stringValue, vc.sigOut.stringValue]);
+
+            // 14f: 680x600 / 900x600 / 1180x760 下（zh & en，含超长渲染器名）wb.rack.output 与 wb.trackcard 子控件不越界
+            BOOL upnpGeoOk = YES;
+            NSMutableArray<NSString *> *geoErrs = [NSMutableArray array];
+            for (NSString *lang in @[@"zh", @"en"]) {
+                RLPSetLanguage(lang);
+                [vc applyLanguage];
+                for (NSValue *szVal in @[[NSValue valueWithSize:NSMakeSize(680, 600)],
+                                         [NSValue valueWithSize:NSMakeSize(900, 600)],
+                                         [NSValue valueWithSize:NSMakeSize(1180, 760)]]) {
+                    NSSize sz = szVal.sizeValue;
+                    vc.view.frame = NSMakeRect(0, 0, sz.width, sz.height);
+                    [vc.view layoutSubtreeIfNeeded];
+                    NSArray<NSView *> *cards = @[vc.rackOutput, FindSubviewByIdentifier(vc.view, @"wb.trackcard")];
+                    for (NSView *card in cards) {
+                        if (!card) { upnpGeoOk = NO; continue; }
+                        for (NSView *sub in @[vc.upnpWrap, vc.upnpLabel, vc.upnpDevicePopup, vc.upnpScanBtn, vc.upnpStatusLabel,
+                                              vc.topDeviceBar, vc.topBackendLabel, vc.topBackendSeg, vc.topHogCheck,
+                                              vc.topDeviceLabel, vc.topDevicePopup, vc.topDeviceRefreshBtn]) {
+                            if (![sub isDescendantOf:card] || sub.isHidden) continue;
+                            NSRect r = [sub convertRect:sub.bounds toView:card];
+                            if (NSMinX(r) < -1.0 || NSMaxX(r) > card.bounds.size.width + 1.0) {
+                                upnpGeoOk = NO;
+                                [geoErrs addObject:[NSString stringWithFormat:@"%@ %.0fx%.0f %@ r=%@ cardW=%.1f",
+                                                    lang, sz.width, sz.height, sub.identifier ?: NSStringFromClass(sub.class),
+                                                    NSStringFromRect(r), card.bounds.size.width]];
+                            }
+                        }
+                    }
+                }
+            }
+            Ck(upnpGeoOk,
+               "14f: Top backend/device bar & output rack widgets fit within card bounds at 680/900/1180 in zh & en",
+               [geoErrs componentsJoinedByString:@" | "]);
+
+            // 14g: 顶部后端开关与底部 backendPopup / hogCheck / sigOut 双向同步及失败回滚
+            RLPSetLanguage(@"zh");
+            [vc applyLanguage];
+            [g_spy.postLog removeAllObjects];
+            vc.topBackendSeg.selectedSegment = 1; // coreaudio-shared
+            [vc onTopBackendChanged:vc.topBackendSeg];
+            Pump(0.06);
+            const BOOL topToSharedOk =
+                [vc.settings[@"backend"] isEqualToString:@"coreaudio-shared"] &&
+                vc.topBackendSeg.selectedSegment == 1 &&
+                vc.backendPopup.indexOfSelectedItem == 1 &&
+                !vc.hogCheck.enabled && !vc.topHogCheck.enabled &&
+                [vc.sigOut.stringValue containsString:@"coreaudio-shared"];
+
+            vc.topBackendSeg.selectedSegment = 0; // coreaudio
+            [vc onTopBackendChanged:vc.topBackendSeg];
+            Pump(0.06);
+            const BOOL topToCoreOk =
+                [vc.settings[@"backend"] isEqualToString:@"coreaudio"] &&
+                vc.topBackendSeg.selectedSegment == 0 &&
+                vc.backendPopup.indexOfSelectedItem == 0 &&
+                vc.hogCheck.enabled && vc.topHogCheck.enabled;
+
+            vc.topHogCheck.state = NSControlStateValueOff;
+            [vc onHogChanged:vc.topHogCheck];
+            Pump(0.06);
+            const BOOL hogSyncOk =
+                [vc.settings[@"hogexcl"] isEqualToString:@"0"] &&
+                vc.hogCheck.state == NSControlStateValueOff &&
+                vc.topHogCheck.state == NSControlStateValueOff;
+
+            g_spy.failSettingsPost = YES;
+            vc.topBackendSeg.selectedSegment = 2; // upnp (fails)
+            [vc onTopBackendChanged:vc.topBackendSeg];
+            Pump(0.06);
+            g_spy.failSettingsPost = NO;
+            const BOOL topFailRollback =
+                [vc.settings[@"backend"] isEqualToString:@"coreaudio"] &&
+                vc.topBackendSeg.selectedSegment == 0 &&
+                vc.backendPopup.indexOfSelectedItem == 0;
+
+            RLPSetLanguage(@"en");
+            [vc applyLanguage];
+            const BOOL enSegOk =
+                !HasCJKChars(vc.topBackendLabel.stringValue) &&
+                !HasCJKChars([vc.topBackendSeg labelForSegment:0]) &&
+                !HasCJKChars([vc.topBackendSeg labelForSegment:1]) &&
+                !HasCJKChars([vc.topBackendSeg labelForSegment:2]) &&
+                !HasCJKChars(vc.topHogCheck.title);
+
+            Ck(topToSharedOk && topToCoreOk && hogSyncOk && topFailRollback && enSegOk,
+               "14g: top backend segmented switch & hog checkbox stay synced with rack controls, rollback on failure, and translate cleanly",
+               [NSString stringWithFormat:@"shared=%d core=%d hog=%d rb=%d en=%d seg=%ld pop=%ld bk=%@ hogS=%@",
+                topToSharedOk, topToCoreOk, hogSyncOk, topFailRollback, enSegOk,
+                (long)vc.topBackendSeg.selectedSegment, (long)vc.backendPopup.indexOfSelectedItem,
+                vc.settings[@"backend"], vc.settings[@"hogexcl"]]);
+        }
+
+        // -----------------------------------------------------------------
+        // 15. 切设备/后端后 POST /api/settings 返回 kv 时，工作台即时同步 DSD / 采样率 / 噪声整形 / "src"
+        // -----------------------------------------------------------------
+        {
+            RLPWorkbenchViewController *vc = MakeOffscreenWorkbench();
+            g_spy.failSettingsPost = NO;
+            g_spy.returnNilForSettingsPost = NO;
+            g_spy.devicesGetList = @[
+                @{@"id": @"ca-256", @"name": @"DAC 256", @"dop": @YES},
+                @{@"id": @"ca-96", @"name": @"PCM 96 DAC", @"dop": @NO},
+            ];
+            g_spy.settingsKV = [@{
+                @"backend": @"coreaudio",
+                @"device": @"ca-256",
+                @"upnpdev": @"",
+                @"dsd": @"256",
+                @"rate": @"src",
+                @"shaper": @"none",
+                @"modfamily": @"ec",
+                @"modorder": @"7",
+                @"modcut": @"0",
+            } mutableCopy];
+            [vc reloadDevices];
+            [vc reloadSettings];
+            Pump(0.06);
+
+            g_spy.customPostSettingsResponseKV = @{
+                @"backend": @"coreaudio",
+                @"device": @"ca-96",
+                @"dsd": @"0",
+                @"rate": @"96000",
+                @"shaper": @"auto",
+                @"modfamily": @"ec",
+                @"modorder": @"7",
+                @"modcut": @"0",
+            };
+            NSInteger idx96 = NSNotFound;
+            for (NSInteger i = 0; i < (NSInteger)vc.devicePopup.numberOfItems; ++i) {
+                id ro = [vc.devicePopup itemAtIndex:i].representedObject;
+                if ([ro isKindOfClass:[NSDictionary class]] && [ro[@"id"] isEqualToString:@"ca-96"]) {
+                    idx96 = i; break;
+                }
+            }
+            if (idx96 != NSNotFound) [vc.devicePopup selectItemAtIndex:idx96];
+            [vc onDeviceChanged:vc.devicePopup];
+            Pump(0.08);
+            const BOOL devAdaptOk =
+                idx96 != NSNotFound &&
+                [vc.settings[@"dsd"] isEqualToString:@"0"] &&
+                [vc.settings[@"rate"] isEqualToString:@"96000"] &&
+                [vc.settings[@"shaper"] isEqualToString:@"auto"] &&
+                vc.dsdSeg.selectedSegment == 0 &&
+                [vc.shaperPopup.titleOfSelectedItem isEqualToString:@"auto"] &&
+                [[vc.ratePopup.selectedItem representedObject] isEqualToString:@"96000"];
+            Ck(devAdaptOk,
+               "15a: onDeviceChanged merges returned kv and updates dsdSeg, shaperPopup, and ratePopup immediately",
+               [NSString stringWithFormat:@"idx=%ld dsd=%@(%ld) rate=%@(%@) shaper=%@(%@)",
+                (long)idx96,
+                vc.settings[@"dsd"], (long)vc.dsdSeg.selectedSegment,
+                vc.settings[@"rate"], [vc.ratePopup.selectedItem representedObject],
+                vc.settings[@"shaper"], vc.shaperPopup.titleOfSelectedItem]);
+
+            // 15b: selectUpnpDeviceFromPopup & postSettings sync DSD64 / shared src + reloadRates preserves @"src"
+            g_spy.castDevicesGetList = @[
+                @{@"id": @"http://127.0.0.1:2/upnp", @"location": @"http://127.0.0.1:2/upnp", @"name": @"Mock UPnP Renderer"},
+            ];
+            g_spy.customPostSettingsResponseKV = nil;
+            [vc postSettings:@{@"backend": @"upnp"}];
+            [vc reloadUpnpDevicesForce:YES];
+            Pump(0.08);
+            g_spy.customPostSettingsResponseKV = @{
+                @"backend": @"upnp",
+                @"upnpdev": @"http://127.0.0.1:2/upnp",
+                @"dsd": @"64",
+                @"rate": @"src",
+                @"shaper": @"none",
+                @"modfamily": @"dsd",
+                @"modorder": @"5",
+                @"modcut": @"0",
+            };
+            NSInteger uidx = NSNotFound;
+            for (NSInteger i = 0; i < (NSInteger)vc.upnpDevicePopup.numberOfItems; ++i) {
+                id ro = [vc.upnpDevicePopup itemAtIndex:i].representedObject;
+                if ([ro isKindOfClass:[NSDictionary class]] && [ro[@"id"] isEqualToString:@"http://127.0.0.1:2/upnp"]) {
+                    uidx = i; break;
+                }
+            }
+            if (uidx != NSNotFound) [vc.upnpDevicePopup selectItemAtIndex:uidx];
+            [vc selectUpnpDeviceFromPopup:vc.upnpDevicePopup];
+            Pump(0.08);
+            const BOOL upnpAdaptOk =
+                uidx != NSNotFound &&
+                [vc.settings[@"dsd"] isEqualToString:@"64"] &&
+                vc.dsdSeg.selectedSegment == 1 &&
+                [vc.modFamilyPopup.titleOfSelectedItem isEqualToString:@"dsd"] &&
+                [vc.modOrderPopup.titleOfSelectedItem isEqualToString:@"5"] &&
+                ([vc.ratePopup indexOfItemWithRepresentedObject:@"src"] != NSNotFound);
+
+            g_spy.customPostSettingsResponseKV = @{
+                @"backend": @"coreaudio-shared",
+                @"dsd": @"0",
+                @"rate": @"src",
+                @"shaper": @"auto",
+            };
+            [vc postSettings:@{@"backend": @"coreaudio-shared"}];
+            Pump(0.08);
+            const BOOL sharedAdaptOk =
+                [vc.settings[@"dsd"] isEqualToString:@"0"] &&
+                [vc.settings[@"rate"] isEqualToString:@"src"] &&
+                vc.dsdSeg.selectedSegment == 0 &&
+                [[vc.ratePopup.selectedItem representedObject] isEqualToString:@"src"];
+
+            g_spy.customPostSettingsResponseKV = nil;
+            Ck(upnpAdaptOk && sharedAdaptOk,
+               "15b: selectUpnpDeviceFromPopup and postSettings sync returned kv and reloadRates keeps src item",
+               [NSString stringWithFormat:@"upnpOk=%d(uidx=%ld,fam=%@,ord=%@,srcIdx=%ld) sharedOk=%d dsd=%@(%ld) rateObj=%@",
+                upnpAdaptOk, (long)uidx, vc.modFamilyPopup.titleOfSelectedItem, vc.modOrderPopup.titleOfSelectedItem,
+                (long)[vc.ratePopup indexOfItemWithRepresentedObject:@"src"],
+                sharedAdaptOk, vc.settings[@"dsd"], (long)vc.dsdSeg.selectedSegment,
+                [vc.ratePopup.selectedItem representedObject]]);
         }
 
         method_setImplementation(shared, origShared);

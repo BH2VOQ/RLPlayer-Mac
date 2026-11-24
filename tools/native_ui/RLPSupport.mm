@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <dlfcn.h>
 
 static NSString *gLang = @"zh";
 
@@ -1190,4 +1191,34 @@ void RLPDiagTelemetryResetForAudit(void) {
         st->inFlight = NO;
         ++st->inFlightToken;
     });
+}
+
+@protocol RLPUTTypeClassProtocol
++ (nullable id)typeWithFilenameExtension:(NSString *)filenameExtension;
+@end
+
+void RLPConfigureOpenPanelFileTypes(NSOpenPanel *panel, NSArray<NSString *> *extensions) {
+    if (!panel || !extensions.count) return;
+    if (@available(macOS 11.0, *)) {
+        Class utCls = NSClassFromString(@"UTType");
+        if (!utCls) {
+            dlopen("/System/Library/Frameworks/UniformTypeIdentifiers.framework/UniformTypeIdentifiers", RTLD_LAZY);
+            utCls = NSClassFromString(@"UTType");
+        }
+        if (utCls && [(id)utCls respondsToSelector:@selector(typeWithFilenameExtension:)]) {
+            NSMutableArray *types = [NSMutableArray arrayWithCapacity:extensions.count];
+            for (NSString *ext in extensions) {
+                id ut = [(id<RLPUTTypeClassProtocol>)utCls typeWithFilenameExtension:ext];
+                if (ut) [types addObject:ut];
+            }
+            if (types.count) {
+                panel.allowedContentTypes = types;
+                return;
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    panel.allowedFileTypes = extensions;
+#pragma clang diagnostic pop
 }
