@@ -3,48 +3,70 @@
   <a href="README.zh-CN.md"><img alt="简体中文" src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-switch%20language-64748b?style=flat-square"></a>
 </p>
 
+<h1 align="center">RLPlayer for macOS</h1>
+
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-en.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-en-light.svg">
-    <img src="docs/images/hero-en.svg" alt="RLPlayer — macOS HiFi playback engine" width="100%">
-  </picture>
+  <b>Native Apple Silicon HiFi Playback Engine · Bit-Perfect CoreAudio Hog · In-House DSP · SDM/DSD · 20-Band PEQ</b>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/HiFi-DSP%20%C2%B7%20DoP%20%C2%B7%20bit--perfect-22d3ee?style=flat-square" alt="HiFi">
   <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases"><img src="https://img.shields.io/github/v/release/BH2VOQ/RLPlayer-Mac?include_prereleases&label=release&style=flat-square&color=22d3ee" alt="Release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B%20%C2%B7%20arm64-0b1120?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+ · arm64">
-  <img src="https://img.shields.io/badge/ctest-139%2F139-34d399?style=flat-square" alt="ctest 139/139">
+  <img src="https://img.shields.io/badge/ctest-251%20cases-34d399?style=flat-square" alt="ctest 251 cases">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-a78bfa?style=flat-square" alt="GPL-3.0-or-later">
   <img src="https://img.shields.io/badge/runtime%20deps-0-f472b6?style=flat-square" alt="No runtime dependencies">
 </p>
 
 <p align="center">
-  <b>HiFi signal chain · upsampling · noise shaping · SDM/DSD · convolution · 20-band PEQ</b>
-
-  <sub>Measured DSP results and validation limits are documented separately; playback alone is not a fidelity measurement.</sub>
-
-  <sub>Current version follows the Release badge above · <a href="ROADMAP-1.1.x.md">Roadmap</a> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">Changelog</a></sub>
+  <sub>Current version: <b>v2.0.14-beta1</b> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">Releases &amp; Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a></sub>
 </p>
 
 ---
 
 <p align="center">
-  <img src="docs/images/ui-albums.png" alt="RLPlayer main window: album grid with playback controls in the bottom bar" width="100%">
+  <img src="website/assets/ui-hero.webp" alt="RLPlayer for macOS — Main Interface" width="100%">
 </p>
 
-|  52  |     4    |    6230   |    136   |   0   |
-| :--: | :------: | :-------: | :------: | :---: |
-| Upsampling presets | SDM modulator families | OPRA headphone curves | ctest cases | Runtime dependencies |
+| 52 | 4 | 6,230 | 251 | 0 |
+| :---: | :---: | :---: | :---: | :---: |
+| Upsampling Presets | SDM Modulator Families | OPRA Headphone Curves | `ctest` Test Cases | Runtime Dependencies |
 
-## Why RLPlayer
+---
 
-- **The whole chain is in-house, not a player shell.** Upsampling, dither/noise shaping, SDM/DSD modulation, convolution and the 20-band PEQ are this repository's own DSP code; every module has numeric criteria — “it makes a sound” is not a pass.
-- **Numbers, not opinions.** Upsampling stopband **−189.1 dB**, DSD decimation THD+N **99.37 dB**, partitioned convolution error **≤6.1e-14**, shared output at 16/24/32 bit all **0 LSB**. Full table under [Objective measurements](#objective-measurements).
-- **Native macOS.** A single-process `.app` (NSWindow + WKWebView), CoreAudio Hog, Metal acceleration (upsampling on by default, convolution off by default based on measurements), native arm64, ffmpeg/ffprobe bundled; no runtime dependencies to install.
+## Why RLPlayer? (Core Advantages)
 
-## Signal chain in one minute
+RLPlayer for macOS is built from the ground up as a **measurement-driven, native Apple Silicon HiFi engine**—not an Electron wrapper or a thin GUI around a third-party playback library.
+
+### 1. 100% In-House DSP Chain — Numbers Over Guesswork
+- **Polyphase Sinc Upsampling**: Arbitrary rational ratios across **52 named presets** (Kaiser / Gaussian / Blackman-Harris windows, linear / minimum / mixed phase, tight variants), achieving **−189.10 dB** stopband attenuation and **0.0000 dB** passband ripple.
+- **Dither & Noise Shaping**: `NS1` / `NS4` / `NS5` / `NS9` / `LNS15` paired with `RPDF` / `TPDF` / `Gauss1` / `Shaped`. At 44.1 kHz → 705.6 kHz, `NS9` delivers **3.5 → 86.5 dB** in-band SNR gain over TPDF.
+- **SDM / DSD Modulation**: Four modulator families—Butterworth (`DSD5` / `DSD7`), 7th-order Chebyshev, EC error-feedback, and AHM multi-level. `EC-5` reaches **113.5 dB** in-band SNR at DSD256 (`AHM-8bit` reaches **131.6 dB**).
+- **Zero-Latency Partitioned Convolution**: Uniformly partitioned FFT convolution with **≤ 6.1e-14** relative error against direct convolution.
+- **20-Band Parametric EQ & Overload Protection**: ISO 1/3-octave RBJ biquads (±24 dB range, draggable curve nodes with 0 px lag, `⌥ Option` fine frequency sweep), automatic preamp anti-clipping, and oversampled inter-sample peak (ISP) protection.
+
+### 2. Engineered for Apple Silicon (`arm64`)
+- **NEON SIMD & Persistent DSP Thread Pool**: Resampling and core DSP stages are accelerated with ARM NEON SIMD instructions and backed by a persistent multi-core DSP thread pool to eliminate per-track thread spin-up jitter.
+- **Dynamic Metal GPU Acceleration**: `librtagpu.dylib` compiles MSL kernels at runtime—boosting 44.1k → 352.8k upsampling by **29×** (and 44.1k → 384k by **5.5×**). Based on real M-series benchmarks, GPU convolution is kept off by default because CPU FFT outperforms GPU at 4,096-sample production block sizes.
+- **Zero External Runtime Dependencies**: Distributed as a standalone `.app` bundle with LGPL FFmpeg/FFprobe 8.1.2 and Metal kernels built in.
+
+### 3. True Bit-Perfect Hardware Control on macOS
+- **CoreAudio Exclusive (Hog Mode, On by Default)**: Uses AUHAL + Hog preemption + **physical format lock** (`kAudioStreamPropertyPhysicalFormat`, read back and verified) to bypass the system mixer. On conflict, it reports the real `DeviceBusy` status and blocking PID instead of misleading format errors.
+- **Honest Status Reporting (6-State Bit-Perfect Badge)**: Separately tracks Passthrough, PCM→PCM, PCM→DSD, and DSD→DSD bit-perfect status and explicitly states the exact downgrade reason whenever a path is not bit-perfect (e.g., `float32`-only endpoints or shared mode).
+- **DoP & Network Casting**:
+  - **DoP**: 24-bit carrier encapsulation for DSD on macOS, never silently falling back to shared mode.
+  - **UPnP / DLNA**: SSDP discovery, AVTransport control, renderer capability alignment, and byte-identical local file serving.
+  - **AirPlay (Cast to Device)**: Direct plaintext AirPlay 1 / RAOP receiver discovery (`ALAC 44.1 kHz / 16 bit / stereo`) with clock sync, bounded packet retransmission, and explicit conversion disclosure.
+
+### 4. Native Shell, Fast Library & Audio Health Check
+- **Single-Process Native Shell**: `NSWindow + WKWebView` with AppKit refinements and a custom `rlplayer://app/` scheme—**the main process opens no listening TCP port** during local playback. Instant window-hide and bounded shutdown (< 2.5 s) prevent close stalls while playing.
+- **60×–250× Faster Tag Parsing**: Native FLAC / WAV / MP3 / OGG metadata parsers bypass `ffprobe` subprocess overhead; full CUE sheet splitting supports UTF-16 / UTF-8 / GBK and 1/75-frame indices.
+- **6,230 OPRA Headphone Curves & Track Health Check**: One-click OPRA headphone target EQ loading, plus `/api/track/health` objective diagnostics (THD+N, noise floor, stereo correlation, mono compatibility, side/mid ratio, and 4× oversampled true peak dBTP).
+- **6-Source Metadata Enrichment & AI Integration**: QQ Music, NetEase Cloud Music, iTunes, lrclib, dizzylab, and Discogs with user-orderable priority, plus OpenAI-compatible AI enrichment (DeepSeek, OpenAI, OpenRouter, SiliconFlow, local Ollama, or custom gateways).
+
+---
+
+## Signal Chain in One Minute
 
 ```text
 FLAC 44.1 kHz / 16 bit
@@ -55,334 +77,127 @@ FLAC 44.1 kHz / 16 bit
   → CoreAudio Hog Mode     ·  physical format locked
 ```
 
-This chain is not an illustration: every item is visible with the actual values of the current playback in `/api/signal` and `rlplayer-playback.log`.
+Every stage above is live-inspected and verifiable in `/api/signal` and `rlplayer-playback.log`.
 
 ---
 
-## Features
-
-### 🎛 Signal chain
-
-- **Polyphase sinc upsampling** — arbitrary rational ratios, **52 named presets**; measured stopband **−189.1 dB**, passband ripple **0.0000 dB**
-- **Filter families** — Kaiser / Gaussian / Blackman-Harris windows, linear / minimum / mixed phase, tight variants; taps and cutoff adjustable
-- **Dither and noise shaping** — NS1/NS4/NS5/NS9/LNS15 + RPDF/TPDF/Gauss1/Shaped; NS9's in-band gain over TPDF is **3.5→86.5 dB** going from 44.1k to 705.6k
-- **SDM modulators** — four families: Butterworth (DSD5/DSD7), 7th-order Chebyshev, EC error feedback, AHM multi-level; EC-5 reaches **113.5 dB** in-band SNR at DSD256
-- **Native DSD reading** — DSF/DFF parsed directly, without ffmpeg; DirectSDM passes through bit-for-bit at matching rates; large files are streamed in chunks (1764000 frames, sample-exact)
-- **Convolution engine** — zero-latency uniformly partitioned FFT; relative error against direct convolution **≤6.1e-14**
-- **20-band PEQ** — RBJ biquads, 20 center frequencies on the ISO 1/3-octave grid, draggable nodes with real-time curve preview (0 px lag) and ±24 dB range (hold ⌥ Option to sweep frequency), automatic preamp anti-clipping; a single band at +6 dB measures **6.0000 dB** (44.1/48/96/192 kHz)
-- **Overload protection** — oversampled peak detection (ISP) with automatic pre-attenuation, volume ramping, DoP volume locked at 0 dB; full-scale / transient / recovery each have regression coverage
-
-### 🔊 Output
-
-- **CoreAudio exclusive (Hog, on by default)** — AUHAL + Hog preemption + **physical format lock** (`kAudioStreamPropertyPhysicalFormat`, read back and verified), avoiding resampling by the system mixer; reports real `DeviceBusy` and blocking PID on collision instead of misleading format errors
-- **CoreAudio shared** — the fallback when exclusive mode is unavailable; `bit_perfect()` explicitly returns false and says so; 16/24/32-bit measured deviation **0 LSB**
-- **DoP** — DSD wrapped in a 24-bit carrier, the only DSD output path on macOS; in DoP mode it never silently falls back to shared
-- **UPnP / DLNA** — SSDP discovery, AVTransport control and local file serving; track changes, playback state and errors follow the remote session. Source sample rate and bit depth are retained unless conversion is requested; the receiver may apply its own processing.
-- **AirPlay receivers in “Cast to device”** — discover compatible AirPlay 1 / RAOP receivers directly, without changing the macOS system output. This sender uses ALAC at **44.1 kHz / 16 bit / stereo**, with explicit conversion disclosure, clock synchronization and bounded packet retransmission. AirPlay 2 pairing/multi-room, password authentication and encrypted-only receivers are not supported. AirPlay output is **not advertised as end-to-end bit-perfect**.
-- **System AirPlay output** — CoreAudio transport-based detection, shared output without Hog, reported latency with its source, and explicit refusal of DoP/Native DSD. A DSD source can be decoded to PCM when PCM output is selected.
-- **Null** — runs the DSP without opening a device; all offline tests and automated checks go through it
-- **Three official presets** — bit-perfect passthrough / PCM upsampling / DSD upsampling (the backend also supports a fourth, PCM→DSD); the recommended preset is computed live from the current device's capabilities, with the downgrade reason stated
-
-### 🖥 Interface
-
-- **Single-process native shell** — NSWindow + WKWebView, pages served through a custom `rlplayer://app/` scheme to the in-process core, **the main process listens on no port** (only a temporary local serving service while casting over UPnP)
-- **Bilingual interface** — complete Chinese / English UI toggle under Settings → General → Appearance → Language with 1,513 curated Hi-Fi terminology pairs; macOS application menu follows the setting
-- **Three palettes × two UI styles** — dark / white / light blue, in an Apple Music style and a classic Hi-Fi workstation style
-- **Ten settings tabs** — Input / Output / PCM / SDM / General / EQ / Sound calibration / Metadata / Streaming / Diagnostics; the tab bar is fixed and only the content scrolls
-- **Six-state bit-perfect badge** — passthrough, PCM→PCM, PCM→DSD and DSD→DSD each distinguish whether they are bit-perfect, with the downgrade reason
-- **Full-bleed window** — hidden title bar + FullSizeContentView with content filling the window, and 5 px hot zones on all four edges for resizing
-
-### 📚 Library and tools
-
-- **Native tag parsing** — FLAC / WAV / MP3 / OGG read directly, **60×–250× faster** than going through ffprobe
-- **CUE sheet splitting** — UTF-16 / UTF-8 / GBK encodings and 1/75-frame indices
-- **Streaming and album detail** — Subsonic streaming page unified with local album card grid; dedicated album detail view with full metadata and batch actions
-- **Metadata enrichment** — six sources: QQ Music / NetEase Cloud Music / iTunes / lrclib / dizzylab / Discogs, with a **user-orderable priority list** in Settings (higher rows win); tags, cover art and lyrics are filled in automatically during playback
-- **AI enhancement (OpenAI-compatible)** — DeepSeek / OpenAI / OpenRouter / SiliconFlow / local Ollama or your own gateway: paste the base URL and key; the model list is fetched automatically and can also be typed in
-- **Online cover fetching** — embedded art → web art → 7-day negative cache; no negative caching while offline, and a miss is recorded only when the server explicitly says there is none
-- **OPRA headphone EQ** — **6230** headphone target curves built in, written into the EQ chain in one click
-- **Audio health check** — `/api/track/health` plus a per-track popup, objective metrics including THD+N, noise floor, stereo correlation, mono compatibility, and side/mid ratio; cached results carry algorithm generation tags
-- **Auto-update** — check, download, sha256 verification, install, rollback on failure; the channel is a public GitHub repository and the client holds no token
-- **Built-in feedback** — Settings → Diagnostics, describe the issue, optionally attach a diagnostic bundle (already redacted), forwarded through a Cloudflare Worker; the `.zip` can also be exported and sent manually
-
----
-
-## Interface
+## Interface Previews
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/ui-quickstart.png" alt="Quick start: three cards for the lossless library, exclusive passthrough engine, 20-band PEQ and OPRA, with the official recommended presets below"></td>
-    <td width="50%"><img src="docs/images/ui-album-detail.png" alt="Album detail: cover, track list, favorite and queue buttons on each row, play-all and shuffle at the top"></td>
+    <td width="50%"><img src="website/assets/ui-library.webp" alt="RLPlayer Library View"></td>
+    <td width="50%"><img src="website/assets/ui-dsp.webp" alt="RLPlayer DSP & Signal Chain"></td>
   </tr>
   <tr>
-    <td><b>Quick start</b> — three capability cards + three official presets, with the recommended preset computed live from the current device's capabilities.</td>
-    <td><b>Album detail</b> — the full album track list; each row can be favorited or queued on its own, and the whole album plays from the top.</td>
+    <td><b>Library &amp; Playback</b> — Album grid, Subsonic streaming integration, CUE track splitting, and live signal-chain status.</td>
+    <td><b>DSP &amp; Calibration</b> — Upsampling filters, SDM modulators, 20-band PEQ with draggable nodes, and 6,230 OPRA headphone curves.</td>
   </tr>
 </table>
 
 <details>
-
-<summary><b>More screenshots (artists / tracks / output / EQ)</b></summary>
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/ui-artists.png" alt="Artists view: circular cover grid, each artist labelled with an album count"></td>
-    <td width="50%"><img src="docs/images/ui-tracks.png" alt="Tracks view: flat list showing album, duration and favorite button"></td>
-  </tr>
-  <tr>
-    <td><b>Artists</b> — circular cover grid, with the album count on each card.</td>
-    <td><b>Tracks</b> — a flat list of the whole library, sort order selectable at the top right, and “+” on the right queues a single track.</td>
-  </tr>
-  <tr>
-    <td><img src="docs/images/ui-output.png" alt="Settings · Output: CoreAudio hardware passthrough backend, strict Hog Mode switch, output mode and sample-rate negotiation"></td>
-    <td><img src="docs/images/ui-peq.png" alt="Settings · EQ: 20-band parametric curve with draggable nodes, below it a per-band table of frequency, gain, Q and type"></td>
-  </tr>
-  <tr>
-    <td><b>Settings · Output</b> — Hog mode toggled in one click; sample rate and bit depth follow the device negotiation, and failures are reported.</td>
-    <td><b>Settings · EQ</b> — 20 draggable band nodes, automatic preamp anti-clipping, presets can be saved.</td>
-  </tr>
-</table>
-
+<summary><b>More UI Previews (Album Detail)</b></summary>
+<p align="center">
+  <img src="website/assets/ui-album-detail.webp" alt="RLPlayer for macOS — Album detail with the real track list" width="100%">
+</p>
 </details>
 
-### Keyboard shortcuts
+### Keyboard Shortcuts
 
-| Key                   | Action                                         |
-| --------------------- | ---------------------------------------------- |
-| `Space`               | Play / pause                                   |
-| `←` / `→`             | Previous / next track                          |
-| `Shift` + `←` / `→`   | Seek back / forward 5 s                        |
-| `↑` / `↓`             | Volume ±0.5 dB (hold `Shift` for ±0.1 dB)      |
-| `N` / `P` / `S`       | Next / previous / stop                         |
-| `L`                   | Lyrics page                                    |
-| `I`                   | Signal chain                                   |
-| `⌘` + `F`             | Search                                         |
-| `Esc`                 | Go back one level                              |
-
----
-
-## Install
-
-1. Download `RLPlayer-<version>-macOS-arm64.dmg` from [Releases](https://github.com/BH2VOQ/RLPlayer-Mac/releases)
-2. Double-click to mount, then drag `RLPlayer` into Applications
-3. If the first launch says the developer cannot be verified: right-click → Open, or go to System Settings → Privacy & Security → Open Anyway
-
-The app is ad-hoc signed and not notarized by Apple. That is fine for personal use and internal distribution; for public distribution, Developer ID signing plus notarization is recommended.
-
-### System requirements
-
-| Item         | Requirement                                                        |
-| ------------ | ------------------------------------------------------------------ |
-| OS           | macOS 13.0 or later                                                |
-| Chip         | Apple Silicon (arm64); **arm64 only**, Intel Macs are not supported |
-| Dependencies | None. The `.app` bundles ffmpeg / ffprobe and the Metal kernel     |
+| Key | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| `←` / `→` | Previous / next track |
+| `Shift` + `←` / `→` | Seek back / forward 5 s |
+| `↑` / `↓` | Volume ±0.5 dB (hold `Shift` for ±0.1 dB) |
+| `N` / `P` / `S` | Next / previous / stop |
+| `L` | Lyrics view |
+| `I` | Signal chain |
+| `⌘` + `F` | Search |
+| `Esc` | Go back one level |
 
 ---
 
-## Build from source
+## Installation
+
+1. Download `RLPlayer-<version>-macOS-arm64.dmg` from [Releases](https://github.com/BH2VOQ/RLPlayer-Mac/releases).
+2. Double-click to mount and drag `RLPlayer` into `Applications`.
+3. On first launch, if macOS warns that the developer cannot be verified: right-click → **Open**, or go to **System Settings → Privacy & Security → Open Anyway**.
+
+> The binary is ad-hoc signed and not notarized by Apple, which is sufficient for personal and internal use.
+
+### System Requirements
+
+| Item | Requirement |
+| --- | --- |
+| OS | macOS 13.0 or later |
+| Architecture | Apple Silicon (`arm64` only; Intel Macs are not supported) |
+| Dependencies | None (FFmpeg / FFprobe and Metal kernels are bundled inside `.app`) |
+
+---
+
+## Build from Source & Testing
 
 ```bash
 # Prerequisites: CMake ≥ 3.20, Xcode Command Line Tools
 cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac -j8
-ctest --test-dir build-mac --output-on-failure     # 113/113
+ctest --test-dir build-mac --output-on-failure     # 251 test cases
 
-# Build the .app (the script gates architecture / deployment target / signing, and fails if any check is off)
+# Package .app (enforces architecture, deployment target, and signing gates)
 bash tools/make_app_mac.sh
 # → dist-mac/RLPlayer.app
 ```
 
-> If CMake lives inside `CMake.app` on your machine, just call it by full path; the gate is the **exit code**, not the last line.
+Verification **does not open audio hardware by default**: offline analysis and the Null backend run first, and any audible test runs at ≤ −60 dBFS.
 
 ---
 
-## Tests
+## Objective Measurements
 
-```bash
-ctest --test-dir build-mac --output-on-failure
-```
+Measured on Apple M4 / macOS:
 
-**113/113 passing.** Covers DSP numerics, output paths, networking, metadata, the UI decision layer and the update installer logic.
-
-Verification **does not open audio devices by default**: offline analysis and the Null backend come first; every test that has to make sound runs at ≤ −60 dBFS.
-
-Some figures are not in ctest (the GPU performance table, the full GPU precision matrix, room correction and health-check values); those are run manually through probes such as `gpu_precision` and recorded under `docs/`.
-
----
-
-## Objective measurements
-
-Every number below is measured on this machine (Apple M4 / macOS 27.0.1), not estimated.
-
-| Item                                                        | Measured                        |
-| ----------------------------------------------------------- | ------------------------------- |
-| Upsampling stopband attenuation (44.1k → 384k)              | **−189.10 dB**                  |
-| Upsampling passband ripple                                  | **0.0000 dB**                   |
-| Upsampling worst harmonic                                   | **−134.54 dBc**                 |
-| DSD source decimation THD+N (DSD64 → 176.4k)                | **99.37 dB**                    |
-| EC-5 in-band SNR (DSD256)                                   | **113.5 dB**                    |
-| AHM-8bit in-band SNR (DSD256)                               | **131.6 dB**                    |
-| 20-band PEQ, single band at +6 dB                           | **6.0000 dB**                   |
-| Partitioned FFT convolution vs direct convolution           | relative error **≤6.1e-14**     |
-| CoreAudio shared path, bit-for-bit comparison               | 16/24/32 bit all **0 LSB**      |
-| UPnP served byte count                                      | **byte-identical to the file**  |
+| Metric | Measured Result |
+| --- | --- |
+| Upsampling stopband attenuation (44.1k → 384k) | **−189.10 dB** |
+| Upsampling passband ripple | **0.0000 dB** |
+| Upsampling worst harmonic | **−134.54 dBc** |
+| DSD source decimation THD+N (DSD64 → 176.4k) | **99.37 dB** |
+| EC-5 in-band SNR (DSD256) | **113.5 dB** |
+| AHM-8bit in-band SNR (DSD256) | **131.6 dB** |
+| 20-band PEQ, single band at +6 dB | **6.0000 dB** |
+| Partitioned FFT convolution vs direct convolution | relative error **≤ 6.1e-14** |
+| CoreAudio shared path bit-for-bit comparison | 16/24/32-bit all **0 LSB** |
+| UPnP served byte count | **byte-identical to source** |
 
 ---
 
-## GPU
+## Known Limitations
 
-<details>
-
-<summary><b>Metal kernels: upsampling is worth enabling, convolution is off by default (click for measurements)</b></summary>
-
-The Metal kernel (`librtagpu.dylib`, MSL compiled at runtime) is **loaded dynamically**: if `dlopen` fails it falls back to CPU without losing functionality.
-
-- **Upsampling: worth enabling** — 44.1k → 352.8k is **29×** faster, 44.1k → 384k is **5.5×** faster
-- **Convolution: off by default** — a production block holds only 4096 samples, far below the GPU break-even point (measured: it needs n ≥ 32768 to win), so it is slower than CPU at any IR length: **2.15×–3.57×** measured per block (n=4096, block=1024); **3.4×–8.3×** when measured against the real overlap-save input volume
-
-The functionality stays available and numerically correct (worst convolution case **−126.5 dB** relative RMS), but enabling it on the Mac is a net loss. The UI already marks it as not recommended. Full measurements for both accounting conventions are in [GPU precision](<docs/GPU精度实测.md>) and [docs/GPU卷积与升频效率细查.md](<docs/GPU卷积与升频效率细查.md>).
-
-</details>
+- **Native DSD is unavailable on macOS**: CoreAudio defines PCM only; `dsdnative=1` explicitly returns an error instead of silently downgrading. DSD output uses DoP.
+- **Bit-perfect requires a lockable integer physical format**: Endpoints whose physical layer offers only `float32` (built-in speakers, virtual devices) cannot pass integer samples bit-for-bit and are marked accordingly.
+- **AirPlay compatibility**: Direct casting targets plaintext AirPlay 1 / RAOP receivers (`44.1 kHz / 16 bit / stereo` ALAC); AirPlay 2 multi-room, password auth, and encrypted-only receivers are not supported.
+- **UPnP casting and CUE tracks**: UPnP renderers stream discrete files; clicking a CUE-split track while casting reports an explicit error.
+- **GPU upsampling precision**: Apple GPUs lack double precision, so the Metal upsampling path uses float32 (difference from CPU is ~−132.6 dB).
+- **Apple Silicon only**: `x86_64` builds are rejected.
 
 ---
 
-## 🗺 Roadmap
+## Documentation & Project Origin
 
-> The current version follows the Release badge above. **1.1.4** is the stable release for audio analysis, AI rail density toggle, side rails edge pinning, and performance optimizations. The full criteria, validation limits and open items are in
-> **[ROADMAP-1.1.x.md](ROADMAP-1.1.x.md)**.
+- [GPU precision measurements](<docs/GPU精度实测.md>) · [GPU efficiency tests](<docs/GPU卷积与升频效率细查.md>)
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
-| Version   | Theme                                                              | Status     |
-| --------- | ------------------------------------------------------------------ | ---------- |
-| **1.1.0** | Baseline release                                                   | ✅ Released |
-| **1.1.1** | Diagnostics, streaming overhaul, bilingual UI & cast/PEQ fixes     | ✅ Released |
-| **1.1.2** | **AirPlay receiver discovery / casting** + DSD playback reliability | ✅ Released (offline-verified) |
-| **1.1.2.1** | Hotfix: no false “PCM upsampling” when casting, honest AirPlay labels, source→wire bit-exact proof | ✅ Released |
-| **1.1.3** | **UPnP/DLNA cast upsampling** + LLM model list                      | ✅ Released (offline-verified) |
-| **1.1.3.1** | Cast upsampling: explicit **force target rate** for renderers that under-declare | ✅ Released |
-| **1.1.3.2** | Black-background logo; real app logo in the sidebar brand slot | ✅ Released |
-| **1.1.4** | **Single-track audio analysis** — L0/L1/L2 folding, true peak dBTP (4× oversampling); AI rail density toggle & edge pinning; instant 512px cover cache; standard Edit menus | ✅ Released |
-| **1.1.5** | Library lookup (album context / asynchronous knowledge)            | 🧭 Planned  |
-| **1.1.6** | AI summary streaming and stage progress                            | 🧭 Planned  |
-| **1.1.7** | Batch cover backfill (resume / per-source stats / silhouette rejection) | 🧭 Planned |
-| **1.1.8** | Safe cover write-back (off by default)                             | 🧭 Planned  |
-| **1.1.9** | macOS platform and performance (QoS / App Nap / caching / benchmarks) | 🧭 Planned |
-| **1.2.0** | Room measurement wizard (real-machine acceptance)                  | 🧭 Planned  |
-| **1.2.1** | PCM / SRC correctness & preset catalogue alignment | 🧭 Planned |
-| **1.2.2** | End-to-end double path for DSD | 🧭 Planned |
-| **1.2.3** | DSD multi-stage interpolation, CPU performance & backend self-report | 🧭 Planned |
-| **1.2.4** | SDM stability and observability | 🧭 Planned |
-| **1.2.5** | Device capabilities and conditional high-rate support | 🧭 Planned |
-| **1.3.0** | Stable integration and support matrix | 🧭 Planned |
-
-```mermaid
-flowchart TB
-  A["1.1.2<br/>AirPlay + DSD reliability hotfix"]
-  B["1.1.3<br/>cast upsampling · LLM models"]
-  C["1.1.4 – 1.1.6<br/>audio analysis · library lookup<br/>AI streaming"]
-  D["1.1.7 – 1.1.9<br/>covers · write-back<br/>platform / performance"]
-  E["1.2.0<br/>room measurement + measurement baseline"]
-  F["1.2.1 – 1.2.3<br/>PCM/SRC · DSD double · cascade"]
-  G["1.2.4 – 1.2.5<br/>SDM stability · device capabilities"]
-  H["1.3.0<br/>stable integration"]
-  A --> B --> C --> D --> E --> F --> G --> H
-  classDef plan fill:#0f172a,stroke:#334155,color:#e2e8f0;
-  classDef next fill:#0e7490,stroke:#22d3ee,color:#ecfeff;
-  class A,B,C,D,E,F,G plan;
-  class H next;
-```
-
-**Release discipline**: every version starts with `-beta1`; during beta only bug fixes go in; a stable release ships only when P0/P1 are at zero. Version numbers are not reserved, and 1.3.0 is the ceiling.
-
----
-
-## Known limitations
-
-- **Native DSD is unavailable** — CoreAudio defines PCM only and has no native DSD path; `dsdnative=1` reports an explicit error instead of silently downgrading. DSD works only through DoP
-- **AirPlay compatibility** — the app's sender targets plaintext AirPlay 1 / RAOP receivers at 44.1 kHz / 16 bit / stereo. AirPlay 2 pairing/multi-room, password authentication and encrypted-only receivers are not supported; direct casting currently has no seek. Receiver processing and network loss prevent a general end-to-end bit-perfect promise. Final release changes are verified with silent loopback receivers; long-duration listening, network switching and sleep/resume are not claimed as tested.
-- **UPnP casting cannot play CUE-split tracks** — a renderer can only stream discrete files; clicking a CUE track during cast explicitly reports an error rather than falling back silently
-- **The room measurement wizard is currently hidden** — 7 transport-layer defects are fixed; the wizard and real microphone measurement are planned for **1.2.0**; the existing manual “EQ file / room correction IR” loading still works
-- **Hog is not exclusive kernel audio** — Hog takes over the device but does not block I/O from other processes; the real bit-perfect guarantee comes from the physical format lock
-- **Bit-perfect requires a lockable integer physical format** — endpoints whose physical layer offers only `float32` (built-in speakers, virtual devices) cannot pass integer samples bit-for-bit; the app plays there but reports "not bit-perfect" with the reason, never a green badge
-- **Other clients are sampled once, before the stream opens** — Hog does not block other processes from playing (measured); if another app starts playback mid-stream the summing mixer changes sample values and this is not detected live
-- **Changing tracks may change the hardware sample rate** — locking the physical format means a 44.1k → 96k switch makes the DAC click; Roon/Audirvana behave the same way
-- **GPU convolution is slower in production shape** — see the previous section
-- **GPU upsampling is not bit-exact** — Apple GPUs have no double precision, so it uses the float path; the difference from CPU is on the order of −132.6 dB
-- **7th-order 1-bit modulators** — automatically drop to 5th order below DSD128; the Chebyshev family always uses 5th order
-- **Fake-lossless detection** — AAC ≥128k is not detected; the design tradeoff is “rather miss it than flag it falsely”
-- **Input capture does not go through the DSP** — capture and monitoring are implemented, but monitor is a direct passthrough; the capture → DSP chain is not wired
-- **Intel Macs are not supported** — only arm64 is built; passing `x86_64` fails with a hard FATAL
-
-See the [development roadmap](ROADMAP-1.1.x.md) for unfinished features and acceptance criteria; historical test numbers apply only to the environment and version recorded in the report, and do not represent a re-measurement in this round.
-
----
-
-## Documentation
-
-| File | Contents |
-|---|---|
-| [ROADMAP-1.1.x.md](ROADMAP-1.1.x.md) | **Roadmap 1.1.1 → 1.3.0**: per-version tasks, criteria, dependencies, audio track and split lines |
-| [GPU precision measurements](<docs/GPU精度实测.md>) | Metal numeric precision, re-run commands and untested boundaries |
-| [GPU efficiency tests](<docs/GPU卷积与升频效率细查.md>) | Performance data at specific block sizes and its limits; the standalone probe re-run commands are not fully archived |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide: build, gates, commit conventions, what is not accepted |
-| [SECURITY.md](SECURITY.md) | Private security reporting channel and known design boundaries |
-| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Code of conduct |
-
----
-
-## Project origin
-
-This repository is an **independent macOS branch of RLPlayer**: the platform layer (audio output, GPU, window shell) has been rewritten against native macOS capabilities and **no longer merges with upstream**; version numbers start independently from `1.0.0`, and the current version follows the Release badge above .
-
-Upstream repository (Windows edition): **<https://github.com/okhuoyanyan/RLPlayer2>**
-
-This document describes only the actual capabilities of the macOS branch and does not cover other platform editions.
-
----
-
-## Contributing
-
-- Build, gates and commit conventions: [CONTRIBUTING.md](CONTRIBUTING.md)
-- For security issues, please **do not** open a public issue; see [SECURITY.md](SECURITY.md)
-- For feedback, prefer the in-app **Settings → Diagnostics → Send feedback** (optionally with a diagnostic bundle), or open an [issue](https://github.com/BH2VOQ/RLPlayer-Mac/issues)
-
-> There is only one acceptance rule: **every step must come with a reproducible measurement**. Conclusions like “I think it sounds better” are not accepted.
+This repository is an **independent macOS branch of RLPlayer** derived from upstream [okhuoyanyan/RLPlayer2](https://github.com/okhuoyanyan/RLPlayer2) (Windows edition), with its platform audio, GPU, and UI shell rewritten natively for macOS.
 
 ---
 
 ## License
 
-This project is released under the **GNU General Public License, version 3 or later**, SPDX identifier `GPL-3.0-or-later`.
+Released under **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`). See [LICENSE](LICENSE), [COPYRIGHT.md](COPYRIGHT.md), and [OPRA-NOTICE.txt](OPRA-NOTICE.txt).
 
-Copyright (C) 2026 BH2VOQ <https://github.com/BH2VOQ> — macOS branch  
-Copyright (C) 2026 rainlain <https://github.com/okhuoyanyan> — upstream RLPlayer2
-
-The full copyright structure (what is derived from upstream, what is new in this branch) is in [COPYRIGHT.md](COPYRIGHT.md).
-
-- Full terms in [LICENSE](LICENSE) at the repository root (official GPLv3 text, unmodified)
-- Every source file carries an `SPDX-License-Identifier: GPL-3.0-or-later` header
-- Binary distributions ship `LICENSE` and `OPRA-NOTICE.txt` inside `Contents/Resources/`
-
-In short: you may use, modify and redistribute this program freely, but **any redistribution must also be open source under GPLv3** and must keep the copyright and license notices. The program comes with no warranty.
-
-<details>
-<summary><b>Third-party components and licenses</b></summary>
-
-| Component | License | Relationship to this program |
-|---|---|---|
-| FFmpeg / FFprobe 8.1.2 | LGPL-2.1-or-later | Distributed as **standalone executables** inside the bundle and invoked by the main program as subprocesses; the build does not enable `--enable-gpl`, so this is the LGPL build. `otool -L` confirms the main program **links no** libav* library |
-| LAME (libmp3lame) | LGPL-2.0-or-later | Statically linked into that FFmpeg executable, not into the main program. `third_party/lame-arm64/COPYING` is the full GNU Library GPL v2 text, and `lame.h` says “either version 2 … or any later version”, hence 2.0-or-later |
-| OPRA headphone EQ data | CC BY-SA 4.0 | Attribution and share-alike scope in [OPRA-NOTICE.txt](OPRA-NOTICE.txt); it covers the data only and does not propagate to this program's source |
-
-Because FFmpeg runs as a separate process rather than a linked library, the GPLv3 of this project and its LGPL obligations toward FFmpeg do not conflict; replacing `Contents/MacOS/ffmpeg` with any compatible build satisfies the LGPL replaceability (relinking) requirement.
-
-</details>
-
----
+- FFmpeg / FFprobe 8.1.2 (`LGPL-2.1-or-later`) and LAME (`LGPL-2.0-or-later`) are distributed as standalone subprocess executables inside the bundle (not linked into the main binary).
+- OPRA headphone EQ data is licensed under `CC BY-SA 4.0`.
 
 <p align="center">
   <sub><b>English</b> (current) · <a href="README.zh-CN.md">简体中文</a></sub>
-</p>
-
-<p align="center">
-  <sub>If RLPlayer has been useful to you, a <a href="https://github.com/BH2VOQ/RLPlayer-Mac">Star on GitHub</a> is welcome and supports further development.</sub>
 </p>

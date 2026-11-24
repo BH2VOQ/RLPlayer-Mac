@@ -96,7 +96,7 @@ const assets = new Set();
 for (const match of html.matchAll(/\s(?:src|href)="((?!https?:|#|mailto:)[^"]+)"/g)) {
   assets.add(match[1]);
 }
-const optionalShots = new Set(['assets/ui-hero.webp', 'assets/ui-dsp.webp', 'assets/ui-library.webp', 'assets/ui-works.webp']);
+const optionalShots = new Set(['assets/ui-hero.webp', 'assets/ui-dsp.webp', 'assets/ui-library.webp', 'assets/ui-album-detail.webp']);
 let assetCount = 0;
 for (const asset of assets) {
   if (asset.startsWith('data:') || asset.startsWith('//')) continue;
