@@ -1,8 +1,8 @@
 {
-  "version": "2.0.14-beta1",
-  "notes": "Fixed window-close stalls while playing by hiding the window immediately, closing the core gate before queue drain, stopping page polling, SIGKILLing active FFmpeg decode pipes, making metadata/artwork throttles interruptible, and bounding shutdown waits to 2.5s; added NEON SIMD resampling, persistent parallel DSP thread pool, UPnP renderer capability alignment, and AppKit UI refinements. · 修复播放中点击关闭会卡住的问题：关窗即刻隐藏并提前关闸请求核心停机、停止各页轮询、立即终止解码管道并中断元数据/封面限流等待，同时收紧收尾等待上限至 2.5 秒；同步包含 NEON SIMD 重采样、常驻多核 DSP 线程池、UPnP 渲染器能力适配及原生界面细节修复。",
-  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v2.0.14-beta1/RLPlayer-2.0.14-beta1-macOS-arm64.dmg",
-  "sha256": "a864db5d96cb1303f6aea7988a90a2eed0e8e168d67920d2a4812a5ec5b3c4af",
-  "size": 10224663,
-  "published_at": "2026-11-24T11:18:00Z"
+  "version": "2.1.0",
+  "notes": "RLPlayer 2.1.0",
+  "download_url": "https://github.com/BH2VOQ/RLPlayer-Mac/releases/download/v2.1.0/RLPlayer-2.1.0-macOS-arm64.dmg",
+  "sha256": "1b5edd1ad82e16099c320318654e36f937b26bcf9b9b8b3bbc4cfe97afec732a",
+  "size": 10224876,
+  "published_at": "2026-11-26T05:12:00Z"
 }
