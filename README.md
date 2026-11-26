@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <sub>Current version: <b>v2.0.14-beta1</b> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">Releases &amp; Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a></sub>
+  <sub>Current version: <b>v2.1.0</b> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">Releases &amp; Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a></sub>
 </p>
 
 ---

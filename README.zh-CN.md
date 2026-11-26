@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <sub>当前版本：<b>v2.0.14-beta1</b> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">发布与更新日志</a> · <a href="CONTRIBUTING.md">参与贡献</a></sub>
+  <sub>当前版本：<b>v2.1.0</b> · <a href="https://github.com/BH2VOQ/RLPlayer-Mac/releases">发布与更新日志</a> · <a href="CONTRIBUTING.md">参与贡献</a></sub>
 </p>
 
 ---
